@@ -172,4 +172,51 @@ final class DeviceFamilyFramingTests: XCTestCase {
         let frame = Self.hex("aa1800ff28020f3de10128663c0000000000000000000000da855212")
         XCTAssertEqual(parseFrame(frame, family: .whoop4), parseFrame(frame))
     }
+
+    // MARK: - Family-aware Reassembler
+
+    func testReassemblerWhoop5SingleFrame() {
+        // validWhoop5 is a complete 20-byte frame: declLength=12 @ [2..4] -> total = 12 + 8 = 20.
+        let frame = Self.hex(Self.validWhoop5)
+        let r = Reassembler(family: .whoop5)
+        let out = r.feed(frame)
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(out.first, frame)
+    }
+
+    func testReassemblerWhoop5SplitAcrossFragments() {
+        // A whoop5 frame split mid-way must only emit once both halves have arrived.
+        let frame = Self.hex(Self.validWhoop5)
+        let r = Reassembler(family: .whoop5)
+        XCTAssertEqual(r.feed(Array(frame[0..<9])).count, 0)   // incomplete so far
+        let out = r.feed(Array(frame[9...]))                   // rest arrives
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(out.first, frame)
+    }
+
+    func testReassemblerWhoop5BackToBackFrames() {
+        // Two whoop5 frames in one buffer (the 16-byte CLIENT_HELLO then the 20-byte fixture).
+        let hello = DeviceFamily.whoop5ClientHello     // declLength=8 -> total 16
+        let frame = Self.hex(Self.validWhoop5)          // total 20
+        let r = Reassembler(family: .whoop5)
+        let out = r.feed(hello + frame)
+        XCTAssertEqual(out.count, 2)
+        XCTAssertEqual(out[0], hello)
+        XCTAssertEqual(out[1], frame)
+    }
+
+    func testReassemblerWhoop5DiscardsLeadingGarbage() {
+        let frame = Self.hex(Self.validWhoop5)
+        let r = Reassembler(family: .whoop5)
+        let out = r.feed([0x00, 0xFF, 0x12] + frame)   // junk before the 0xAA SOF
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(out.first, frame)
+    }
+
+    func testReassemblerWhoop4DefaultUnchanged() {
+        // Default family stays WHOOP 4.0: a 28-byte whoop4 frame (length=0x18=24 -> total 28).
+        let frame = Self.hex("aa1800ff28020f3de10128663c0000000000000000000000da855212")
+        XCTAssertEqual(Reassembler().feed(frame), [frame])
+        XCTAssertEqual(Reassembler(family: .whoop4).feed(frame), [frame])
+    }
 }

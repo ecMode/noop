@@ -16,6 +16,15 @@ public final class BLEManager: NSObject, ObservableObject {
     static let cmdNotifyChar   = CBUUID(string: "61080003-8d6d-82b8-614a-1c8cb0f8dcc6") // responses
     static let eventNotifyChar = CBUUID(string: "61080004-8d6d-82b8-614a-1c8cb0f8dcc6") // events
     static let dataNotifyChar  = CBUUID(string: "61080005-8d6d-82b8-614a-1c8cb0f8dcc6") // data (frag)
+    // WHOOP 5.0 / MG ("puffin") characteristics under the fd4b service. EXPERIMENTAL — see the
+    // whoop5 connect path in didDiscoverCharacteristics. fd4b0002 takes the static CLIENT_HELLO.
+    static let whoop5CmdWriteChar = CBUUID(string: "fd4b0002-cce1-4033-93ce-002d5875f58a")
+    static let whoop5NotifyChars: [CBUUID] = [
+        CBUUID(string: "fd4b0003-cce1-4033-93ce-002d5875f58a"),
+        CBUUID(string: "fd4b0004-cce1-4033-93ce-002d5875f58a"),
+        CBUUID(string: "fd4b0005-cce1-4033-93ce-002d5875f58a"),
+        CBUUID(string: "fd4b0007-cce1-4033-93ce-002d5875f58a"),
+    ]
     static let heartRateService = CBUUID(string: "180D")
     static let heartRateChar    = CBUUID(string: "2A37") // HR + R-R (works unbonded)
     static let batteryService   = CBUUID(string: "180F")
@@ -92,7 +101,7 @@ public final class BLEManager: NSObject, ObservableObject {
     /// specific peripheral rather than starting a fresh scan.
     private var restoredPeripheral: CBPeripheral?
     private var cmdCharacteristic: CBCharacteristic?
-    private let reassembler = Reassembler()
+    private var reassembler = Reassembler()
     private var seq: UInt8 = 0
     private var didBond = false
     private var clockRequested = false
@@ -163,6 +172,10 @@ public final class BLEManager: NSObject, ObservableObject {
     public func connect(model: WhoopModel = .persisted) {
         intentionalDisconnect = false
         selectedModel = model
+        // Frame the inbound stream for the chosen family (WHOOP 4.0 CRC8 vs WHOOP 5.0 CRC16/puffin)
+        // and tell the router which decoder to use. Fresh per connection so no stale bytes carry over.
+        reassembler = Reassembler(family: model.deviceFamily)
+        router.family = model.deviceFamily
         guard central.state == .poweredOn else {
             log("Bluetooth not powered on (state=\(central.state.rawValue)); cannot scan yet")
             return
@@ -662,8 +675,13 @@ extension BLEManager: CBPeripheralDelegate {
             case BLEManager.batteryService:
                 peripheral.discoverCharacteristics([BLEManager.batteryChar], for: s)
             case BLEManager.whoop5Service:
-                // WHOOP 5.0 / MG uses a different command + framing path we don't drive yet.
-                log("WHOOP 5/MG detected — full MG support is still in progress; this build connects WHOOP 4.0.")
+                // EXPERIMENTAL WHOOP 5.0/MG path: discover the puffin command + notify characteristics
+                // so we can send CLIENT_HELLO and receive frames. Live HR/battery still arrive over the
+                // standard 0x2A37/0x2A19 profiles (discovered alongside this); this custom path is
+                // unverified on MG hardware.
+                log("WHOOP 5/MG detected — discovering puffin characteristics (experimental).")
+                peripheral.discoverCharacteristics(
+                    [BLEManager.whoop5CmdWriteChar] + BLEManager.whoop5NotifyChars, for: s)
             default: break
             }
         }
@@ -683,6 +701,17 @@ extension BLEManager: CBPeripheralDelegate {
                 let bondFrame = WhoopCommand.getBatteryLevel.frame(seq: seq, payload: [0x00])
                 log("Bonding: confirmed write GET_BATTERY_LEVEL to 61080002")
                 peripheral.writeValue(Data(bondFrame), for: c, type: .withResponse)
+            case BLEManager.whoop5CmdWriteChar:
+                // EXPERIMENTAL WHOOP 5.0/MG: a 5/MG strap starts a session with the static CLIENT_HELLO
+                // frame, not the WHOOP4 confirmed-write bond. We write it UNacknowledged (it is a
+                // complete framed command), so the WHOOP4 didWriteValueFor bond+handshake path never
+                // fires for a 5/MG strap. Live HR/battery come from the standard profiles; this just
+                // opens the puffin session. Unverified on real MG hardware.
+                cmdCharacteristic = c
+                if let hello = selectedModel.deviceFamily.clientHello {
+                    log("WHOOP 5/MG: writing CLIENT_HELLO to fd4b0002 (experimental).")
+                    peripheral.writeValue(Data(hello), for: c, type: .withoutResponse)
+                }
             case BLEManager.cmdNotifyChar,
                  BLEManager.eventNotifyChar,
                  BLEManager.dataNotifyChar,
@@ -690,7 +719,12 @@ extension BLEManager: CBPeripheralDelegate {
                  BLEManager.batteryChar:
                 peripheral.setNotifyValue(true, for: c)
                 log("Subscribed \(c.uuid)")
-            default: break
+            default:
+                // WHOOP 5.0/MG puffin notify characteristics (fd4b0003/0004/0005/0007).
+                if BLEManager.whoop5NotifyChars.contains(c.uuid) {
+                    peripheral.setNotifyValue(true, for: c)
+                    log("Subscribed \(c.uuid) (puffin)")
+                }
             }
         }
     }
@@ -822,7 +856,16 @@ extension BLEManager: CBPeripheralDelegate {
                 }
             }
         default:
-            break
+            // EXPERIMENTAL WHOOP 5.0/MG puffin notify chars (fd4b0003/0004/0005/0007): reassemble with
+            // the family-aware reassembler and route through the family-aware FrameRouter so the UI
+            // reflects arriving frames. We deliberately do NOT run the WHOOP4 backfill / collector /
+            // clock paths here — puffin biometric + historical decode is still a stub. Live HR and
+            // battery come from the standard 0x2A37 / 0x2A19 profiles handled above.
+            if BLEManager.whoop5NotifyChars.contains(characteristic.uuid) {
+                for frame in reassembler.feed(bytes) {
+                    router.handle(frame: frame)
+                }
+            }
         }
     }
 

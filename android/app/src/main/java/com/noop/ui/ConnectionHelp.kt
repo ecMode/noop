@@ -65,12 +65,12 @@ fun ConnectionHelp(viewModel: AppViewModel, modifier: Modifier = Modifier) {
     if (live.whoop5Detected) {
         NoopCard(modifier = modifier) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("WHOOP 5 / MG", style = NoopType.headline, color = Palette.textPrimary)
+                Text("WHOOP 5 / MG (experimental)", style = NoopType.headline, color = Palette.textPrimary)
                 Text(
-                    "Your strap is connected and its battery reads. Live heart rate needs a secure " +
-                        "handshake that's still in progress for the 5/MG protocol, so it won't stream " +
-                        "yet. Nothing's wrong with your strap or your phone — WHOOP 4.0 is fully " +
-                        "supported today, and 5/MG support is being worked on.",
+                    "Your strap is connected and we're trying an experimental handshake to bring up live " +
+                        "heart rate from the standard profile. This isn't verified on 5/MG hardware yet, so " +
+                        "HR may or may not appear, and deeper metrics (recovery, strain, sleep) aren't " +
+                        "decoded for 5/MG yet. Nothing's wrong with your strap — WHOOP 4.0 is fully supported.",
                     style = NoopType.footnote,
                     color = Palette.textSecondary,
                 )

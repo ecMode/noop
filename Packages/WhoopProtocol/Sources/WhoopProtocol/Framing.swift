@@ -186,8 +186,18 @@ public func frameFromPayload(_ data: [UInt8], type: UInt8, seq: UInt8 = 0, cmd: 
 /// Mirrors framing.py Reassembler.
 public final class Reassembler {
     private var buf: [UInt8] = []
+    private let family: DeviceFamily
 
-    public init() {}
+    /// `family` selects the frame-length convention:
+    /// - WHOOP 4.0 reads a u16 length at `buf[1..3]`, total = `length + 4`.
+    /// - WHOOP 5.0 ("puffin") reads a u16 declared length at `buf[2..4]` (after the `0xAA` SOF and
+    ///   the `0x01` format byte), total = `declLength + 8` — the extra 4 covers the format byte and
+    ///   the CRC16 header that 5.0 inserts ahead of the inner record.
+    ///
+    /// Defaults to `.whoop4` so existing callers and tests are byte-for-byte unchanged.
+    public init(family: DeviceFamily = .whoop4) {
+        self.family = family
+    }
 
     public func feed(_ fragment: [UInt8]) -> [[UInt8]] {
         buf.append(contentsOf: fragment)
@@ -200,11 +210,17 @@ public final class Reassembler {
             if sof > 0 {
                 buf.removeFirst(sof)
             }
+            // Both families need at least 4 bytes to read their declared length.
             if buf.count < 4 {
                 break
             }
-            let length = Int(buf[1]) | (Int(buf[2]) << 8)
-            let total = length + 4
+            let total: Int
+            switch family {
+            case .whoop4:
+                total = (Int(buf[1]) | (Int(buf[2]) << 8)) + 4
+            case .whoop5:
+                total = (Int(buf[2]) | (Int(buf[3]) << 8)) + 8
+            }
             if buf.count < total {
                 break
             }

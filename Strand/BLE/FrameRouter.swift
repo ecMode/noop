@@ -9,6 +9,11 @@ public final class FrameRouter {
     /// Called when the strap pushes an EVENT packet (WHOOP's strap-as-clock catch-up signal). The
     /// BLEManager wires this to a rate-limited requestSync(.strap). nil in pure/unit contexts.
     var onSyncTrigger: (() -> Void)?
+    /// Which family's framing to decode with. Set per connection by BLEManager. WHOOP 5.0/MG frames
+    /// use the CRC16/offset-8 envelope; the biometric field decode for puffin is still a stub, so
+    /// WHOOP 5 custom frames currently surface only their envelope (live HR/battery come from the
+    /// standard 0x2A37/0x2A19 profiles instead).
+    var family: DeviceFamily = .whoop4
 
     public init(state: LiveState) {
         self.state = state
@@ -16,7 +21,7 @@ public final class FrameRouter {
 
     /// Handle one complete frame (bytes including 0xAA SOF and the crc32 trailer).
     public func handle(frame: [UInt8]) {
-        let parsed = parseFrame(frame)
+        let parsed = parseFrame(frame, family: family)
         guard parsed.ok else { return }
         // Reject frames that failed their checksum — never let bad bytes drive state.
         if parsed.crcOK == false { return }

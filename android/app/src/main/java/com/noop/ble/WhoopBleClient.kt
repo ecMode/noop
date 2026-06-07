@@ -143,6 +143,8 @@ class WhoopBleClient(
         private val DATA_NOTIFY_CHAR: UUID = UUID.fromString("61080005-8d6d-82b8-614a-1c8cb0f8dcc6")  // data (fragmented)
 
         val WHOOP5_SERVICE: UUID = UUID.fromString("fd4b0001-cce1-4033-93ce-002d5875f58a")
+        // WHOOP 5.0/MG command-write char — takes the static CLIENT_HELLO (EXPERIMENTAL).
+        val WHOOP5_CMD_WRITE_CHAR: UUID = UUID.fromString("fd4b0002-cce1-4033-93ce-002d5875f58a")
 
         // Standard BLE profiles. HR + R-R works UNBONDED; battery is a plain %.
         private val HEART_RATE_SERVICE: UUID = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb")
@@ -242,6 +244,9 @@ class WhoopBleClient(
     /// The strap family the user chose to pair, remembered so an auto-reconnect after a
     /// dropout re-scans for the same model instead of falling back to WHOOP 4.0.
     private var selectedModel = WhoopModel.WHOOP4
+    /// The family actually discovered on the connected peripheral. Drives family-aware frame
+    /// parsing and gates the WHOOP4-only bond/handshake. Set in onServicesDiscovered.
+    private var connectedFamily = DeviceFamily.WHOOP4
 
     /** True while a scan is active, so we never start a second scan (Android scanner is stateful). */
     private var scanning = false
@@ -540,33 +545,31 @@ class WhoopBleClient(
             // 1. Custom service: capture the cmd-write char, FIRE THE BOND, queue the notify subs.
             val whoop4 = g.getService(WHOOP4_SERVICE)
             val whoop5 = g.getService(WHOOP5_SERVICE)
-            if (whoop4 == null && whoop5 != null) {
-                // WHOOP 5.0 / MG exposes a different service + characteristic set we don't drive yet.
-                // It still connects (battery reads over the standard profile), but the secure handshake
-                // for live data is WHOOP-4-only for now — so we say that plainly rather than leaving the
-                // user staring at the generic "charge it and put it on" checklist when nothing is wrong.
-                log("WHOOP 5/MG detected — connected, but the live-data handshake is WHOOP 4.0 only for now.")
+            if (whoop4 != null) {
+                // Verified WHOOP 4.0 path (unchanged): capture the cmd-write char, FIRE THE BOND
+                // (one CONFIRMED GET_BATTERY_LEVEL write triggers just-works bonding), queue notify subs.
+                connectedFamily = DeviceFamily.WHOOP4
+                cmdCharacteristic = whoop4.getCharacteristic(CMD_WRITE_CHAR)
+                cmdCharacteristic?.let { writeBondFrame(g, it) }
+                whoop4.getCharacteristic(CMD_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
+                whoop4.getCharacteristic(EVENT_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
+                whoop4.getCharacteristic(DATA_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
+            } else if (whoop5 != null) {
+                // EXPERIMENTAL WHOOP 5.0/MG: a 5/MG strap opens a session with the static CLIENT_HELLO
+                // frame written to fd4b0002, not the WHOOP4 confirmed-write bond. Live HR + battery come
+                // from the standard 0x2A37/0x2A19 profiles (subscribed below); this just unlocks the
+                // session. It is UNVERIFIED on real MG hardware — so onCharacteristicWrite skips the
+                // WHOOP4 bond/handshake for this family.
+                connectedFamily = DeviceFamily.WHOOP5
+                log("WHOOP 5/MG detected — sending CLIENT_HELLO (experimental).")
                 _state.value = _state.value.copy(
                     whoop5Detected = true,
-                    statusNote = "WHOOP 5/MG connected — battery reads, but live heart rate needs a secure " +
-                        "handshake that's still in progress for 5/MG. Nothing's wrong with your strap. " +
-                        "WHOOP 4.0 is fully supported today.",
+                    statusNote = "WHOOP 5/MG connected — experimental. Trying to bring up live heart rate " +
+                        "from the standard profile. This isn't verified on 5/MG hardware yet, so HR and " +
+                        "battery may appear but deeper metrics won't. WHOOP 4.0 is fully supported today.",
                 )
-            }
-            val custom = whoop4 ?: whoop5
-            if (custom != null) {
-                cmdCharacteristic = custom.getCharacteristic(CMD_WRITE_CHAR)
-
-                // THE BONDING TRICK (port of didDiscoverCharacteristicsFor → cmdWriteChar branch):
-                // one CONFIRMED write of GET_BATTERY_LEVEL triggers just-works bonding. We send it
-                // directly (not via the normal queue) so it's unambiguously the first write, exactly
-                // as the Swift code writes the bond frame inline before anything else.
-                cmdCharacteristic?.let { writeBondFrame(g, it) }
-
-                // Subscribe to the three custom notify characteristics (data is fragmented).
-                custom.getCharacteristic(CMD_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
-                custom.getCharacteristic(EVENT_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
-                custom.getCharacteristic(DATA_NOTIFY_CHAR)?.let { cccdQueue.add(it) }
+                cmdCharacteristic = whoop5.getCharacteristic(WHOOP5_CMD_WRITE_CHAR)
+                cmdCharacteristic?.let { writeClientHello(g, it) }
             } else {
                 log("Custom WHOOP service not found on this peripheral")
             }
@@ -589,7 +592,7 @@ class WhoopBleClient(
             // Port of didWriteValueFor: a CONFIRMED-write completion (no error) == bonding succeeded.
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 log("Confirmed write failed: status=$status")
-            } else if (!didBond) {
+            } else if (!didBond && connectedFamily == DeviceFamily.WHOOP4) {
                 didBond = true
                 _state.value = _state.value.copy(bonded = true)
                 log("BONDED (confirmed write acknowledged) — custom channels should now flow")
@@ -598,7 +601,8 @@ class WhoopBleClient(
             // Run the connect handshake EXACTLY ONCE per connection. didWriteValueFor / onCharacteristicWrite
             // re-fires on EVERY with-response write (the bond write, etc.); the guard prevents re-blasting
             // the handshake at the strap mid-session — THE iOS "won't serve" root cause from the Swift notes.
-            if (!connectHandshakeDone) {
+            // WHOOP 5.0/MG uses CLIENT_HELLO, not this WHOOP4 command sequence, so it is skipped for it.
+            if (!connectHandshakeDone && connectedFamily == DeviceFamily.WHOOP4) {
                 connectHandshakeDone = true
                 runConnectHandshake()
             }
@@ -690,7 +694,7 @@ class WhoopBleClient(
      * Direct port of `FrameRouter.handle(frame:)`.
      */
     private fun handleFrame(frame: ByteArray) {
-        val parsed = Framing.parseFrame(frame, DeviceFamily.WHOOP4)
+        val parsed = Framing.parseFrame(frame, connectedFamily)
         if (!parsed.ok) return
         // Reject frames that failed their checksum — never let bad bytes drive state.
         if (parsed.crcOk == false) return
@@ -921,6 +925,31 @@ class WhoopBleClient(
         }
     }
 
+    /**
+     * EXPERIMENTAL: WHOOP 5.0/MG opens a session with a static CLIENT_HELLO frame written to its
+     * fd4b0002 command characteristic, instead of the WHOOP4 confirmed-write bond. Written WITHOUT a
+     * response (it is a complete framed command), and we do NOT hold the in-flight slot or run the
+     * WHOOP4 handshake for it. Mirrors the order the WHOOP4 bond uses (write first, then drain the
+     * notify subscriptions). Unverified on real MG hardware.
+     */
+    @SuppressLint("MissingPermission")
+    private fun writeClientHello(g: BluetoothGatt, ch: BluetoothGattCharacteristic) {
+        val hello = DeviceFamily.WHOOP5.clientHello ?: return
+        log("WHOOP 5/MG: writing CLIENT_HELLO to fd4b0002 (experimental).")
+        val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            g.writeCharacteristic(ch, hello, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) ==
+                BluetoothGatt.GATT_SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            run {
+                ch.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                ch.value = hello
+                g.writeCharacteristic(ch)
+            }
+        }
+        if (!ok) log("CLIENT_HELLO write rejected by stack")
+    }
+
     @SuppressLint("MissingPermission")
     private fun drainCccdQueue(g: BluetoothGatt) {
         if (cccdInFlight) return
@@ -991,7 +1020,7 @@ class WhoopBleClient(
         // offset is a no-op. The dense, authoritative metric stream is the type-47 historical store
         // (which carries real unix ts); this live path captures live REALTIME_DATA/EVENT/battery.
         val now = (System.currentTimeMillis() / 1000L).toInt()
-        val parsed = frames.map { Framing.parseFrame(it, DeviceFamily.WHOOP4) }
+        val parsed = frames.map { Framing.parseFrame(it, connectedFamily) }
         val streams: Streams = extractStreams(parsed, deviceClockRef = now, wallClockRef = now)
         val batch = StreamPersistence.toBatch(streams)
         if (!batch.isEmpty) {
