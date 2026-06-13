@@ -17,6 +17,20 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 2.8.7 — Readiness shows its evidence, and a Health Connect distance fix
+
+- **New:** each Readiness signal now shows the numbers behind it — e.g. *HRV 72 vs 60 ms*, *Resting HR 46
+  vs 52 bpm*, *Training load 7d 10.0 / 28d 10.0* — so you can see exactly why a signal is flagged, not just
+  the label. Thanks @khalilkm01.
+- **Fixed (Android):** a workout imported from Health Connect could show no distance even when it was
+  recorded — a relay app (e.g. Suunto via Health Sync) often writes the distance with timestamps slightly
+  offset from the workout, which NOOP's exact-window match missed. It now matches with a tolerance. Thanks
+  @pilleuspulcher-blip. (#215)
+- **Fixed (iPhone):** on the Explore screen, tapping a metric could bounce you back to the More tab instead
+  of opening it — a nested-navigation bug. Drilling into a metric now works. Thanks @sebastianwoo. (#199)
+
+---
+
 ## 2.8.6 — iPhone diagnostics & expectations, clearer labels, a journal fix
 
 - **New (iPhone):** a *Using NOOP on iPhone* note in Settings sets honest expectations (sideloading,

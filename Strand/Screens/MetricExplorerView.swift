@@ -110,39 +110,50 @@ struct MetricExplorerView: View {
     @State private var emptyByID: [String: Bool] = [:]
 
     var body: some View {
-        NavigationStack {
-            ScreenScaffold(title: "Explore", subtitle: "Every signal, one tap deep.") {
-                ForEach(MetricCatalog.categories, id: \.self) { category in
-                    let metrics = MetricCatalog.inCategory(category)
-                    if !metrics.isEmpty {
-                        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                            SectionHeader("\(category)", overline: "Category",
-                                          trailing: "\(metrics.count)")
-                            NoopCard(padding: 0) {
-                                VStack(spacing: 0) {
-                                    ForEach(Array(metrics.enumerated()), id: \.element.id) { idx, metric in
-                                        NavigationLink(value: metric) {
-                                            MetricRow(metric: metric,
-                                                      isEmpty: emptyByID[metric.id] ?? false)
-                                        }
-                                        .buttonStyle(.plain)
-                                        if idx < metrics.count - 1 {
-                                            Divider().overlay(StrandPalette.hairline)
-                                                .padding(.leading, 56)
-                                        }
+        #if os(macOS)
+        // macOS: Explore is a standalone detail pane, so it owns its NavigationStack.
+        NavigationStack { exploreScaffold }
+            .task { await probeEmptiness() }
+        #else
+        // iOS: Explore is pushed INSIDE the More tab's NavigationStack. A nested NavigationStack made
+        // tapping a metric bounce straight back to the More list (#199) — so use the ambient stack and
+        // let the navigationDestination below resolve against it.
+        exploreScaffold
+            .task { await probeEmptiness() }
+        #endif
+    }
+
+    private var exploreScaffold: some View {
+        ScreenScaffold(title: "Explore", subtitle: "Every signal, one tap deep.") {
+            ForEach(MetricCatalog.categories, id: \.self) { category in
+                let metrics = MetricCatalog.inCategory(category)
+                if !metrics.isEmpty {
+                    VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                        SectionHeader("\(category)", overline: "Category",
+                                      trailing: "\(metrics.count)")
+                        NoopCard(padding: 0) {
+                            VStack(spacing: 0) {
+                                ForEach(Array(metrics.enumerated()), id: \.element.id) { idx, metric in
+                                    NavigationLink(value: metric) {
+                                        MetricRow(metric: metric,
+                                                  isEmpty: emptyByID[metric.id] ?? false)
+                                    }
+                                    .buttonStyle(.plain)
+                                    if idx < metrics.count - 1 {
+                                        Divider().overlay(StrandPalette.hairline)
+                                            .padding(.leading, 56)
                                     }
                                 }
                             }
                         }
-                        .padding(.bottom, NoopMetrics.sectionGap - 20)
                     }
+                    .padding(.bottom, NoopMetrics.sectionGap - 20)
                 }
             }
-            .navigationDestination(for: MetricDescriptor.self) { metric in
-                MetricDetailView(metric: metric)
-            }
         }
-        .task { await probeEmptiness() }
+        .navigationDestination(for: MetricDescriptor.self) { metric in
+            MetricDetailView(metric: metric)
+        }
     }
 
     /// One lightweight pass to learn which metrics have no series, so rows can flag

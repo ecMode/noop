@@ -78,6 +78,11 @@ object HealthConnectImporter {
     /** Page size for paginated readRecords() calls. */
     private const val PAGE_SIZE = 5000
 
+    /** Slack (seconds) when matching a DistanceRecord to a workout session — a relay app can write the
+     *  distance record offset by up to a few minutes from the session it belongs to (#215). Overlap
+     *  clipping keeps a neighbouring activity inside this window from over-counting. */
+    private const val DISTANCE_MATCH_BUFFER_S = 300L
+
     /** The record types this importer reads, in one place so PERMISSIONS stays in sync. */
     private val READ_RECORDS: List<KClass<out Record>> = listOf(
         StepsRecord::class,
@@ -303,13 +308,30 @@ object HealthConnectImporter {
                 val w = workouts[i]
                 if (w.endTs <= w.startTs) continue
                 var meters = 0.0
+                // #215: a relay app (e.g. Suunto → Health Sync) often writes the cumulative DistanceRecord
+                // with start/end offset by seconds-to-minutes from the ExerciseSession it belongs to, so a
+                // strict between(session.start, session.end) read returned nothing and distance stayed 0
+                // even though the distance was in Health Connect. Read a buffered window so an offset record
+                // is found, then count only the portion of each record that OVERLAPS the actual session —
+                // so a neighbouring activity's record inside the buffer can't over-count.
+                val ws = w.startTs
+                val we = w.endTs
                 readAll(
                     client, DistanceRecord::class,
                     TimeRangeFilter.between(
-                        Instant.ofEpochSecond(w.startTs), Instant.ofEpochSecond(w.endTs)
+                        Instant.ofEpochSecond(ws - DISTANCE_MATCH_BUFFER_S),
+                        Instant.ofEpochSecond(we + DISTANCE_MATCH_BUFFER_S),
                     ),
                 ) { d ->
-                    meters += d.distance.inMeters
+                    val rs = d.startTime.epochSecond
+                    val re = d.endTime.epochSecond
+                    val overlap = (minOf(re, we) - maxOf(rs, ws)).coerceAtLeast(0)
+                    meters += when {
+                        re > rs && overlap > 0 -> d.distance.inMeters * (overlap.toDouble() / (re - rs))
+                        re <= rs && rs in (ws - DISTANCE_MATCH_BUFFER_S)..(we + DISTANCE_MATCH_BUFFER_S) ->
+                            d.distance.inMeters // degenerate zero-length record near the session
+                        else -> 0.0
+                    }
                 }
                 if (meters > 0.0) {
                     workouts[i] = w.copy(distanceM = round1(meters))

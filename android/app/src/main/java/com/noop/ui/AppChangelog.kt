@@ -25,7 +25,7 @@ object AppChangelog {
      * Bump this when you add a release below. The "What's New" sheet shows automatically when the
      * stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
      */
-    const val CURRENT_VERSION = "2.8.6"
+    const val CURRENT_VERSION = "2.8.7"
 
     data class Release(
         val version: String,
@@ -36,6 +36,16 @@ object AppChangelog {
 
     /** Newest first. */
     val releases: List<Release> = listOf(
+        Release(
+            version = "2.8.7",
+            title = "Readiness shows its evidence, and a Health Connect distance fix",
+            date = "June 2026",
+            items = listOf(
+                "New: each Readiness signal now shows the numbers behind it — e.g. ‘HRV 72 vs 60 ms’, ‘Resting HR 46 vs 52 bpm’, ‘Training load 7d 10.0 / 28d 10.0’ — so you can see exactly why a signal is flagged, not just the label. Thanks @khalilkm01.",
+                "Fixed: a workout imported from Health Connect could show no distance even when the distance was recorded — a relay app (e.g. Suunto via Health Sync) often writes the distance with timestamps slightly offset from the workout, which NOOP's exact-window match missed. It now matches with a tolerance. Thanks @pilleuspulcher-blip. (#215)",
+                "Fixed (iPhone): on the Explore screen, tapping a metric could bounce you back to the More tab — a nested-navigation bug, now fixed. Thanks @sebastianwoo. (#199)",
+            ),
+        ),
         Release(
             version = "2.8.6",
             title = "Clearer labels, a journal fix, and steadier sleeping heart rate",

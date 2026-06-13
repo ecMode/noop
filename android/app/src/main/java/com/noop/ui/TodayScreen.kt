@@ -901,12 +901,25 @@ private fun ReadinessSection(days: List<DailyMetric>) {
                             color = Palette.textSecondary,
                             modifier = Modifier.width(104.dp),
                         )
-                        Text(
-                            signal.detail,
-                            style = NoopType.caption,
-                            color = Palette.textTertiary,
+                        Column(
                             modifier = Modifier.weight(1f),
-                        )
+                            verticalArrangement = Arrangement.spacedBy(1.dp),
+                        ) {
+                            Text(
+                                signal.detail,
+                                style = NoopType.caption,
+                                color = Palette.textTertiary,
+                            )
+                            // The numbers behind the read (e.g. "48 vs 55 ms"), as a small mono caption —
+                            // mirrors the macOS readiness card and the "load X.XX" numeric readout above.
+                            signal.evidence?.let { evidence ->
+                                Text(
+                                    evidence,
+                                    style = NoopType.captionNumber,
+                                    color = Palette.textTertiary,
+                                )
+                            }
+                        }
                     }
                 }
             }
