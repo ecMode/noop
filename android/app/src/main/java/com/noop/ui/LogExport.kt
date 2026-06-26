@@ -77,8 +77,7 @@ object LogExport {
             val header = buildString {
                 appendLine("NOOP strap log (scheduled debug export)")
                 appendLine("App:     ${BuildConfig.VERSION_NAME} (${BuildConfig.TIER})")
-                appendLine("Android: ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
-                appendLine("Device:  ${Build.MANUFACTURER} ${Build.MODEL}")
+                for (line in com.noop.testcentre.AndroidDiagnostics.summaryLines(context)) appendLine(line)
                 appendLine("─".repeat(40))
             }
             val text = body.ifBlank { "(rolling strap-log buffer is empty — connect to your strap so lines accrue)" }
@@ -117,8 +116,7 @@ object LogExport {
         val header = buildString {
             appendLine("NOOP strap log")
             appendLine("App:     ${BuildConfig.VERSION_NAME} (${BuildConfig.TIER})")
-            appendLine("Android: ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
-            appendLine("Device:  ${Build.MANUFACTURER} ${Build.MODEL}")
+            for (line in com.noop.testcentre.AndroidDiagnostics.summaryLines(context)) appendLine(line)
             appendLine("─".repeat(40))
         }
         val body = logText.ifBlank { "(strap log is empty — connect to your strap, reproduce the issue, then share again)" }
