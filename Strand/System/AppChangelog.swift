@@ -7,7 +7,7 @@ enum AppChangelog {
 
     /// Bump this when you add a release below. The "What's New" sheet shows automatically when the
     /// stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
-    static let currentVersion = "7.3.1"
+    static let currentVersion = "7.3.2"
 
     struct Release: Identifiable {
         let version: String
@@ -19,6 +19,18 @@ enum AppChangelog {
 
     /// Newest first.
     static let releases: [Release] = [
+        Release(
+            version: "7.3.2",
+            title: "Backup & Restore, the wrong-day fix, and a smarter Test Centre",
+            date: "June 2026",
+            items: [
+                "**New: Backup & Restore.** You can now back up everything (your whole history, scores and sleep) to a folder you choose, on demand or on a daily schedule, and restore it later. It's off by default, runs entirely on your device, and the restore checks the file is really yours and keeps a safety snapshot first, so a failed restore can't wipe your data. Find it in Settings.",
+                "**Your dashboard shows the right day again.** A cluster of \"Today is empty / stuck on an old day / the same sleep every night\" reports turned out to be one underlying issue: after re-adding a strap the app saved your live data under one name but looked for it under another. It now reads your live strap data and your imported history together, so nothing gets orphaned, and switching straps updates the screen straight away. (#814, #799)",
+                "**A batch of fixes.** The Deep Timeline HRV chart was plotting raw heartbeat intervals, not HRV, now it shows real, filtered HRV (#803). Cycle Awareness is only offered where it applies and has a proper off switch (#801). The Alarms screen is back in the iPhone menu (#805). The app no longer gets sluggish after a very large Apple Health import (#797). And WHOOP 4.0 steps now explain that the strap has no step counter, rather than looking broken (#807).",
+                "**Bug reporting got much better.** When the first people used the new Test Centre it showed us two flaws in the reporting itself, both fixed: reports were arriving empty (the Report button wasn't including the log), and a test mode could capture nothing without saying so. The export now fills the report in for you, runs a completeness check, carries a strap-clock and data-source line so the trickiest problems diagnose themselves, and verifies nothing private survived the privacy scrub.",
+                "**Small wins.** Swipe or tap arrows to move between days. Delete a hydration entry and set a custom container size. See each workout's effort number on its detail. And the iPhone lock-screen widget data is aligned again (#759).",
+                "Thank you to everyone who became a tester this week. Several of these came straight from your reports.",
+            ]),
         Release(
             version: "7.3.1",
             title: "A big bug-fix sweep, with the Test Centre to back it up",
