@@ -2,7 +2,7 @@ import SwiftUI
 import MarkdownUI
 import StrandDesign
 
-/// Coach — the one feature in NOOP that talks to the network.
+/// Coach, the one feature in NOOP that talks to the network.
 ///
 /// It is strictly opt-in and bring-your-own-key: the user pastes their own OpenAI
 /// or Anthropic API key (stored in the macOS Keychain by `AICoachEngine`), and only
@@ -17,12 +17,18 @@ struct CoachView: View {
 
     /// Draft text in the composer (the question being typed).
     @State private var draft: String = ""
-    /// Pending key text in the setup card (never persisted here — handed to `setKey`).
+    /// Pending key text in the setup card (never persisted here, handed to `setKey`).
     @State private var keyDraft: String = ""
     /// Whether the model selector is in free-text "Custom…" mode.
     @State private var customModel: Bool = false
     /// The id typed in the "Custom…" field.
     @State private var customModelDraft: String = ""
+    /// Whether the editable-system-prompt section is expanded. Collapsed by default so the settings
+    /// stay compact; most users never touch the prompt.
+    @State private var promptExpanded: Bool = false
+    /// Working copy of the system prompt while editing, committed to the engine on change so an edit
+    /// takes effect on the next send. Seeded from the engine when the editor opens.
+    @State private var promptDraft: String = ""
     @FocusState private var composerFocused: Bool
 
     /// Sentinel tag for the "Custom…" entry in the model Picker.
@@ -41,9 +47,10 @@ struct CoachView: View {
             if coach.isConfigured {
                 connectedHeader
                 consentBar
-                // v5: a SECOND opt-in, only meaningful once data access is on — folds a summary of the
+                // v5: a SECOND opt-in, only meaningful once data access is on, folds a summary of the
                 // new on-device signals (your strongest patterns + Lab Book) into the coach context.
                 if coach.dataConsent { onDeviceSignalsBar }
+                systemPromptBar
                 transcript
                 if let error = coach.errorText, !error.isEmpty {
                     errorBanner(error)
@@ -98,7 +105,7 @@ struct CoachView: View {
     }
 
     /// The v5 second opt-in: include a SUMMARY of the new on-device signals (strongest n-of-1 patterns +
-    /// Lab Book markers). Summary-only — never raw readings — so the no-raw-egress posture holds.
+    /// Lab Book markers). Summary-only, never raw readings, so the no-raw-egress posture holds.
     private var onDeviceSignalsBar: some View {
         NoopCard(padding: 14, tint: StrandPalette.chargeColor) {
             HStack(spacing: 10) {
@@ -118,6 +125,76 @@ struct CoachView: View {
                 Toggle("", isOn: $coach.includeOnDeviceSignals)
                     .labelsHidden().toggleStyle(.switch).tint(StrandPalette.accent)
                     .accessibilityLabel("Also share my patterns and Lab Book with the coach")
+            }
+        }
+    }
+
+    /// Editable system prompt, the instructions that frame the coach. Collapsed by default; expanding
+    /// reveals a TextEditor bound to the engine (edits persist to UserDefaults and take effect on the
+    /// next message) plus a Reset-to-default control. Lives inline in the existing settings, NOT a modal.
+    private var systemPromptBar: some View {
+        NoopCard(padding: 14, tint: StrandPalette.chargeColor) {
+            VStack(alignment: .leading, spacing: promptExpanded ? 10 : 0) {
+                Button {
+                    withAnimation(StrandMotion.fade) {
+                        promptExpanded.toggle()
+                        if promptExpanded { promptDraft = coach.customSystemPrompt }
+                    }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "text.alignleft")
+                            .foregroundStyle(coach.hasCustomSystemPrompt ? StrandPalette.accent : StrandPalette.textTertiary)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Coach instructions")
+                                .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
+                            Text(coach.hasCustomSystemPrompt
+                                 ? "Customised. Your edited instructions frame every reply."
+                                 : "Edit how the coach thinks and talks. Takes effect on your next message.")
+                                .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 8)
+                        Image(systemName: promptExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(StrandPalette.textTertiary)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(promptExpanded ? "Collapse coach instructions" : "Edit coach instructions")
+
+                if promptExpanded {
+                    TextEditor(text: $promptDraft)
+                        .font(StrandFont.body)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 140, maxHeight: 240)
+                        .padding(8)
+                        .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(StrandPalette.hairline, lineWidth: 1))
+                        .onChangeCompat(of: promptDraft) { newValue in
+                            coach.customSystemPrompt = newValue
+                        }
+                        .accessibilityLabel("Coach instructions editor")
+
+                    HStack {
+                        Spacer()
+                        Button {
+                            coach.resetSystemPrompt()
+                            promptDraft = coach.customSystemPrompt
+                        } label: {
+                            Label("Reset to default", systemImage: "arrow.uturn.backward")
+                                .font(StrandFont.footnote)
+                                .labelStyle(.titleAndIcon)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(StrandPalette.accent)
+                        .disabled(!coach.hasCustomSystemPrompt)
+                        .accessibilityLabel("Reset coach instructions to default")
+                    }
+                }
             }
         }
     }
@@ -368,10 +445,9 @@ struct CoachView: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("You said: \(message.text)")
         case .assistant:
-            // LLM replies arrive as Markdown (bold, lists, headings, tables) —
-            // rendered with the chat-bubble-sized Strand theme. User bubbles stay
+            // LLM replies arrive as Markdown (bold, lists, headings, tables),             // rendered with the chat-bubble-sized Strand theme. User bubbles stay
             // verbatim `Text` so typed `*`/`#` never turn into surprise formatting.
-            // The reply sits on a frosted Charge-tinted surface — a card, not a flat box.
+            // The reply sits on a frosted Charge-tinted surface, a card, not a flat box.
             HStack {
                 Markdown(message.text)
                     .markdownTheme(.strand)
@@ -444,7 +520,7 @@ struct CoachView: View {
         }
     }
 
-    /// The input bar — a frosted overlay surface holding the field + Send, so the composer reads as a
+    /// The input bar, a frosted overlay surface holding the field + Send, so the composer reads as a
     /// distinct docked surface above the canvas rather than two floating controls.
     private var composer: some View {
         HStack(alignment: .bottom, spacing: 10) {

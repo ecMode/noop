@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -51,7 +52,7 @@ import com.noop.ai.AiProvider
 import com.noop.ai.ChatMsg
 
 /**
- * AI Coach — the single opt-in, bring-your-own-key feature.
+ * AI Coach, the single opt-in, bring-your-own-key feature.
  *
  * Two states:
  *  - No key saved → a setup card: masked key field, provider choice, model dropdown, Save, and a
@@ -123,7 +124,7 @@ private fun CoachSetup(vm: CoachViewModel) {
                 )
             }
 
-            // Server URL — Custom (local LLM) only.
+            // Server URL, Custom (local LLM) only.
             if (isCustom) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Overline("Server URL")
@@ -162,7 +163,7 @@ private fun CoachSetup(vm: CoachViewModel) {
                 )
             }
 
-            // Masked key field — optional for a local Custom server.
+            // Masked key field, optional for a local Custom server.
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Overline(if (isCustom) "API Key (optional)" else "API Key")
                 CoachKeyField(
@@ -191,7 +192,7 @@ private fun CoachSetup(vm: CoachViewModel) {
                 )
             }
 
-            // Privacy note — one line, always visible.
+            // Privacy note, one line, always visible.
             PrivacyNote(local = isCustom)
         }
     }
@@ -229,7 +230,7 @@ private fun CoachChat(vm: CoachViewModel) {
             }
         }
 
-        // Data-access consent — off by default; no metrics are sent until this is on.
+        // Data-access consent, off by default; no metrics are sent until this is on.
         val consent by vm.consent.collectAsStateWithLifecycle()
         NoopCard(padding = 14.dp, tint = Palette.chargeColor) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -247,6 +248,10 @@ private fun CoachChat(vm: CoachViewModel) {
                 )
             }
         }
+
+        // Editable system prompt, inline in the settings, collapsed by default. Edits persist and
+        // take effect on the next message (the engine reads the stored prompt fresh per send).
+        CoachInstructions(vm = vm)
 
         // Transcript or empty-state with suggested prompts.
         if (messages.isEmpty()) {
@@ -276,7 +281,7 @@ private fun CoachChat(vm: CoachViewModel) {
             )
         }
 
-        // Input row + Send — a frosted overlay surface so the composer reads as a docked input bar.
+        // Input row + Send, a frosted overlay surface so the composer reads as a docked input bar.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -314,6 +319,76 @@ private fun CoachChat(vm: CoachViewModel) {
 
         // Privacy note repeated under the input so it's always on screen.
         PrivacyNote(local = provider == AiProvider.CUSTOM)
+    }
+}
+
+/**
+ * Editable system prompt, the instructions that frame the coach. Collapsed by default; expanding
+ * reveals a multi-line field bound to the view model (edits persist to [NoopPrefs] and take effect on
+ * the next message) plus a Reset-to-default control. Inline in the settings, not a separate sheet.
+ */
+@Composable
+private fun CoachInstructions(vm: CoachViewModel) {
+    val context = LocalContext.current
+    val prompt by vm.systemPrompt.collectAsStateWithLifecycle()
+    val hasCustom by vm.hasCustomPrompt.collectAsStateWithLifecycle()
+    var expanded by remember { mutableStateOf(false) }
+
+    NoopCard(padding = 14.dp, tint = Palette.chargeColor) {
+        Column(verticalArrangement = Arrangement.spacedBy(if (expanded) 10.dp else 0.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable { expanded = !expanded }
+                    .semantics {
+                        contentDescription = if (expanded) "Collapse coach instructions" else "Edit coach instructions"
+                    },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Coach instructions", style = NoopType.subhead, color = Palette.textPrimary)
+                    Text(
+                        if (hasCustom) "Customised. Your edited instructions frame every reply."
+                        else "Edit how the coach thinks and talks. Takes effect on your next message.",
+                        style = NoopType.footnote, color = Palette.textTertiary,
+                    )
+                }
+                Icon(
+                    Icons.Filled.ArrowDropDown,
+                    contentDescription = null,
+                    tint = Palette.textTertiary,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+
+            if (expanded) {
+                OutlinedTextField(
+                    value = prompt,
+                    onValueChange = { vm.setSystemPrompt(context, it) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 140.dp, max = 260.dp)
+                        .semantics { contentDescription = "Coach instructions editor" },
+                    textStyle = NoopType.body,
+                    singleLine = false,
+                    colors = coachFieldColors(),
+                    shape = RoundedCornerShape(14.dp),
+                )
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(
+                        onClick = { vm.resetSystemPrompt(context) },
+                        enabled = hasCustom,
+                    ) {
+                        Text(
+                            "Reset to default",
+                            style = NoopType.footnote,
+                            color = if (hasCustom) Palette.accent else Palette.textTertiary,
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -462,7 +537,7 @@ private fun ModelDropdown(
                     },
                 )
             }
-            // Free-text escape hatch — any model id the provider accepts can be entered.
+            // Free-text escape hatch, any model id the provider accepts can be entered.
             DropdownMenuItem(
                 text = { Text("Custom…", style = NoopType.body, color = Palette.textSecondary) },
                 onClick = {
