@@ -33,6 +33,24 @@ private struct InsightsLoadKey: Equatable {
     let dayKey: String
 }
 
+/// #833 (Insights freeze): the snapshot InsightsView.load() builds, parked on the long-lived Repository so a
+/// re-mount (macOS keys the NavigationSplitView detail with `.id`, so every sidebar switch cold-mounts the
+/// screen) can RESTORE it in-memory instead of re-running the full history read on the @MainActor. The exact
+/// twin of Today's `TodayHistoryWideCache` for #849; holds load()'s six computed outputs. Consumed only when
+/// the seq AND the dayKey still match (see `Repository.insightsLoadedSeq` / `insightsLoadedDayKey`).
+struct InsightsLoadCache {
+    let behaviours: [String: Set<String>]
+    let importedQuestions: [String]
+    let dayAnswers: [String: Bool]
+    /// The journal day offset the `dayAnswers` were read for (0 = today, 1 = yesterday, -1 = tomorrow). The
+    /// restore guards on it so a re-mount, which resets `journalDayOffset` to 0, only reuses the cache when
+    /// the cached answers match that reset day , otherwise it falls through to a fresh read (#833).
+    let journalDayOffset: Int
+    let outcomeByKey: [String: [String: Double]]
+    let seriesByKey: [String: [(day: String, value: Double)]]
+    let activityCosts: [ActivityCost]
+}
+
 struct InsightsView: View {
     @EnvironmentObject var repo: Repository
     /// Deep-link into the v5 "What moves you" hub (the n-of-1 ranked-effect + dose-response surface).
@@ -222,7 +240,7 @@ struct InsightsView: View {
         // #860 item 4: key on the data-refresh seq AND today's day-key, so the journal re-loads both on a
         // data change and the moment the calendar day rolls over (driven by the foreground/appear refresh
         // of `currentDayKey` below), so yesterday's answers leave "Today" and the new day starts fresh.
-        .task(id: InsightsLoadKey(seq: repo.refreshSeq, dayKey: currentDayKey)) { await load() }
+        .task(id: InsightsLoadKey(seq: repo.refreshSeq, dayKey: currentDayKey)) { await load(allowCache: true) }
         // Recompute the cached ranking only when the outcome selection changes.
         // (behaviours / outcomeByKey change only at load, which calls
         //  recomputeRanked() directly, so keying on `outcome` is sufficient.)
@@ -279,7 +297,28 @@ struct InsightsView: View {
 
     // MARK: - Load
 
-    private func load() async {
+    /// Load the journal + outcome series + activity costs.
+    ///
+    /// #833 (Insights freeze): on macOS the NavigationSplitView detail is keyed with `.id` (RootView), so
+    /// every sidebar switch DESTROYS and cold-mounts this view, tearing down its `@State`. Without a cache
+    /// each visit re-ran the full history read on the @MainActor, which is the freeze. Mirroring Today's #849
+    /// remount cache, when `allowCache` is set and the live data state is unchanged
+    /// (`repo.insightsLoadedSeq == repo.refreshSeq` AND the same dayKey) we RESTORE the prior snapshot from
+    /// the long-lived `repo` instead of re-querying. `allowCache` is true ONLY on the `.task(id:)`-driven
+    /// path (a re-mount / data-refresh / day-rollover); the direct write-then-reload sites (journal toggle,
+    /// experiment mark) leave it false so a change that doesn't bump `refreshSeq` always re-reads.
+    private func load(allowCache: Bool = false) async {
+        // #833: same-state re-mount → restore from the repo-level cache (no store queries). The dayKey guard
+        // mirrors the `.task(id:)` key so a day-rollover still re-loads even at an unchanged seq.
+        if allowCache,
+           repo.insightsLoadedSeq == repo.refreshSeq,
+           repo.insightsLoadedDayKey == currentDayKey,
+           let cached = repo.insightsCache,
+           cached.journalDayOffset == journalDayOffset {
+            restoreFromCache(cached)
+            return
+        }
+
         // Journal → behaviours map (only "yes" answers count as the behaviour occurring).
         // journalEntries() is the imported ∪ native union (native wins per day+question).
         let entries = await repo.journalEntries()
@@ -336,7 +375,37 @@ struct InsightsView: View {
             // Seed the memoized derived state from the freshly loaded inputs.
             self.recomputeRanked()
             self.recomputeRelationships()
+            // #833: snapshot what we just read onto the long-lived `repo`, keyed by the seq + dayKey we
+            // loaded for, so a later same-state re-mount restores it in-memory instead of re-querying. This
+            // ALSO runs on the direct (non-cached) write-then-reload sites, so the cache always reflects the
+            // freshest read , a subsequent re-mount never restores stale data behind a journal toggle.
+            self.repo.insightsCache = InsightsLoadCache(
+                behaviours: byBehaviour,
+                importedQuestions: importedQs,
+                dayAnswers: nativeAnswers,
+                journalDayOffset: self.journalDayOffset,
+                outcomeByKey: byKey,
+                seriesByKey: seriesMap,
+                activityCosts: costs)
+            self.repo.insightsLoadedSeq = self.repo.refreshSeq
+            self.repo.insightsLoadedDayKey = self.currentDayKey
         }
+    }
+
+    /// #833: restore the loaded snapshot from a same-state `repo` cache on a re-mount, so the screen repaints
+    /// from memory without re-running the heavy load. Sets the same `@State` and re-seeds the same memoized
+    /// derived state as the first-load `MainActor.run` block above , byte-identical screen, no store queries.
+    @MainActor
+    private func restoreFromCache(_ c: InsightsLoadCache) {
+        behaviours = c.behaviours
+        importedQuestions = c.importedQuestions
+        dayAnswers = c.dayAnswers
+        outcomeByKey = c.outcomeByKey
+        seriesByKey = c.seriesByKey
+        activityCosts = c.activityCosts
+        loaded = true
+        recomputeRanked()
+        recomputeRelationships()
     }
 
     /// The merged DailyMetric column backing an outcome key, for days the imported metricSeries

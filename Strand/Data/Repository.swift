@@ -504,6 +504,21 @@ final class Repository: ObservableObject {
     /// instead of re-running the heavy reload. Paired with `todayHistoryWideLoadedSeq`. Not @Published.
     var todayHistoryWideCache: TodayHistoryWideCache?
 
+    /// #833 (Insights freeze): macOS destroys + cold-mounts the NavigationSplitView detail on every sidebar
+    /// switch (RootView keys it with `.id`), so InsightsView's `@State` is torn down each time and its
+    /// `load()` re-read full history off the @MainActor on every visit. Mirroring Today's #849 marker, this
+    /// is the `refreshSeq` value at which Insights last ran its heavy load. Lives HERE on the long-lived
+    /// Repository so it SURVIVES the re-mount; `-1` = never loaded this launch, so the first load always runs.
+    /// Not @Published (pure load-bookkeeping, never drives the UI).
+    var insightsLoadedSeq = -1
+    /// #833: the dayKey Insights last loaded for, paired with `insightsLoadedSeq`. A day rollover (the journal
+    /// chips re-key on it) must still re-load even at an unchanged `refreshSeq`, so the cache only short-
+    /// circuits when BOTH the seq AND this dayKey match the current load. Not @Published.
+    var insightsLoadedDayKey = ""
+    /// #833: the computed dictionaries + activity costs InsightsView.load() last built, so a same-seq re-mount
+    /// RESTORES them in-memory (no store queries) instead of re-running the heavy load. Not @Published.
+    var insightsCache: InsightsLoadCache?
+
     func refresh(days nDays: Int = 4000) async {
         guard let store = await ensureStore() else { return }
         refreshGen &+= 1
@@ -1583,31 +1598,86 @@ final class Repository: ObservableObject {
     /// == zones == effort by construction. Kotlin twin: `WhoopRepository.fillWorkoutHrFromStrap`.
     private func reconcileWorkoutHrWithTrace(_ rows: [WorkoutRow], store: WhoopStore,
                                              minSamples: Int = 60, cap: Int = 300) async -> [WorkoutRow] {
+        // #833 (on-open freeze): this used to run a SEQUENTIAL per-row loop, each awaiting one
+        // `store.hrSamples(.., limit: 8000)` then reducing up to 8000 ints SYNCHRONOUSLY on the @MainActor
+        // (sum + max), for up to `cap` rows. On a deep history that beach-balled first paint. Two changes,
+        // both output-preserving: (1) the eligible rows' reads run with BOUNDED concurrency (chunks of
+        // `readChunk`) so the single-connection store isn't swamped, and (2) the per-row sum/max moved OFF
+        // the main actor into the `nonisolated static` `reduceWorkoutHr`. Eligibility + the `cap` budget are
+        // resolved FIRST in row order (identical to the old loop: budget is spent on eligible rows top-down
+        // and reads stop once it hits 0), so exactly the same rows are read and the result is byte-identical.
+        let readChunk = 8
+
+        // Phase 1 , resolve eligibility + spend the `cap` budget in ORIGINAL row order, exactly as the old
+        // sequential loop did. Only these indices get a trace read; everything else passes through verbatim.
+        // (Strap-native is recomputed in Phase 3 from the same `classify`, so it isn't carried here.)
         var budget = cap
-        var out: [WorkoutRow] = []
-        out.reserveCapacity(rows.count)
-        for row in rows {
+        var eligibleIndices: [Int] = []
+        for (i, row) in rows.enumerated() {
             let cls = WorkoutSource.classify(row.source)
             let strapNative = cls == .manual || cls == .detected
-            guard row.endTs > row.startTs, budget > 0, strapNative || row.avgHr == nil else {
-                out.append(row); continue
-            }
+            guard row.endTs > row.startTs, budget > 0, strapNative || row.avgHr == nil else { continue }
             budget -= 1
-            // The very samples the graph + zones + effort use (strap deviceId, COALESCEd PPG fallback).
-            let samples = (try? await store.hrSamples(deviceId: deviceId,
-                                                      from: row.startTs, to: row.endTs, limit: 8000)) ?? []
-            guard samples.count >= minSamples else { out.append(row); continue }
-            let bpms = samples.map(\.bpm)
-            let avg = Int((Double(bpms.reduce(0, +)) / Double(bpms.count)).rounded())
-            let peak = bpms.max() ?? row.maxHr ?? 0
-            // Strap-native → trace IS the source: override avg + max. Imported → fill avg, keep imported max.
-            let newMax = strapNative ? peak : (row.maxHr ?? peak)
-            out.append(WorkoutRow(startTs: row.startTs, endTs: row.endTs, sport: row.sport,
-                                  source: row.source, durationS: row.durationS, energyKcal: row.energyKcal,
-                                  avgHr: avg, maxHr: newMax, strain: row.strain, distanceM: row.distanceM,
-                                  zonesJSON: row.zonesJSON, notes: row.notes))
+            eligibleIndices.append(i)
         }
-        return out
+
+        // Phase 2 , read each eligible window with BOUNDED concurrency (chunks of `readChunk`) and reduce it
+        // OFF the main actor, then return only PLAIN Ints (index, avg, peak) from the child tasks. Keeping the
+        // `WorkoutRow` build out of the group means only Sendable scalars cross the task boundary; the row is
+        // rebuilt on the main actor in Phase 3. The samples are the very ones the graph + zones + effort use
+        // (strap deviceId, COALESCEd PPG fallback). Keyed by row index so reassembly stays in original order.
+        var reduced: [Int: (avg: Int, peak: Int)] = [:]
+        for chunkStart in stride(from: 0, to: eligibleIndices.count, by: readChunk) {
+            let chunk = eligibleIndices[chunkStart..<min(chunkStart + readChunk, eligibleIndices.count)]
+            await withTaskGroup(of: (index: Int, avg: Int, peak: Int)?.self) { group in
+                for idx in chunk {
+                    let startTs = rows[idx].startTs
+                    let endTs = rows[idx].endTs
+                    group.addTask { [deviceId] in
+                        let samples = (try? await store.hrSamples(deviceId: deviceId,
+                                                                  from: startTs, to: endTs,
+                                                                  limit: 8000)) ?? []
+                        guard samples.count >= minSamples else { return nil }
+                        // Sum + max over up to 8000 ints , off the @MainActor (the freeze fix).
+                        let (avg, peak) = Repository.reduceWorkoutHr(samples)
+                        return (index: idx, avg: avg, peak: peak)
+                    }
+                }
+                for await result in group {
+                    if let r = result { reduced[r.index] = (avg: r.avg, peak: r.peak) }
+                }
+            }
+        }
+
+        // Phase 3 , reassemble in ORIGINAL order. For an eligible row that cleared `minSamples` apply the
+        // off-main reduction (strap-native → trace IS the source: override avg + max; imported → fill avg,
+        // keep imported max). Every other row passes through verbatim. Byte-identical to the old loop's row.
+        return zip(rows.indices, rows).map { i, row in
+            guard let r = reduced[i] else { return row }
+            let cls = WorkoutSource.classify(row.source)
+            let strapNative = cls == .manual || cls == .detected
+            let newMax = strapNative ? r.peak : (row.maxHr ?? r.peak)
+            return WorkoutRow(startTs: row.startTs, endTs: row.endTs, sport: row.sport,
+                              source: row.source, durationS: row.durationS, energyKcal: row.energyKcal,
+                              avgHr: r.avg, maxHr: newMax, strain: row.strain, distanceM: row.distanceM,
+                              zonesJSON: row.zonesJSON, notes: row.notes)
+        }
+    }
+
+    /// #833: the per-workout HR reduction (mean bpm → rounded Int, peak bpm), pulled OUT of the @MainActor
+    /// reconcile loop. `nonisolated static` so a `withTaskGroup` child task runs it OFF the main actor , a
+    /// dense workout's up-to-8000 1 Hz samples no longer sum/max on the actor that drives SwiftUI. Pure +
+    /// unit-testable. Byte-identical to the old inline `reduce(0,+)` / `max()`: same rounding, same peak.
+    /// Caller guarantees `samples` is non-empty (the `minSamples` gate), so the mean divisor is never zero.
+    nonisolated static func reduceWorkoutHr(_ samples: [HRSample]) -> (avg: Int, peak: Int) {
+        var sum = 0
+        var peak = 0
+        for s in samples {
+            sum += s.bpm
+            if s.bpm > peak { peak = s.bpm }
+        }
+        let avg = Int((Double(sum) / Double(samples.count)).rounded())
+        return (avg, peak)
     }
 
     // MARK: - Workout editing (manual add/edit · relabel · dismiss · delete)
