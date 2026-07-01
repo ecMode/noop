@@ -306,6 +306,10 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
     private let manager = CLLocationManager()
     private var filter = TrackFilter()
     private var track: [RouteMath.LatLng] = []
+    /// Capture time (unix ms) of each accepted point in `track`, appended in lockstep. The polyline
+    /// throws timestamps away; we keep them here so an export (TCX → Strava) can carry real per-point
+    /// times instead of interpolating them.
+    private var trackTimes: [Int64] = []
     private var startMs: Int64 = 0
 
     /// Workouts & GPS test mode (Test Centre): the tagged sink for the `.workouts` GPS-fix lines, wired by
@@ -338,6 +342,7 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
     /// A re-arm resets the track. Returns immediately — fixes arrive asynchronously via the delegate.
     func start(startMs: Int64) {
         track.removeAll()
+        trackTimes.removeAll()
         filter = TrackFilter()
         self.startMs = startMs
         distanceM = 0
@@ -379,6 +384,12 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
                             distanceM: RouteMath.totalMeters(track))
     }
 
+    /// The accepted route points paired with their capture time (unix ms), in order — for building a
+    /// timestamped export (TCX / Strava). Same accept-filtered points as the polyline. Empty if none.
+    func capturedTrackTimed() -> [(tMs: Int64, lat: Double, lon: Double)] {
+        zip(trackTimes, track).map { (tMs: $0, lat: $1.lat, lon: $1.lon) }
+    }
+
     // MARK: Updates
 
     fileprivate func beginUpdates() {
@@ -397,6 +408,7 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
         for fix in fixes {
             if let pt = filter.accept(fix) {
                 track.append(pt)
+                trackTimes.append(fix.tMs)
                 changed = true
             }
         }

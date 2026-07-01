@@ -671,6 +671,13 @@ final class AppModel: ObservableObject {
         // device only; mirrors the moments / sleepMarks UserDefaults persistence. (#524)
         if let route { RouteStore.store(route, startTs: startTs, sport: w.sport) }
         lastWorkout = row
+        // Strava auto-upload (opt-in, bring-your-own-app): hand the finished run to the uploader, which
+        // builds a timestamped TCX and queues it for upload. No-op unless the user connected Strava and
+        // turned auto-upload on. GPS points carry their real capture times; HR is merged by second.
+        StravaService.shared.autoUploadIfEnabled(
+            sport: w.sport, start: w.start, end: end, distanceMeters: route?.distanceM ?? 0,
+            calories: Int(kcal.rounded()), samples: samples,
+            track: wasGps ? gpsRecorder.capturedTrackTimed() : [])
         // Workouts & GPS test mode: one session-end summary tagged `.workouts` (the lastSessionSummary readout
         // source) carrying the captured HR window size, the duration, and the accepted GPS point count, so the
         // lifecycle of a saved session is visible end to end. `pointCount` is the recorder's accepted-fix tally

@@ -159,6 +159,12 @@ struct SettingsView: View {
     /// Persisted so it remembers the user's choice; mirrors the Android `noop.settingsAdvancedOpen` key.
     @AppStorage(SettingsDisclosureDefaults.advancedOpenKey) private var advancedOpen = SettingsDisclosureDefaults.advancedOpenDefault
 
+    // Strava integration (bring-your-own-app). The service is a shared singleton so the endWorkout
+    // uploader and this card observe the same state; the drafts hold typed-but-not-yet-saved credentials.
+    @ObservedObject private var strava = StravaService.shared
+    @State private var stravaClientId = ""
+    @State private var stravaSecret = ""
+
     var body: some View {
         ScreenScaffold(title: "Settings",
                        subtitle: "Your numbers, your strap, and how NOOP works. All on \(Platform.deviceNounPhrase).") {
@@ -183,6 +189,7 @@ struct SettingsView: View {
                     recoveryCard
                     testCentreCard
                     experimentalCard
+                    stravaCard
                     backupCard
                 }
                 .staggeredAppear(index: 6)
@@ -2102,6 +2109,85 @@ private struct SettingsDisclosureGroup<Content: View>: View {
 
 /// A grouped settings card: a "Settings" overline + icon + title header, an explanatory blurb,
 /// then content. A faint accent-blue wash anchors the card to NOOP's neutral chrome (WHOOP skin).
+extension SettingsView {
+
+    /// Strava integration card (Advanced): bring-your-own Strava app, connect via OAuth, auto-upload runs.
+    var stravaCard: some View {
+        SettingsSection(
+            icon: "figure.run",
+            title: "Strava",
+            blurb: "Auto-upload finished runs to Strava. Uses your OWN Strava app — no NOOP server — and tokens stay in the Keychain on \(Platform.deviceNounPhrase)."
+        ) {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 12) {
+                    StatePill(strava.isConnected ? "Connected"
+                              : (strava.hasApp ? "Not connected" : "Add your Strava app"),
+                              tone: strava.isConnected ? .positive : .neutral,
+                              showsDot: strava.isConnected)
+                    if strava.busy { StatePill("Working…", tone: .accent, pulsing: true) }
+                    Spacer(minLength: 0)
+                }
+
+                if strava.isConnected {
+                    Toggle(isOn: $strava.autoUpload) {
+                        Text("Auto-upload finished runs")
+                            .font(StrandFont.body).foregroundStyle(StrandPalette.textPrimary)
+                    }
+                    .tint(StrandPalette.accent)
+                    NoopButton("Disconnect", systemImage: "xmark.circle", kind: .secondary) {
+                        strava.disconnect()
+                    }
+                } else {
+                    stravaField("Client ID", text: $stravaClientId, secure: false)
+                    stravaField("Client secret", text: $stravaSecret, secure: true)
+                    Text("In your Strava API app set the Authorization Callback Domain to “\(StravaAuthFlow.callbackDomain)”. Find your Client ID and secret at strava.com/settings/api.")
+                        .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: NoopMetrics.space3) {
+                        NoopButton("Save app", systemImage: "key.fill", kind: .secondary) {
+                            strava.saveApp(clientId: stravaClientId, clientSecret: stravaSecret)
+                            stravaSecret = ""
+                        }
+                        .disabled(stravaClientId.trimmingCharacters(in: .whitespaces).isEmpty
+                                  || stravaSecret.trimmingCharacters(in: .whitespaces).isEmpty)
+                        if strava.hasApp {
+                            NoopButton("Connect", systemImage: "link", kind: .primary) {
+                                Task { await strava.connect() }
+                            }
+                        }
+                    }
+                }
+
+                if !strava.status.isEmpty {
+                    Text(strava.status)
+                        .font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    func stravaField(_ label: String, text: Binding<String>, secure: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(LocalizedStringKey(label)).strandOverline()
+            Group {
+                if secure { SecureField(label, text: text) } else { TextField(label, text: text) }
+            }
+            .textFieldStyle(.plain)
+            .font(StrandFont.body).foregroundStyle(StrandPalette.textPrimary)
+            .padding(.horizontal, 12).padding(.vertical, 9)
+            .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(StrandPalette.hairline, lineWidth: 1))
+            #if os(iOS)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled(true)
+            #endif
+        }
+    }
+}
+
 private struct SettingsSection<Content: View>: View {
     let icon: String
     let title: LocalizedStringKey
