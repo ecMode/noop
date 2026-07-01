@@ -21,6 +21,9 @@ final class BehaviorStore: ObservableObject {
 
     // MARK: HR-zone haptic coaching (during a live session)
     @Published var zoneCoaching: Bool { didSet { d.set(zoneCoaching, forKey: K.zoneCoaching) } }
+    /// Which HR zone (2–5) the strap buzzes you into when crossing UP during a workout. Default 5
+    /// (the original "ease off at your top zone" behavior); set to 3 to be nudged out of zone 2, etc.
+    @Published var zoneCoachAlertZone: Int { didSet { d.set(zoneCoachAlertZone, forKey: K.zoneCoachAlertZone) } }
     /// Experimental: gentle buzz when a resting stress spike is detected (HRV drops while HR is calm).
     @Published var stressNudge: Bool { didSet { d.set(stressNudge, forKey: K.stress) } }
 
@@ -59,6 +62,7 @@ final class BehaviorStore: ObservableObject {
         static let wristOffShortcut = "behavior.wristOffShortcut"
         static let wristOnShortcut = "behavior.wristOnShortcut"
         static let zoneCoaching = "behavior.zoneCoaching"
+        static let zoneCoachAlertZone = "behavior.zoneCoachAlertZone"
         static let stress = "behavior.stressNudge"
         // Haptic biofeedback L3 — keys MATCH BiofeedbackPrefs (one source of truth, two readers).
         static let stressCheckIn = "biofeedback.stressCheckIn"
@@ -82,6 +86,8 @@ final class BehaviorStore: ObservableObject {
         wristOffShortcut = d.string(forKey: K.wristOffShortcut) ?? ""
         wristOnShortcut = d.string(forKey: K.wristOnShortcut) ?? ""
         zoneCoaching = d.object(forKey: K.zoneCoaching) as? Bool ?? false
+        // Clamp to 2…5 so a corrupted defaults entry can't point the buzz at a non-existent zone.
+        zoneCoachAlertZone = min(5, max(2, d.object(forKey: K.zoneCoachAlertZone) as? Int ?? 5))
         stressNudge = d.object(forKey: K.stress) as? Bool ?? false
         stressCheckIn = d.object(forKey: K.stressCheckIn) as? Bool ?? false
         stressAutoNudge = d.object(forKey: K.stressAutoNudge) as? Bool ?? false

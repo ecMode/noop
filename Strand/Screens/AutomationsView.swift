@@ -175,8 +175,19 @@ struct AutomationsView: View {
                  active: behavior.zoneCoaching || behavior.stressNudge || behavior.stressCheckIn) {
             VStack(spacing: 0) {
                 ToggleRow(label: "HR-zone coaching",
-                          help: "Buzz when you hit your top zone (ease off) and again when you recover. Uses your max HR from Settings.",
+                          help: "During a workout, buzz when your heart rate climbs into your alert zone and again when you recover. Uses your max HR from Settings.",
                           isOn: $behavior.zoneCoaching)
+                if behavior.zoneCoaching {
+                    HStack(alignment: .center, spacing: 16) {
+                        Text("Alert zone").font(StrandFont.body).foregroundStyle(StrandPalette.textPrimary)
+                        Spacer()
+                        Picker("", selection: $behavior.zoneCoachAlertZone) {
+                            ForEach(2...5, id: \.self) { Text("Zone \($0)").tag($0) }
+                        }
+                        .labelsHidden().fixedSize()
+                    }
+                    .frame(minHeight: 42).padding(.vertical, 4)
+                }
                 rowDivider
                 ToggleRow(label: "Resting stress nudge (experimental)",
                           help: "A gentle buzz when your HRV drops while your heart rate is calm — a cue to take a paced breath. Rate-limited to once every 15 minutes; off by default.",

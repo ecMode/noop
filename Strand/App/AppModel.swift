@@ -511,6 +511,9 @@ final class AppModel: ObservableObject {
         let resolved = name.isEmpty ? WorkoutCatalog.defaultSportName : name
         let started = Date()
         activeWorkout = ActiveWorkout(start: started, sport: resolved)
+        // Seed zone-coaching fresh so the first HR sample of this run only sets the baseline and never
+        // fires a buzz off a zone carried over from before the workout began.
+        lastCoachZone = -1
         // #524: arm GPS route recording for a distance-type sport (run / ride / walk / hike), mirroring
         // Android, which defaults GPS on for `isDistanceSport`. Manual-first / opt-in: only these sports
         // record a route, and the recorder still captures nothing unless the user grants When-In-Use
@@ -1239,16 +1242,20 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// HR-zone haptic coaching: buzz when crossing into the top zone (ease off) or back to recovery.
+    /// HR-zone haptic coaching: during a workout, buzz when crossing UP into your configured alert zone
+    /// (default 5 — ease off at your top zone; set lower to be nudged at, e.g., the zone 2→3 boundary),
+    /// and a single buzz on dropping back to recovery. Workout-gated so it only fires on an active run.
     private func coachZone(_ hr: Int?) {
-        guard behavior.zoneCoaching, live.bonded, live.worn, let hr, hr >= 30 else { return }
+        guard behavior.zoneCoaching, activeWorkout != nil, live.bonded, live.worn, let hr, hr >= 30 else { return }
         let maxHR = Double(profile.hrMax)
         guard maxHR > 0 else { return }
         let pct = Double(hr) / maxHR
         let zone = pct >= 0.9 ? 5 : pct >= 0.8 ? 4 : pct >= 0.7 ? 3 : pct >= 0.6 ? 2 : 1
         defer { lastCoachZone = zone }
         guard lastCoachZone != -1, zone != lastCoachZone else { return }
-        if zone == 5, lastCoachZone < 5 { buzz(loops: 3) }          // entered max , ease off
+        let alert = min(5, max(2, behavior.zoneCoachAlertZone))
+        // `>=` so a fast jump that skips a zone (e.g. 2→4 in one sample) still counts as crossing in.
+        if zone >= alert, lastCoachZone < alert { buzz(loops: 3) }  // crossed up into your alert zone , ease off
         else if zone <= 1, lastCoachZone > 1 { buzz(loops: 1) }     // recovered
     }
 
