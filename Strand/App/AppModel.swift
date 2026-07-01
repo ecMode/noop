@@ -143,6 +143,13 @@ final class AppModel: ObservableObject {
 
     private var lastDoubleTapAt: Date = .distantPast
     private var lastCoachZone: Int = -1
+    // Spoken workout audio (behavior.workoutAudioAlerts): the TTS player plus per-run trackers for the
+    // last zone we announced and the last whole-mile split. Bond-independent, so it works on an unbonded
+    // phone run. All three reseed in `startWorkout` so a new run starts clean.
+    private let workoutVoice = WorkoutVoice()
+    private var lastSpokenZone: Int = -1
+    private var lastAnnouncedMile: Int = 0
+    private var lastMileMarkerAt: Date = .distantPast
     // L3 stress-onset detector state: a rolling R-R buffer + the replay-safe detector state (persisted
     // via BiofeedbackPrefs so a relaunch can't re-fire), carried verbatim between evaluations.
     private var rrBuf: [Int] = []
@@ -245,8 +252,11 @@ final class AppModel: ObservableObject {
                                             charging: self.live.charging,
                                             enabled: self.behavior.batteryAlerts)
         }
-        // HR-zone haptic coaching watches the smoothed bpm.
-        $bpm.sink { [weak self] hr in self?.coachZone(hr) }.store(in: &hrCancellables)
+        // HR-zone haptic coaching (bond-gated) and spoken zone audio (bond-free) both watch the smoothed bpm.
+        $bpm.sink { [weak self] hr in
+            self?.coachZone(hr)
+            self?.announceZoneAudio(hr)
+        }.store(in: &hrCancellables)
         // Illness/strain early-warning recomputes when the daily history changes.
         repo.$days.sink { [weak self] days in self?.evaluateIllness(days) }.store(in: &hrCancellables)
         // Re-arm the strap's firmware alarm whenever it (re)bonds. A smart-alarm time changed while the
@@ -514,6 +524,11 @@ final class AppModel: ObservableObject {
         // Seed zone-coaching fresh so the first HR sample of this run only sets the baseline and never
         // fires a buzz off a zone carried over from before the workout began.
         lastCoachZone = -1
+        // Reseed the spoken-audio trackers too: no zone announced yet, no mile crossed, and the first
+        // mile is timed from the workout start.
+        lastSpokenZone = -1
+        lastAnnouncedMile = 0
+        lastMileMarkerAt = started
         // #524: arm GPS route recording for a distance-type sport (run / ride / walk / hike), mirroring
         // Android, which defaults GPS on for `isDistanceSport`. Manual-first / opt-in: only these sports
         // record a route, and the recorder still captures nothing unless the user grants When-In-Use
@@ -686,6 +701,8 @@ final class AppModel: ObservableObject {
         activeWorkout = w
         // Re-snapshot the durable session so a kill keeps the latest accumulated HR window (#529).
         persistActiveWorkout()
+        // Spoken per-mile split (bond-free audio), if enabled — checked on every sample against live GPS.
+        announceMileSplitIfNeeded()
     }
 
     /// Drop the smoothing window and blank the hero number so a resume / re-attach shows ","
@@ -1257,6 +1274,51 @@ final class AppModel: ObservableObject {
         // `>=` so a fast jump that skips a zone (e.g. 2→4 in one sample) still counts as crossing in.
         if zone >= alert, lastCoachZone < alert { buzz(loops: 3) }  // crossed up into your alert zone , ease off
         else if zone <= 1, lastCoachZone > 1 { buzz(loops: 1) }     // recovered
+    }
+
+    /// Spoken HR-zone announcements during a workout (behavior.workoutAudioAlerts). Announces every zone
+    /// change, up or down ("entering zone 3" / "dropped to zone 2"). Deliberately NOT gated on the strap
+    /// bond or wrist-worn state — TTS needs no BLE, so this works on an unbonded phone run where the
+    /// haptic `coachZone` above stays silent.
+    private func announceZoneAudio(_ hr: Int?) {
+        guard behavior.workoutAudioAlerts, activeWorkout != nil, let hr, hr >= 30 else { return }
+        let maxHR = Double(profile.hrMax)
+        guard maxHR > 0 else { return }
+        let pct = Double(hr) / maxHR
+        let zone = pct >= 0.9 ? 5 : pct >= 0.8 ? 4 : pct >= 0.7 ? 3 : pct >= 0.6 ? 2 : 1
+        defer { lastSpokenZone = zone }
+        guard lastSpokenZone != -1, zone != lastSpokenZone else { return }
+        if zone > lastSpokenZone { workoutVoice.announce("Entering zone \(zone)") }
+        else { workoutVoice.announce("Dropped to zone \(zone)") }
+    }
+
+    /// Meters in one mile — splits are announced per mile (US units), per the user's preference.
+    private static let metersPerMile = 1609.344
+
+    /// Per-mile spoken split during a GPS workout (behavior.workoutAudioAlerts). On crossing each whole
+    /// mile it announces the mile number, the last mile's pace, the overall average pace, and current HR.
+    /// Driven from `captureWorkoutSample` (~1 Hz), reading the live GPS distance. Bond-free.
+    private func announceMileSplitIfNeeded() {
+        guard behavior.workoutAudioAlerts, activeWorkoutIsGps, let w = activeWorkout else { return }
+        let miles = Int(gpsRecorder.distanceM / AppModel.metersPerMile)
+        guard miles > lastAnnouncedMile else { return }
+        let now = Date()
+        // Seconds for just the mile we crossed (since the previous marker), and the run's average pace.
+        let lastMileSec = now.timeIntervalSince(lastMileMarkerAt)
+        let avgMileSec = miles > 0 ? now.timeIntervalSince(w.start) / Double(miles) : lastMileSec
+        lastAnnouncedMile = miles
+        lastMileMarkerAt = now
+        var line = "Mile \(miles). Last mile \(Self.spokenPace(lastMileSec))."
+        line += " Average pace \(Self.spokenPace(avgMileSec))."
+        if let hr = bpm { line += " Heart rate \(hr)." }
+        workoutVoice.announce(line)
+    }
+
+    /// Format a per-mile duration (seconds) as a spoken pace, e.g. 492s → "8 minutes 12 seconds".
+    private static func spokenPace(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        let m = total / 60, s = total % 60
+        return "\(m) minute\(m == 1 ? "" : "s") \(s) second\(s == 1 ? "" : "s")"
     }
 
     /// Illness/strain early-warning (v5): the confounder-suppressed `IllnessSignalEngine`. For the last

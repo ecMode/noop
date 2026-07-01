@@ -189,6 +189,10 @@ struct AutomationsView: View {
                     .frame(minHeight: 42).padding(.vertical, 4)
                 }
                 rowDivider
+                ToggleRow(label: "Spoken workout audio",
+                          help: "During a workout, speak your HR-zone changes and each mile split (last-mile pace, average pace, current HR). Ducks under your music. Works without a strap bond — good for an outdoor run recorded on the phone.",
+                          isOn: $behavior.workoutAudioAlerts)
+                rowDivider
                 ToggleRow(label: "Resting stress nudge (experimental)",
                           help: "A gentle buzz when your HRV drops while your heart rate is calm — a cue to take a paced breath. Rate-limited to once every 15 minutes; off by default.",
                           isOn: $behavior.stressNudge)
