@@ -29,7 +29,7 @@ extension WhoopStore {
     /// creating a duplicate.
     @discardableResult
     public func upsertMetricSeries(_ rows: [MetricPoint], deviceId: String) async throws -> Int {
-        try syncWrite { db in
+        let changed = try syncWrite { db in
             var n = 0
             for r in rows {
                 try db.execute(sql: """
@@ -43,6 +43,12 @@ extension WhoopStore {
             }
             return n
         }
+        // Metric series is synced as ONE packed record per (deviceId, day), so emit a single change per
+        // DISTINCT day touched — the outbound builder then reads the whole day's keys.
+        for day in Set(rows.map(\.day)) {
+            emitChanges([StoreChange(kind: .metricSeries, deviceId: deviceId, key: day, isDelete: false)])
+        }
+        return changed
     }
 
     // MARK: - Reads

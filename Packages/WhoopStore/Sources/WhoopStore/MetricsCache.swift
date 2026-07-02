@@ -82,7 +82,7 @@ extension WhoopStore {
     /// Upsert cached sleep sessions. Natural key (deviceId, startTs). Returns rows changed.
     @discardableResult
     public func upsertSleepSessions(_ sessions: [CachedSleepSession], deviceId: String) async throws -> Int {
-        try syncWrite { db in
+        let changed = try syncWrite { db in
             var n = 0
             for s in sessions {
                 try db.execute(sql: """
@@ -108,6 +108,8 @@ extension WhoopStore {
             }
             return n
         }
+        emitChanges(sessions.map { StoreChange(kind: .sleep, deviceId: deviceId, key: "\($0.startTs)", isDelete: false) })
+        return changed
     }
 
     /// Hand-correct a sleep session's bed (onset) and/or wake (end) time. Sets `userEdited = 1` so the
@@ -121,7 +123,7 @@ extension WhoopStore {
     @discardableResult
     public func applySleepEdit(deviceId: String, detectedStartTs: Int, newStartTs: Int, newEndTs: Int,
                                stagesJSON: String? = nil) async throws -> Int {
-        try syncWrite { db in
+        let n = try syncWrite { db in
             try db.execute(sql: """
                 UPDATE sleepSession
                 SET startTsAdjusted = ?, endTs = ?, stagesJSON = COALESCE(?, stagesJSON), userEdited = 1
@@ -129,6 +131,8 @@ extension WhoopStore {
                 """, arguments: [newStartTs, newEndTs, stagesJSON, deviceId, detectedStartTs])
             return db.changesCount
         }
+        if n > 0 { emitChanges([StoreChange(kind: .sleep, deviceId: deviceId, key: "\(detectedStartTs)", isDelete: false)]) }
+        return n
     }
 
     /// Delete ONE sleep session entirely — the delete half of `applySleepEdit` with no re-insert.
@@ -140,11 +144,13 @@ extension WhoopStore {
     /// store call only removes the row.
     @discardableResult
     public func deleteSleepSession(deviceId: String, startTs: Int) async throws -> Int {
-        try syncWrite { db in
+        let n = try syncWrite { db in
             try db.execute(sql: "DELETE FROM sleepSession WHERE deviceId = ? AND startTs = ?",
                            arguments: [deviceId, startTs])
             return db.changesCount
         }
+        emitChanges([StoreChange(kind: .sleep, deviceId: deviceId, key: "\(startTs)", isDelete: true)])
+        return n
     }
 
     /// Manually ADD a sleep session the detector missed — typically a daytime NAP (#508). Inserts a NEW
@@ -162,7 +168,7 @@ extension WhoopStore {
     @discardableResult
     public func insertManualSleepSession(deviceId: String, startTs: Int, endTs: Int,
                                          efficiency: Double?, stagesJSON: String?) async throws -> Int {
-        try syncWrite { db in
+        let n = try syncWrite { db in
             try db.execute(sql: """
                 INSERT INTO sleepSession
                     (deviceId, startTs, endTs, efficiency, restingHr, avgHrv, stagesJSON,
@@ -172,6 +178,8 @@ extension WhoopStore {
                 """, arguments: [deviceId, startTs, endTs, efficiency, stagesJSON])
             return db.changesCount
         }
+        if n > 0 { emitChanges([StoreChange(kind: .sleep, deviceId: deviceId, key: "\(startTs)", isDelete: false)]) }
+        return n
     }
 
     /// Replace ONLY the stage breakdown of an already user-edited night, leaving the corrected bed/wake
@@ -184,7 +192,7 @@ extension WhoopStore {
     /// Returns rows changed (0 when no such edited session exists).
     @discardableResult
     public func updateSleepStages(deviceId: String, detectedStartTs: Int, stagesJSON: String) async throws -> Int {
-        try syncWrite { db in
+        let n = try syncWrite { db in
             try db.execute(sql: """
                 UPDATE sleepSession
                 SET stagesJSON = ?
@@ -192,6 +200,8 @@ extension WhoopStore {
                 """, arguments: [stagesJSON, deviceId, detectedStartTs])
             return db.changesCount
         }
+        if n > 0 { emitChanges([StoreChange(kind: .sleep, deviceId: deviceId, key: "\(detectedStartTs)", isDelete: false)]) }
+        return n
     }
 
     // MARK: - Per-epoch sleep analytics (v18: motionJSON / sleepStateJSON)
@@ -273,7 +283,7 @@ extension WhoopStore {
     /// Upsert cached daily metrics. Natural key (deviceId, day). Returns rows changed.
     @discardableResult
     public func upsertDailyMetrics(_ days: [DailyMetric], deviceId: String) async throws -> Int {
-        try syncWrite { db in
+        let changed = try syncWrite { db in
             var n = 0
             for d in days {
                 try db.execute(sql: """
@@ -308,6 +318,8 @@ extension WhoopStore {
             }
             return n
         }
+        emitChanges(days.map { StoreChange(kind: .daily, deviceId: deviceId, key: $0.day, isDelete: false) })
+        return changed
     }
 
     /// Delete a source's cached daily rows whose day-key is in [from, to] (inclusive, yyyy-MM-dd

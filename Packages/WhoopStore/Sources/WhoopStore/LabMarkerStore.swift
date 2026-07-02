@@ -111,7 +111,7 @@ extension WhoopStore {
     @discardableResult
     public func upsertLabMarkers(_ rows: [LabMarkerRow]) async throws -> Int {
         guard !rows.isEmpty else { return 0 }
-        return try syncWrite { db in
+        let written = try syncWrite { db in
             var written = 0
             // Track which (deviceId, markerKey, day) cells need re-projecting.
             var touched: Set<DayCell> = []
@@ -142,6 +142,9 @@ extension WhoopStore {
             try reprojectCells(db, cells: touched)
             return written
         }
+        // deviceId lives on each row here (unlike the other tables), so emit per row from the row itself.
+        emitChanges(rows.map { StoreChange(kind: .labMarker, deviceId: $0.deviceId, key: $0.id, isDelete: false) })
+        return written
     }
 
     // MARK: - Reads
@@ -189,16 +192,20 @@ extension WhoopStore {
     /// a row was deleted.
     @discardableResult
     public func deleteLabMarker(id: String) async throws -> Bool {
-        try syncWrite { db in
+        let result: (deleted: Bool, deviceId: String?) = try syncWrite { db in
             // Capture the cell so we can re-project after the delete.
             guard let row = try Row.fetchOne(db, sql:
                 "SELECT * FROM labMarker WHERE id = ?", arguments: [id]).map(LabMarkerRow.decode) else {
-                return false
+                return (false, nil)
             }
             try db.execute(sql: "DELETE FROM labMarker WHERE id = ?", arguments: [id])
             try reprojectCells(db, cells: [DayCell(deviceId: row.deviceId, markerKey: row.markerKey, day: row.day)])
-            return true
+            return (true, row.deviceId)
         }
+        if result.deleted, let dev = result.deviceId {
+            emitChanges([StoreChange(kind: .labMarker, deviceId: dev, key: id, isDelete: true)])
+        }
+        return result.deleted
     }
 
     // MARK: - Projection helpers (private)

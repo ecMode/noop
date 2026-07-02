@@ -132,6 +132,7 @@ struct StrandiOSApp: App {
                 // Re-arm the strap's smart alarm on foreground: the firmware alarm is a single instant
                 // and iOS can't re-arm it while suspended, so it would otherwise fire once and stop.
                 model.applySmartAlarm()
+                CloudSync.shared.fetchChangesInBackground()   // pull any workouts synced from the Mac
                 Task {
                     health.refreshAuthIfPreviouslyGranted()
                     await health.sync()

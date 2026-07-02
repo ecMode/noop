@@ -70,7 +70,7 @@ extension WhoopStore {
     /// Upsert journal entries. Natural key (deviceId, day, question). Returns rows changed.
     @discardableResult
     public func upsertJournal(_ rows: [JournalEntry], deviceId: String) async throws -> Int {
-        try syncWrite { db in
+        let changed = try syncWrite { db in
             var n = 0
             for r in rows {
                 try db.execute(sql: """
@@ -85,6 +85,8 @@ extension WhoopStore {
             }
             return n
         }
+        emitChanges(rows.map { StoreChange(kind: .journal, deviceId: deviceId, key: "\($0.day)|\($0.question)", isDelete: false) })
+        return changed
     }
 
     /// Delete one journal answer by natural key (the native logging card's "clear"). Source-scoped
@@ -92,18 +94,20 @@ extension WhoopStore {
     /// row. Returns rows deleted.
     @discardableResult
     public func deleteJournal(deviceId: String, day: String, question: String) async throws -> Int {
-        try syncWrite { db in
+        let n = try syncWrite { db in
             try db.execute(sql: """
                 DELETE FROM journal WHERE deviceId = ? AND day = ? AND question = ?
                 """, arguments: [deviceId, day, question])
             return db.changesCount
         }
+        emitChanges([StoreChange(kind: .journal, deviceId: deviceId, key: "\(day)|\(question)", isDelete: true)])
+        return n
     }
 
     /// Upsert workouts. Natural key (deviceId, startTs, sport). Returns rows changed.
     @discardableResult
     public func upsertWorkouts(_ rows: [WorkoutRow], deviceId: String) async throws -> Int {
-        try syncWrite { db in
+        let changed = try syncWrite { db in
             var n = 0
             for r in rows {
                 try db.execute(sql: """
@@ -129,6 +133,11 @@ extension WhoopStore {
             }
             return n
         }
+        // Notify the outbound sync layer of every row we upserted (suppressed while applying inbound
+        // remote records). Emit per row regardless of changesCount: an idempotent re-write of the same
+        // values should still (re)assert the CloudKit record.
+        emitChanges(rows.map { StoreChange.workout(deviceId: deviceId, startTs: $0.startTs, sport: $0.sport, isDelete: false) })
+        return changed
     }
 
     /// Delete one source's workouts of a given sport whose startTs is in [from, to]
@@ -136,19 +145,26 @@ extension WhoopStore {
     /// Port of Android WhoopDao.deleteWorkoutsBySport (#78).
     @discardableResult
     public func deleteWorkouts(deviceId: String, sport: String, from: Int, to: Int) async throws -> Int {
-        try syncWrite { db in
+        let n = try syncWrite { db in
             try db.execute(sql: """
                 DELETE FROM workout
                 WHERE deviceId = ? AND sport = ? AND startTs >= ? AND startTs <= ?
                 """, arguments: [deviceId, sport, from, to])
             return db.changesCount
         }
+        // Propagate a delete only for the single-row case (from == to == startTs), which is how the app
+        // deletes one workout. Range deletes (detected-workout re-derivation, migrations) span an
+        // unknown set of rows we can't name individually, so we don't emit tombstones for them.
+        if from == to {
+            emitChanges([StoreChange.workout(deviceId: deviceId, startTs: from, sport: sport, isDelete: true)])
+        }
+        return n
     }
 
     /// Upsert Apple-Health daily aggregates. Natural key (deviceId, day). Returns rows changed.
     @discardableResult
     public func upsertAppleDaily(_ rows: [AppleDaily], deviceId: String) async throws -> Int {
-        try syncWrite { db in
+        let changed = try syncWrite { db in
             var n = 0
             for r in rows {
                 try db.execute(sql: """
@@ -171,6 +187,8 @@ extension WhoopStore {
             }
             return n
         }
+        emitChanges(rows.map { StoreChange(kind: .appleDaily, deviceId: deviceId, key: $0.day, isDelete: false) })
+        return changed
     }
 
     // MARK: - Reads

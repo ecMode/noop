@@ -24,6 +24,17 @@ public enum WhoopStoreInfo {
 public actor WhoopStore {
     let dbWriter: any DatabaseWriter
 
+    /// Optional sink notified after each successful local upsert/delete with the natural-keyed rows
+    /// that changed, so an outbound sync layer (CloudSync) knows what to push. Nil = sync off. Set via
+    /// `setChangeSink`. See StoreSync.swift for the emitter + the `suppressChangeEmission` guard that
+    /// stops inbound remote applies from echoing straight back out.
+    var changeSink: (@Sendable ([StoreChange]) -> Void)?
+
+    /// True while applying inbound remote records, so `emitChanges` stays silent and a synced-in row is
+    /// not re-queued as a local change (an echo loop). Task-local so it propagates across the `await`
+    /// hops of an apply block within the same task, and only there. Toggled by `applyingRemoteChanges`.
+    @TaskLocal static var suppressChangeEmission = false
+
     /// Read-only handle to the underlying GRDB writer for the synchronous `DeviceRegistryStore`.
     /// `nonisolated` because a GRDB `DatabaseWriter` (here a `DatabasePool`) is `Sendable` and
     /// manages its own concurrency, so concurrent access alongside the actor's own DB work is safe

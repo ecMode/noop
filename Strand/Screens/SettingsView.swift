@@ -165,6 +165,10 @@ struct SettingsView: View {
     @State private var stravaClientId = ""
     @State private var stravaSecret = ""
 
+    // iCloud sync (beta) master gate — same UserDefaults key CloudSync reads at launch. Toggling on
+    // starts the engine immediately; off takes effect on next launch (the engine can't cleanly stop).
+    @AppStorage(CloudSync.enabledKey) private var cloudSyncEnabled = false
+
     var body: some View {
         ScreenScaffold(title: "Settings",
                        subtitle: "Your numbers, your strap, and how NOOP works. All on \(Platform.deviceNounPhrase).") {
@@ -190,6 +194,7 @@ struct SettingsView: View {
                     testCentreCard
                     experimentalCard
                     stravaCard
+                    cloudSyncCard
                     backupCard
                 }
                 .staggeredAppear(index: 6)
@@ -1020,7 +1025,7 @@ struct SettingsView: View {
         SettingsSection(
             icon: "bed.double.fill",
             title: "Experimental · Sleep staging",
-            blurb: "How NOOP splits a night into light / deep / REM. This is a separate, opt-in recipe — your default staging is unchanged unless you turn it on."
+            blurb: "How NOOP splits a night into light / deep / REM. On WHOOP 5/MG this cardiorespiratory recipe (V2) is the default — that strap has no respiration channel, which the older staging needs. On WHOOP 4.0 the default is unchanged; turn this on to use V2 there too."
         ) {
             VStack(alignment: .leading, spacing: NoopMetrics.rowSpacing) {
                 Toggle(isOn: $experimentalSleepV2Enabled) {
@@ -1030,7 +1035,7 @@ struct SettingsView: View {
                 }
                 .toggleStyle(.switch)
                 .tint(StrandPalette.accent)
-                Text("A transparent cardiorespiratory recipe that recovers deep and REM better than the default staging. Opt-in and experimental — it only changes how already-detected nights are split into stages (detection and scores are unchanged), and the default staging stays in place if you leave this off. Takes effect on the next nights staged.")
+                Text("A transparent cardiorespiratory recipe that recovers deep and REM better than the older staging, especially without a respiration channel. It is already the default on WHOOP 5/MG, so this switch only affects WHOOP 4.0 — turning it on forces V2 there too. It changes only how already-detected nights are split into stages (detection and scores are unchanged) and takes effect on the next nights staged.")
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -2163,6 +2168,32 @@ extension SettingsView {
                         .font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+        }
+    }
+
+    /// iCloud Sync card (Advanced, beta): mirror workouts + GPS routes between Mac and iPhone through
+    /// the user's private CloudKit database. Slice 1 syncs workouts; more data types follow.
+    var cloudSyncCard: some View {
+        SettingsSection(
+            icon: "icloud",
+            title: "iCloud Sync",
+            blurb: "Mirror your data between your Mac and iPhone through your OWN private iCloud — workouts (with GPS routes), sleep, daily scores, journal, Apple Health metrics and lab markers. Beta."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle(isOn: $cloudSyncEnabled) {
+                    Text("Sync via iCloud")
+                        .font(StrandFont.body).foregroundStyle(StrandPalette.textPrimary)
+                }
+                .tint(StrandPalette.accent)
+                .onChange(of: cloudSyncEnabled) { _, on in
+                    if on { CloudSync.shared.startIfEnabled(repo: model.repo) }
+                }
+                Text(cloudSyncEnabled
+                     ? "On. Your existing and new data uploads to iCloud and appears on your other device signed into the same Apple ID. Turning off takes effect on next launch."
+                     : "Off. Nothing is sent to iCloud.")
+                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
