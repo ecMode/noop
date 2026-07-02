@@ -2,7 +2,7 @@ name: Strand
 options:
   bundleIdPrefix: com.noopapp
   deploymentTarget:
-    macOS: "13.0"
+    macOS: "14.0"
   createIntermediateGroups: true
   groupSortPosition: top
   # Base/development language. The in-source UI strings are authored in English (US);
@@ -21,13 +21,21 @@ settings:
     # String Catalog on build (the English (US) base entries).
     SWIFT_EMIT_LOC_STRINGS: YES
     SWIFT_STRICT_CONCURRENCY: minimal
-    DEVELOPMENT_TEAM: ""
+    DEVELOPMENT_TEAM: "QX8VRKT84F"
     CODE_SIGN_STYLE: Automatic
     # Single source of truth for the App Group id shared by the iOS app + its widget / Live Activity
     # extension. Referenced as $(APP_GROUP_ID) by both targets' entitlements and Info.plist, and read
     # at runtime via the AppGroupIdentifier Info.plist key (WidgetSnapshot.suiteName) so the value is
     # never hard-coded in Swift. Change it in this one place when building under your own Apple ID.
-    APP_GROUP_ID: group.com.noopapp.noop
+    APP_GROUP_ID: group.com.ecmode.loop
+    # Single source of truth for the CloudKit container the macOS + iOS apps sync through (private DB).
+    # Referenced as $(ICLOUD_CONTAINER_ID) by both targets' iCloud entitlements, exactly like
+    # APP_GROUP_ID above. BOTH apps must declare the SAME container id AND sign under the same team
+    # for their data to converge in one iCloud store. Canonical upstream default is
+    # iCloud.com.noopapp.noop; this personal (ecMode) build overrides it to iCloud.com.ecmode.loop.
+    # The container is registered on the developer portal (team QX8VRKT84F) at build time via
+    # automatic signing (-allowProvisioningUpdates). Change it here when building under your own Apple ID.
+    ICLOUD_CONTAINER_ID: iCloud.com.ecmode.loop
     # Build for both Apple Silicon and Intel so the release runs on every Mac.
     ARCHS: "$(ARCHS_STANDARD)"
   configs:
@@ -67,7 +75,7 @@ targets:
   Strand:
     type: application
     platform: macOS
-    deploymentTarget: "13.0"
+    deploymentTarget: "14.0"
     sources:
       - path: Strand
         excludes:
@@ -76,12 +84,17 @@ targets:
     info:
       path: Strand/Resources/Info.plist
       properties:
-        CFBundleName: NOOP
-        CFBundleDisplayName: NOOP
+        CFBundleName: Loop
+        CFBundleDisplayName: Loop
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "196"
-        LSMinimumSystemVersion: "13.0"
+        LSMinimumSystemVersion: "14.0"
         LSApplicationCategoryType: public.app-category.healthcare-fitness
+        # Surfaces the CloudKit container id to runtime (CloudSync reads it) so it isn't hard-coded in
+        # Swift — mirrors AppGroupIdentifier. Stays in sync with the icloud-container-identifiers
+        # entitlement (both $(ICLOUD_CONTAINER_ID)). macOS bundle id ≠ container id, so CKContainer.default()
+        # would resolve the wrong one; the app must build the container from THIS explicit value.
+        ICloudContainerIdentifier: "$(ICLOUD_CONTAINER_ID)"
         NSBluetoothAlwaysUsageDescription: "NOOP connects directly to your WHOOP strap over Bluetooth to read heart rate, R-R intervals, battery, and sensor data locally on your Mac. Nothing leaves your device."
         NSLocationWhenInUseUsageDescription: "NOOP records your route during an outdoor workout to show distance, pace, and a map. The route stays on your device. Nothing leaves it."
         # The AI Coach's "Custom (OpenAI-compatible)" provider talks to a LOCAL LLM server over plain
@@ -101,9 +114,22 @@ targets:
         # re-sign), so this matters only for a SIGNED/sandboxed build (where the sandbox
         # otherwise blocks the Coach's request — #128). Data path stays network-free.
         com.apple.security.network.client: true
+        # CloudKit private-database sync (macOS ⇄ iOS). The container id comes from $(ICLOUD_CONTAINER_ID)
+        # (see base settings) so the macOS + iOS apps declare the SAME container and converge in one
+        # private iCloud store. CloudKit rides the existing network.client entitlement under the sandbox.
+        com.apple.developer.icloud-container-identifiers:
+          - $(ICLOUD_CONTAINER_ID)
+        com.apple.developer.icloud-services:
+          - CloudKit
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.noopapp.noop
+        # Personal (ecMode) build: com.noopapp.noop is the UPSTREAM author's identifier and can't be
+        # registered to this team, so CloudKit (which needs a real provisioning profile) forces a unique
+        # id. Reuse the iOS app's com.ecmode.loop so both platforms share ONE App ID + the already-
+        # provisioned iCloud.com.ecmode.loop container. NOTE: the sandbox container path is keyed to this
+        # id, so the existing DB under ~/Library/Containers/com.noopapp.noop/... must be copied into the
+        # new ~/Library/Containers/com.ecmode.loop/... container (one-time migration).
+        PRODUCT_BUNDLE_IDENTIFIER: com.ecmode.loop
         PRODUCT_NAME: NOOP
         # Pin the Swift module name so `@testable import Strand` resolves even though PRODUCT_NAME is
         # NOOP — the test target and shared sources refer to the app module as `Strand`.
@@ -126,7 +152,7 @@ targets:
   StrandTests:
     type: bundle.unit-test
     platform: macOS
-    deploymentTarget: "13.0"
+    deploymentTarget: "14.0"
     sources:
       - StrandTests
     dependencies:
@@ -180,13 +206,16 @@ targets:
     info:
       path: StrandiOS/Resources/Info.plist
       properties:
-        CFBundleName: NOOP
-        CFBundleDisplayName: NOOP
+        CFBundleName: Loop
+        CFBundleDisplayName: Loop
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         # Surfaces APP_GROUP_ID to runtime (WidgetSnapshot.suiteName) so the App Group id isn't
         # hard-coded in Swift; stays in sync with the application-groups entitlement (both $(APP_GROUP_ID)).
         AppGroupIdentifier: "$(APP_GROUP_ID)"
+        # Surfaces the CloudKit container id to runtime (CloudSync reads it), mirroring AppGroupIdentifier.
+        # Stays in sync with the icloud-container-identifiers entitlement (both $(ICLOUD_CONTAINER_ID)).
+        ICloudContainerIdentifier: "$(ICLOUD_CONTAINER_ID)"
         LSApplicationCategoryType: public.app-category.healthcare-fitness
         UILaunchScreen: {}
         # Alternate app icons (v3 "Titanium & Gold"). The primary icon stays the asset-catalog
@@ -223,7 +252,7 @@ targets:
         # ScheduledDebugExport.bgTaskIdentifier EXACTLY and be registered at launch (StrandiOSApp.init);
         # otherwise iOS refuses to schedule or deliver the background drop.
         BGTaskSchedulerPermittedIdentifiers:
-          - com.noopapp.noop.debugexport
+          - com.ecmode.loop.debugexport
         NSBluetoothAlwaysUsageDescription: "NOOP connects directly to your WHOOP strap over Bluetooth to read heart rate, R-R intervals, battery, and sensor data locally on your iPhone. Nothing leaves your device."
         NSLocationWhenInUseUsageDescription: "NOOP records your route during an outdoor workout to show distance, pace, and a map, and keeps recording while the screen is off. The route stays on your device. Nothing leaves it."
         NSHealthShareUsageDescription: "NOOP reads your own Apple Health data on-device to compute recovery, strain, and sleep. Nothing leaves your device."
@@ -246,9 +275,15 @@ targets:
         com.apple.developer.healthkit.access: []
         com.apple.security.application-groups:
           - $(APP_GROUP_ID)
+        # CloudKit private-database sync (iOS ⇄ macOS). Same $(ICLOUD_CONTAINER_ID) as the macOS Strand
+        # target so both apps share one private iCloud store. See base settings for the container id.
+        com.apple.developer.icloud-container-identifiers:
+          - $(ICLOUD_CONTAINER_ID)
+        com.apple.developer.icloud-services:
+          - CloudKit
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.noopapp.noop
+        PRODUCT_BUNDLE_IDENTIFIER: com.ecmode.loop
         PRODUCT_NAME: NOOP
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Ship every *.appiconset (not just the primary AppIcon) so the alternate "AppIcon-Navy"
@@ -266,11 +301,9 @@ targets:
       - package: MarkdownUI
       - package: ZIPFoundation
       - target: NOOPiOSWidgets
-      # Embed the watchOS app so the iPhone app carries it (NOOP.app/Watch/NOOPWatch.app). A watch app
-      # installs by riding inside its iOS companion; without this it would never reach a paired watch.
-      # Build-from-source delivers it for certain; sideload install of the embedded watch app under a free
-      # Apple ID is unproven (an Apple limitation), so the docs steer watch users to a source build for now.
-      - target: NOOPWatch
+      # Personal build (ecMode): the embedded Apple Watch app is intentionally omitted so the iPhone
+      # build does NOT require the watchOS platform to be installed. Re-add `- target: NOOPWatch` (and
+      # install the watchOS platform) if you later want the watch app on the wrist.
 
   # WidgetKit + Live Activity extension — the iOS analogue of the macOS menu-bar
   # extra. Reads a tiny snapshot the app publishes into the shared App Group.
@@ -307,7 +340,7 @@ targets:
           - $(APP_GROUP_ID)
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.noopapp.noop.widgets
+        PRODUCT_BUNDLE_IDENTIFIER: com.ecmode.loop.widgets
         PRODUCT_NAME: NOOPWidgets
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1,2"
@@ -344,7 +377,7 @@ targets:
         # Modern single-target watchOS app — no separate WatchKit extension.
         WKApplication: true
         # Pairs this watch app to the iPhone companion (must match NOOPiOS PRODUCT_BUNDLE_IDENTIFIER).
-        WKCompanionAppBundleIdentifier: com.noopapp.noop
+        WKCompanionAppBundleIdentifier: com.ecmode.loop
         NSHealthShareUsageDescription: "NOOP reads your heart rate from the Watch sensor to show a live readout on your wrist. It stays on your device."
         NSHealthUpdateUsageDescription: "NOOP records a basic workout session on your Watch for a higher-fidelity heart rate. The session stays on your device."
     entitlements:
@@ -356,7 +389,7 @@ targets:
           - $(APP_GROUP_ID)
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.noopapp.noop.watch
+        PRODUCT_BUNDLE_IDENTIFIER: com.ecmode.loop.watch
         # The bundle FILE is NOOPWatch.app so it doesn't collide with the iPhone app's NOOP.app when it is
         # embedded at NOOP.app/Watch/NOOPWatch.app. The user still sees "NOOP" on the wrist via the
         # CFBundleName / CFBundleDisplayName above.
@@ -404,7 +437,7 @@ targets:
           - $(APP_GROUP_ID)
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.noopapp.noop.watch.complications
+        PRODUCT_BUNDLE_IDENTIFIER: com.ecmode.loop.watch.complications
         PRODUCT_NAME: NOOPWatchComplications
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "4"
