@@ -298,8 +298,15 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
     @Published private(set) var isRecording = false
     /// Live route distance in metres (0 until two accepted fixes). Honest: 0 when nothing was captured.
     @Published private(set) var distanceM: Double = 0
-    /// Live pace in seconds per kilometre, or nil when distance is still zero (pace undefined).
+    /// Live AVERAGE pace in seconds per kilometre (total distance ÷ total elapsed), or nil when distance
+    /// is still zero (pace undefined).
     @Published private(set) var paceSecPerKm: Double?
+    /// Live CURRENT pace in seconds per kilometre — distance covered over the trailing
+    /// `currentPaceWindowSec` of accepted fixes ÷ that window's elapsed time. This is the instantaneous
+    /// read a runner watches, distinct from `paceSecPerKm` (whole-run average). nil until the window
+    /// holds ≥2 fixes spanning real time and distance, so a stopped/no-fix state reads "—" not a stale
+    /// number.
+    @Published private(set) var currentPaceSecPerKm: Double?
     /// Number of accepted route points so far (lets the UI distinguish "recording, no fix yet" from "off").
     @Published private(set) var pointCount = 0
 
@@ -347,6 +354,7 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
         self.startMs = startMs
         distanceM = 0
         paceSecPerKm = nil
+        currentPaceSecPerKm = nil
         pointCount = 0
         rawFixCount = 0
         isRecording = true
@@ -417,6 +425,7 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
         distanceM = RouteMath.totalMeters(track)
         let elapsed = Double(Int64(Date().timeIntervalSince1970 * 1000) - startMs) / 1000.0
         paceSecPerKm = RouteMath.paceSecPerKm(meters: distanceM, seconds: elapsed)
+        currentPaceSecPerKm = Self.rollingPace(points: track, times: trackTimes)
         // Workouts & GPS test mode: one GPS-fix-progress line tagged `.workouts` per batch that added a point,
         // showing raw fixes seen, how many the accuracy/speed filter accepted, and the running distance, so a
         // route that under-records (weak signal / denied permission) is visible. Zero-cost when off (the gate
@@ -425,6 +434,21 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
             workoutsLog(WorkoutsTrace.gpsLine(rawFixes: rawFixCount, acceptedPoints: pointCount,
                                               distanceM: distanceM))
         }
+    }
+
+    /// Trailing-window "current" pace: distance covered in the last `currentPaceWindowSec` of accepted
+    /// fixes ÷ that window's elapsed time. Returns nil (→ "—") when the window can't span ≥2 fixes over
+    /// real time and distance, so a stopped runner never sees a stale pace. Pure; the window is measured
+    /// against the newest fix's own timestamp, not wall-clock, so it's unaffected by when this runs.
+    private static let currentPaceWindowSec: Int64 = 30
+    private static func rollingPace(points: [RouteMath.LatLng], times: [Int64]) -> Double? {
+        guard points.count >= 2, let lastT = times.last else { return nil }
+        let cutoff = lastT - currentPaceWindowSec * 1000
+        // First fix inside the window; need at least one more fix after it to have a leg to measure.
+        guard let i = times.firstIndex(where: { $0 >= cutoff }), i < points.count - 1 else { return nil }
+        let windowSec = Double(lastT - times[i]) / 1000.0
+        guard windowSec > 0 else { return nil }
+        return RouteMath.paceSecPerKm(meters: RouteMath.totalMeters(Array(points[i...])), seconds: windowSec)
     }
 }
 

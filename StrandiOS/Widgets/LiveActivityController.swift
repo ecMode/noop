@@ -26,7 +26,12 @@ final class LiveActivityController {
     /// Drive the activity from the latest live values. Lazily starts when the strap is CONNECTED (the
     /// live link, not the sticky "paired" flag) and a heart rate is present; ends the moment the link
     /// drops. Throttled to ~once every 2 s so we stay well under the Live Activity update budget.
-    func update(bpm: Int?, recovery: Int?, connected: Bool, effort: Int? = nil) {
+    /// `distanceM` / `*PaceSecPerKm` are the live GPS metrics of an in-flight distance workout (nil when
+    /// none is active). They're formatted here — where the app-only `UnitPrefs` unit choice is readable —
+    /// into the display strings the widget renders, since the widget extension can't read that preference.
+    func update(bpm: Int?, recovery: Int?, connected: Bool, effort: Int? = nil,
+                sport: String? = nil, distanceM: Double? = nil,
+                avgPaceSecPerKm: Double? = nil, curPaceSecPerKm: Double? = nil) {
         guard authInfo.areActivitiesEnabled else { return }
 
         // Re-adopt an activity that outlived a previous app session. ActivityKit keeps Live Activities
@@ -53,8 +58,24 @@ final class LiveActivityController {
         }
         guard bpm != nil else { return }
 
-        let state = NOOPActivityAttributes.ContentState(bpm: bpm, recovery: recovery, bonded: connected,
-                                                        effort: effort)
+        // Resolve the miles-vs-km preference (app UserDefaults, default Metric) and pre-format the GPS
+        // metrics so the widget renders ready strings. Only when a distance workout is active (distanceM
+        // non-nil); pace strings stay nil while pace is undefined (stopped / no fix) → the widget shows "—".
+        var distanceText: String?
+        var avgPaceText: String?
+        var curPaceText: String?
+        if let distanceM {
+            let system = UnitSystem(rawValue: UserDefaults.standard.string(forKey: UnitPrefs.systemKey) ?? "")
+                ?? .metric
+            distanceText = UnitFormatter.distanceFromMeters(distanceM, system: system)
+            avgPaceText = avgPaceSecPerKm.map { UnitFormatter.paceFromSecPerKm($0, system: system) }
+            curPaceText = curPaceSecPerKm.map { UnitFormatter.paceFromSecPerKm($0, system: system) }
+        }
+
+        let state = NOOPActivityAttributes.ContentState(
+            bpm: bpm, recovery: recovery, bonded: connected, effort: effort,
+            sport: distanceM != nil ? sport : nil,
+            distanceText: distanceText, avgPaceText: avgPaceText, curPaceText: curPaceText)
         let staleDate = Date().addingTimeInterval(Self.staleAfter)
 
         if let activity {

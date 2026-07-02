@@ -9,24 +9,33 @@ struct NOOPLiveActivity: Widget {
         ActivityConfiguration(for: NOOPActivityAttributes.self) { context in
             // Lock Screen / banner presentation.
             HStack(spacing: 14) {
-                Image(systemName: "waveform.path.ecg")
+                // A GPS workout swaps the ECG glyph + "Live HR" title for a run figure + the sport label.
+                let isRun = context.state.distanceText != nil
+                Image(systemName: isRun ? "figure.run" : "waveform.path.ecg")
                     .font(.title2)
                     .foregroundStyle(StrandPalette.statusCritical)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(context.attributes.title)
+                    Text(isRun ? (context.state.sport ?? context.attributes.title) : context.attributes.title)
                         .font(.caption).foregroundStyle(StrandPalette.textSecondary)
                     Text("\(context.state.bpm.map(String.init) ?? "–") bpm")
                         .font(.system(size: 26, weight: .bold, design: .rounded))
                         .foregroundStyle(StrandPalette.textPrimary)
                 }
                 Spacer()
-                // Charge + Effort (#446) on the banner, mirroring the Dynamic Island expanded stats.
                 HStack(spacing: 12) {
-                    if let r = context.state.recovery {
-                        bannerStat(label: "Charge", value: "\(r)%")
-                    }
-                    if let e = context.state.effort {
-                        bannerStat(label: "Effort", value: "\(e)")
+                    if isRun {
+                        // Outdoor run: Distance / Avg pace / Current pace instead of Charge / Effort.
+                        bannerStat(label: "Dist", value: context.state.distanceText ?? "–")
+                        bannerStat(label: "Avg", value: context.state.avgPaceText ?? "–")
+                        bannerStat(label: "Now", value: context.state.curPaceText ?? "–")
+                    } else {
+                        // Charge + Effort (#446) on the banner, mirroring the Dynamic Island expanded stats.
+                        if let r = context.state.recovery {
+                            bannerStat(label: "Charge", value: "\(r)%")
+                        }
+                        if let e = context.state.effort {
+                            bannerStat(label: "Effort", value: "\(e)")
+                        }
                     }
                 }
             }
@@ -40,18 +49,29 @@ struct NOOPLiveActivity: Widget {
                         .foregroundStyle(StrandPalette.statusCritical)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    // Charge + Effort (#446) — one more stat alongside the leading live HR.
-                    HStack(spacing: 10) {
-                        if let r = context.state.recovery {
-                            statColumn(label: "Charge", value: "\(r)%")
-                        }
-                        if let e = context.state.effort {
-                            statColumn(label: "Effort", value: "\(e)")
+                    if context.state.distanceText != nil {
+                        // Outdoor run: current pace — the value that moves — alongside the leading live HR.
+                        statColumn(label: "Now", value: context.state.curPaceText ?? "–")
+                    } else {
+                        // Charge + Effort (#446) — one more stat alongside the leading live HR.
+                        HStack(spacing: 10) {
+                            if let r = context.state.recovery {
+                                statColumn(label: "Charge", value: "\(r)%")
+                            }
+                            if let e = context.state.effort {
+                                statColumn(label: "Effort", value: "\(e)")
+                            }
                         }
                     }
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    Text(context.attributes.title).font(.caption).foregroundStyle(.secondary)
+                    if let dist = context.state.distanceText {
+                        // Outdoor run: distance + average pace on the bottom row (current pace is trailing).
+                        Text("\(context.state.sport ?? "Workout") · \(dist) · avg \(context.state.avgPaceText ?? "–")")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text(context.attributes.title).font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             } compactLeading: {
                 Image(systemName: "heart.fill").foregroundStyle(StrandPalette.statusCritical)

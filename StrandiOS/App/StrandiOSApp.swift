@@ -54,6 +54,30 @@ struct StrandiOSApp: App {
         ))
     }
 
+    /// Push the current values to the Live Activity. Both the HR-tick and connection-change sites route
+    /// through here so they stay in lockstep.
+    ///
+    /// #911: anchor on the SAME shared `Repository.widgetAnchor` the Home/Lock widget and the watch
+    /// snapshot use, so this fourth surface can't drift to a different day at the rollover.
+    ///
+    /// When a GPS distance workout is recording (outdoor run / walk / hike / ride), also pass its live
+    /// distance + average + current pace so the banner and Dynamic Island show run stats; nil otherwise.
+    private func pushLiveActivity(connected: Bool) {
+        let day = Repository.widgetAnchor(days: model.repo.days)
+        let gps = model.gpsRecorder
+        let isGpsWorkout = model.activeWorkout != nil && gps.isRecording
+        liveActivity.update(
+            bpm: connected ? (model.bpm ?? model.live.heartRate) : nil,
+            recovery: day?.recovery.map { Int($0.rounded()) },
+            connected: connected,
+            effort: day?.strain.map { Int($0.rounded()) },
+            sport: isGpsWorkout ? model.activeWorkout?.sport : nil,
+            distanceM: isGpsWorkout ? gps.distanceM : nil,
+            avgPaceSecPerKm: isGpsWorkout ? gps.paceSecPerKm : nil,
+            curPaceSecPerKm: isGpsWorkout ? gps.currentPaceSecPerKm : nil
+        )
+    }
+
     var body: some Scene {
         WindowGroup {
             iOSRootView()
@@ -77,29 +101,11 @@ struct StrandiOSApp: App {
                 // clipping; the common Larger-Text range still scales fully.
                 .dynamicTypeSize(...DynamicTypeSize.accessibility1)
                 .onReceive(model.live.$heartRate) { _ in
-                    // #911: anchor the Live Activity on the SAME shared `Repository.widgetAnchor` the
-                    // Home/Lock widget and the watch snapshot use, so this fourth surface can't drift to a
-                    // different day at the rollover (it previously read `days.last(where: recovery != nil)`,
-                    // which kept pointing at yesterday's scored row after Today had moved on).
-                    let day = Repository.widgetAnchor(days: model.repo.days)
-                    liveActivity.update(
-                        bpm: model.live.connected ? (model.bpm ?? model.live.heartRate) : nil,
-                        recovery: day?.recovery.map { Int($0.rounded()) },
-                        connected: model.live.connected,
-                        effort: day?.strain.map { Int($0.rounded()) }
-                    )
+                    pushLiveActivity(connected: model.live.connected)
                 }
                 // End the Live Activity the moment the link drops, even if no further HR tick arrives.
                 .onReceive(model.live.$connected) { isConnected in
-                    // #911: same shared anchor as the heartRate site above, so the Live Activity, the
-                    // widget, the watch and Today never disagree about which day they describe.
-                    let day = Repository.widgetAnchor(days: model.repo.days)
-                    liveActivity.update(
-                        bpm: isConnected ? (model.bpm ?? model.live.heartRate) : nil,
-                        recovery: day?.recovery.map { Int($0.rounded()) },
-                        connected: isConnected,
-                        effort: day?.strain.map { Int($0.rounded()) }
-                    )
+                    pushLiveActivity(connected: isConnected)
                 }
                 // #581: the `noop://import-health` deep link the iOS Shortcut opens after building the
                 // HealthKit-free payload. Filter on the host so other future schemes don't trip the

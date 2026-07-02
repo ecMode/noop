@@ -59,6 +59,17 @@ final class UnitFormatterTests: XCTestCase {
         XCTAssertEqual(UnitFormatter.distanceFromKilometers(12.4, system: .imperial), "7.7 mi")
     }
 
+    // MARK: - Pace formatting
+
+    func testPaceFromSecPerKm() {
+        // 285 s/km → 4:45 /km.
+        XCTAssertEqual(UnitFormatter.paceFromSecPerKm(285, system: .metric), "4:45 /km")
+        // 285 s/km ÷ 0.621371 = 458.66 s/mi → rounds to 459 s → 7:39 /mi.
+        XCTAssertEqual(UnitFormatter.paceFromSecPerKm(285, system: .imperial), "7:39 /mi")
+        // Seconds pad to two digits.
+        XCTAssertEqual(UnitFormatter.paceFromSecPerKm(305, system: .metric), "5:05 /km")
+    }
+
     // MARK: - Mass formatting
 
     func testMassFromKilograms() {

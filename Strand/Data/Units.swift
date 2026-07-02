@@ -126,6 +126,20 @@ enum UnitFormatter {
         system == .imperial ? "mi" : "km"
     }
 
+    // MARK: Pace (stored sec/km)
+
+    /// Format a running pace given in SECONDS PER KILOMETRE as "m:ss" plus a per-distance label.
+    /// Metric: "4:45 /km". Imperial: converts to seconds-per-mile (× 1/milesPerKilometer) → "7:38 /mi".
+    /// The caller only passes a value when pace is defined (moving); a stopped/undefined pace shows "—"
+    /// at the call site rather than a fabricated 0:00 here.
+    static func paceFromSecPerKm(_ secPerKm: Double, system: UnitSystem) -> String {
+        // sec/mile = sec/km × (km per mile) = sec/km ÷ milesPerKilometer.
+        let secPerUnit = system == .imperial ? secPerKm / milesPerKilometer : secPerKm
+        let total = Int(secPerUnit.rounded())
+        let unit = system == .imperial ? "/mi" : "/km"
+        return String(format: "%d:%02d %@", total / 60, total % 60, unit)
+    }
+
     // MARK: Mass (stored kg)
 
     /// kg → pounds.
