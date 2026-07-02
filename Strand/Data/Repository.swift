@@ -1026,11 +1026,11 @@ final class Repository: ObservableObject {
         let hr = (try? await store.hrSamples(deviceId: deviceId, from: lo, to: hi, limit: 200_000)) ?? []
         let rr = (try? await store.rrIntervals(deviceId: deviceId, from: lo, to: hi, limit: 200_000)) ?? []
         let resp = (try? await store.respSamples(deviceId: deviceId, from: lo, to: hi, limit: 200_000)) ?? []
-        // Opt-in experimental staging (Settings → Experimental · Sleep staging): when the user has flipped
-        // the V2 flag on, re-stage with the cardiorespiratory recipe `SleepStagerV2`; otherwise the default
-        // V1 `SleepStager`. Read once here off the actor; the switch is purely which engine runs over the
-        // already-detected window , V1 stays the default and is untouched. (V7 Pillar 3b)
-        let useV2 = PuffinExperiment.experimentalSleepV2Enabled
+        // Which staging engine runs over the already-detected window: V2 (the cardiorespiratory recipe
+        // `SleepStagerV2`) is the DEFAULT on WHOOP 5/MG — that family has no resp channel and V1 degrades
+        // badly without it — while WHOOP 4.0 stays on V1; the experimental toggle forces V2 on any model.
+        // See `PuffinExperiment.useSleepStagerV2`. Read once here off the actor; detection is unchanged.
+        let useV2 = PuffinExperiment.useSleepStagerV2
         let segs = await Task.detached(priority: .utility) {
             useV2
                 ? SleepStagerV2.stageSession(start: start, end: end, grav: grav, hr: hr, rr: rr, resp: resp)

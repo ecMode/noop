@@ -491,10 +491,12 @@ final class IntelligenceEngine: ObservableObject {
                 let bandSleepState = await Self.bandSleepStateSamples(computedId: computedId,
                                                                       from: from, to: to, store: store)
 
-                // #690: read the experimental-V2 toggle ONCE here (off the detached executor, matching the
-                // Repository self-heal call site) and capture the Bool, so the Settings toggle now drives the
-                // NORMAL detected-night staging path , not only the userEdited self-heal restage.
-                let useSleepStagerV2 = PuffinExperiment.experimentalSleepV2Enabled
+                // #690: resolve the staging engine ONCE here (off the detached executor, matching the
+                // Repository self-heal call site) and capture the Bool, so it drives the NORMAL detected-night
+                // staging path, not only the userEdited self-heal restage. V2 is the DEFAULT on WHOOP 5/MG
+                // (no resp channel → V1 degrades); 4.0 stays V1; the toggle forces V2 on any model. See
+                // `PuffinExperiment.useSleepStagerV2`.
+                let useSleepStagerV2 = PuffinExperiment.useSleepStagerV2
 
                 // Already OFF the main actor , score directly (the prior nested `Task.detached` here only
                 // existed to hop off the main actor; the whole loop now runs off it, so the score is computed

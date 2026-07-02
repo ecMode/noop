@@ -49,6 +49,19 @@ enum PuffinExperiment {
 
     static var experimentalSleepV2Enabled: Bool { UserDefaults.standard.bool(forKey: experimentalSleepV2Key) }
 
+    /// Whether to stage sleep with V2 for the CURRENT strap, folding in the per-model DEFAULT. V2 is now
+    /// the DEFAULT on WHOOP 5/MG: that family carries NO raw respiration ADC, and V1 stages a no-resp
+    /// night badly — with the resp channel absent its deep gate and REM path collapse, burying the night
+    /// in "light" (measured: a real 5/MG night staged 4% deep / 87% light under V1 vs 33% / 28% under V2,
+    /// the latter matching the wearer's habitual architecture). V2 recovers breathing regularity from the
+    /// R-R stream via RSA, the signal V1 ignores. V1 stays the default on WHOOP 4.0 (which DOES carry the
+    /// resp channel and which V1 was tuned against). The `experimentalSleepV2Enabled` toggle still FORCES
+    /// V2 on any model — a manual override for a 4.0 owner who wants it. Mirror on Android
+    /// (`PuffinExperiment.useSleepStagerV2`) for cross-platform parity.
+    static var useSleepStagerV2: Bool {
+        experimentalSleepV2Enabled || WhoopModel.persisted == .whoop5mg
+    }
+
     /// Opt-in "Auto-detect workouts": after a sync / on Today appear, scan the last day or two of HR for a
     /// SUSTAINED-ELEVATED window (resting HR + 30 bpm held ≥ 12 min) that doesn't overlap a saved workout,
     /// and surface ONE dismissible Today card offering to save it as a manual-style workout. Pure read +
