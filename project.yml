@@ -238,6 +238,12 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         UIBackgroundModes:
           - bluetooth-central
+          # Spoken workout announcements (WorkoutVoice: per-mile splits + HR-zone cues) must be AUDIBLE with
+          # the screen locked / phone in a pocket mid-run. The app is kept alive in the background by the
+          # `location` mode below, and the announcement LOGIC runs, but iOS gates actual audio OUTPUT in the
+          # background on this `audio` mode — without it the `.playback` session activation is inaudible when
+          # locked (foreground still works). Same declaration turn-by-turn nav / run-tracker apps use.
+          - audio
           # #524: keep recording an outdoor workout's GPS route while the app is backgrounded (screen off),
           # matching Android's foreground-service capture. Required by GpsWorkoutRecorder's
           # allowsBackgroundLocationUpdates; without this mode iOS crashes when background updates start.
