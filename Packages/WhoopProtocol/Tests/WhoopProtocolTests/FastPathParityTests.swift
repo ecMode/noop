@@ -73,7 +73,8 @@ final class FastPathParityTests: XCTestCase {
     }
 
     /// Contract (a): the default (fast) decode equals the full diagnostic decode in every property
-    /// except `fields`, which the fast path leaves empty.
+    /// except `fields` AND `rawHex`, which the fast path leaves empty (D#969 gates rawHex on
+    /// collectFields, the same way D#742 gated fields — the live path reads neither).
     private func assertFastMatchesFull(_ frame: [UInt8], family: DeviceFamily, _ label: String,
                                        file: StaticString = #filePath, line: UInt = #line) {
         let fast = parseFrame(frame, family: family)   // default collectFields: false
@@ -85,7 +86,9 @@ final class FastPathParityTests: XCTestCase {
         XCTAssertEqual(fast.cmdName, full.cmdName, "cmdName drift at \(label)", file: file, line: line)
         XCTAssertEqual(fast.crcOK, full.crcOK, "crcOK drift at \(label)", file: file, line: line)
         XCTAssertEqual(fast.lenBytes, full.lenBytes, "lenBytes drift at \(label)", file: file, line: line)
-        XCTAssertEqual(fast.rawHex, full.rawHex, "rawHex drift at \(label)", file: file, line: line)
+        // rawHex: fast path leaves it empty; full path carries the exact whole-frame hex (D#969).
+        XCTAssertEqual(fast.rawHex, "", "fast path built rawHex at \(label)", file: file, line: line)
+        XCTAssertEqual(full.rawHex, hexOf(frame[...]), "rawHex drift at \(label)", file: file, line: line)
         XCTAssertTrue(fast.fields.isEmpty, "fast path built fields at \(label)", file: file, line: line)
         if full.ok {
             XCTAssertFalse(full.fields.isEmpty, "full path lost its fields at \(label)",

@@ -39,7 +39,8 @@ final class InterpreterEnvelopeTests: XCTestCase {
     }
 
     func testInvalidFrame() {
-        let out = parseFrame([0x01, 0x02])
+        // collectFields:true so rawHex is populated (D#969 gates rawHex on collectFields).
+        let out = parseFrame([0x01, 0x02], collectFields: true)
         XCTAssertFalse(out.ok)
         XCTAssertEqual(out.typeName, "INVALID/FRAGMENT")
         XCTAssertEqual(out.rawHex, "0102")

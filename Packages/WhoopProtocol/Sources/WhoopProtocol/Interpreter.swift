@@ -123,7 +123,11 @@ final class FieldBuilder {
 /// per-field metadata was pure allocation waste. Pass `true` on inspector/diagnostic surfaces
 /// (whoop-decode, field-asserting tests) that actually read `fields`.
 public func parseFrame(_ frame: [UInt8], collectFields: Bool = false) -> ParsedFrame {
-    let rawHex = frame.map { String(format: "%02x", $0) }.joined()
+    // D#969: only build the whole-frame hex when a consumer will read it. The live ingest fast path
+    // (collectFields:false) never reads `rawHex` — only inspector/diagnostic surfaces (whoop-decode,
+    // PuffinCapture, field-asserting tests) do — so on a 1Hz stream or an offload burst this skips a
+    // per-byte `String(format:)` allocation pass whose result was discarded.
+    let rawHex = collectFields ? frame.map { String(format: "%02x", $0) }.joined() : ""
     if frame.count < 8 || frame[0] != 0xAA {
         return ParsedFrame(ok: false, typeName: "INVALID/FRAGMENT", seq: nil, cmdName: nil,
                            crcOK: nil, lenBytes: frame.count, rawHex: rawHex,
@@ -206,7 +210,8 @@ public func parseFrame(_ frame: [UInt8], family: DeviceFamily, collectFields: Bo
 }
 
 private func parseFrameWhoop5(_ frame: [UInt8], collectFields: Bool) -> ParsedFrame {
-    let rawHex = frame.map { String(format: "%02x", $0) }.joined()
+    // D#969: gated identically to parseFrame — build the hex only when a consumer reads it.
+    let rawHex = collectFields ? frame.map { String(format: "%02x", $0) }.joined() : ""
     // Minimum whoop5 frame: 8 header bytes + 1 inner (type) + 4 CRC32 trailer.
     if frame.count < 12 || frame[0] != 0xAA {
         return ParsedFrame(ok: false, typeName: "INVALID/FRAGMENT", seq: nil, cmdName: nil,
