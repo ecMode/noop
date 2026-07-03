@@ -419,6 +419,19 @@ public final class BLEManager: NSObject, ObservableObject {
     private var keepAliveTimer: DispatchSourceTimer?
     static let keepAliveIntervalSeconds = 30
     private var keepAliveTick = 0
+    /// Slow self-recovery for a PARKED auto-reconnect. The bond-loop pause (#617/#844), the bond-refusal
+    /// give-up (#747/#750) and the `peerRemovedPairingInformation` dead-end all stop the reconnect
+    /// schedulers to avoid hammering a strap that can't bond — but nothing then re-arms them, so an
+    /// unattended overnight strand stays down until the user taps Connect (a full night of sleep lost when
+    /// a routine drop happened to land in one of these states). This timer retries on a LONG interval while
+    /// parked + disconnected: slow enough not to reintroduce the drain those pauses exist to prevent, but
+    /// self-healing so the user doesn't have to notice. Armed at each park site, cancelled on a real connect
+    /// or an intentional teardown.
+    private var reconnectRecoveryTimer: DispatchSourceTimer?
+    static let reconnectRecoveryIntervalSeconds = 1200   // 20 min — inside the 15–30 min self-heal band
+    /// Which park path armed the recovery timer ("bondLoop" / "bondRefusal" / "peerRemovedPairing"), so the
+    /// breadcrumb on the NEXT occurrence names the terminal path we couldn't distinguish from a raw export.
+    private var autoReconnectParkReason: String?
     /// If a persisted/missing strap-family preference points at the wrong service, a service-filtered
     /// BLE scan can run forever even though the strap is nearby (the common "won't reconnect after an
     /// update" report). Rotate between WHOOP families after a short miss and persist whichever family
@@ -891,6 +904,7 @@ public final class BLEManager: NSObject, ObservableObject {
         postBondLoop.reset()   // #617: a clean teardown clears the bond-loop streak so a manual reconnect starts fresh
         bondGiveUp.reset()     // #747/#750: a clean teardown clears the bond-refusal give-up + un-pauses auto-reconnect
         autoReconnectPausedForBondLoop = false
+        cancelReconnectRecovery()   // user drove the teardown — no unattended retry to keep alive
         state.reconnectGuide = nil   // #711: a user-initiated teardown resolves the re-pair guide (no longer looping)
         readoptingTo = nil   // #52: a clean teardown abandons any in-flight pin handoff
         standardHRFallback = false
@@ -913,6 +927,7 @@ public final class BLEManager: NSObject, ObservableObject {
         let isCurrent = target == nil || peripheral?.identifier == target
         intentionalDisconnect = true            // defuses the disconnect→3s-reconnect loop's guard
         cancelScanFallback()
+        cancelReconnectRecovery()                // released strap — drop any unattended park-recovery retry
         readoptingTo = nil                       // abandon any in-flight #52 pin handoff
         // Clear the targeted-connect pin + the iOS state-restoration peripheral if they point at this strap,
         // so connect()/restoration can't re-target it.
@@ -1939,6 +1954,76 @@ public final class BLEManager: NSObject, ObservableObject {
         if keepAliveTick % 2 == 0 { send(.getBatteryLevel, payload: []) }  // ~every 60s
     }
 
+    /// Arm the slow self-recovery retry for a parked auto-reconnect (see `reconnectRecoveryTimer`).
+    /// Idempotent: re-arming resets the countdown, so a re-park right after a failed retry simply schedules
+    /// the next attempt one interval out — the cadence stays ~one attempt per interval, never a tight loop.
+    /// The first fire is a full interval away on purpose: that gap is what breaks any bond→drop churn the
+    /// pause was protecting against.
+    private func armReconnectRecovery(reason: String) {
+        autoReconnectParkReason = reason
+        let mins = BLEManager.reconnectRecoveryIntervalSeconds / 60
+        log("Auto-reconnect paused (reason=\(reason)); arming slow recovery retry every \(mins)m so an unattended strand self-heals without a manual Connect.")
+        if TestCentre.active(.connection) {
+            state.append(log: "reconnect recovery armed reason=\(reason) intervalSec=\(BLEManager.reconnectRecoveryIntervalSeconds)", domain: .connection)
+        }
+        reconnectRecoveryTimer?.cancel()
+        let s = BLEManager.reconnectRecoveryIntervalSeconds
+        let t = DispatchSource.makeTimerSource(queue: .main)
+        t.schedule(deadline: .now() + .seconds(s), repeating: .seconds(s))
+        t.setEventHandler { [weak self] in self?.reconnectRecoveryFire() }
+        t.resume()
+        reconnectRecoveryTimer = t
+    }
+
+    /// Cancel the recovery retry — a real connect landed, or the user tore the link down deliberately.
+    private func cancelReconnectRecovery() {
+        reconnectRecoveryTimer?.cancel()
+        reconnectRecoveryTimer = nil
+        autoReconnectParkReason = nil
+    }
+
+    /// One slow recovery attempt. Stops itself if we've recovered or the user has taken over; otherwise
+    /// drives a fresh `connect()` (which clears the pause for this attempt and issues a background-honored
+    /// targeted connect). A failure re-parks and re-arms; a success cancels via `didConnect`.
+    private func reconnectRecoveryFire() {
+        if intentionalDisconnect || state.connected {
+            cancelReconnectRecovery()
+            return
+        }
+        log("Auto-reconnect recovery: retrying (park reason=\(autoReconnectParkReason ?? "unknown")).")
+        if TestCentre.active(.connection) {
+            state.append(log: "reconnect recovery retry reason=\(autoReconnectParkReason ?? "unknown")", domain: .connection)
+        }
+        connect()
+    }
+
+    /// Always-on resume breadcrumb. Call when the app returns to the foreground. If a long silence
+    /// preceded the resume — the strap stopped feeding us while we were suspended — this records the
+    /// fingerprint that tells apart the terminal paths a raw export can't: a "zombie" link (cbState still
+    /// `connected` but data long-stale, so no `didDisconnect` ever fired and the keepAlive watchdog was
+    /// frozen while suspended), a clean disconnect (cbState `disconnected`), or a parked auto-reconnect
+    /// (`parkReason` set). Written unconditionally to the strap log so a bug report carries it without test
+    /// mode. Pure diagnostic — it changes no connection state; the keepAlive tick that resumes on
+    /// foreground is what actually bounces a zombie link. (#617 follow-up)
+    func noteForegroundResume() {
+        let gap = Int(Date().timeIntervalSince(lastDataAt))
+        // A live link resumes with gap≈0 and needs no line — only a real silence is worth recording.
+        guard gap >= 120 else { return }
+        let cb: String
+        switch peripheral?.state {
+        case .connected:     cb = "connected"
+        case .connecting:    cb = "connecting"
+        case .disconnecting: cb = "disconnecting"
+        case .disconnected:  cb = "disconnected"
+        case .none:          cb = "noPeripheral"
+        @unknown default:    cb = "unknown"
+        }
+        log("Resume after data gap=\(gap)s: cbState=\(cb) appConnected=\(state.connected) bonded=\(didBond) autoReconnectPaused=\(autoReconnectPausedForBondLoop) parkReason=\(autoReconnectParkReason ?? "none") recoveryTimer=\(reconnectRecoveryTimer != nil ? "armed" : "off")")
+        if TestCentre.active(.connection) {
+            state.append(log: "resume gap=\(gap)s cbState=\(cb) appConnected=\(state.connected) paused=\(autoReconnectPausedForBondLoop) park=\(autoReconnectParkReason ?? "none")", domain: .connection)
+        }
+    }
+
     private func startBackfillTimer() {
         backfillTimer?.cancel()
         let interval = BLEManager.backfillIntervalSeconds
@@ -2351,6 +2436,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
 
     public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         cancelScanFallback()
+        cancelReconnectRecovery()   // a real link is up — stop the slow park-recovery retry
         failedConnectAttempts = 0   // a successful connect clears the reconnect backoff (#414)
         restoredPeripheral = nil
         preparePeripheral(peripheral)
@@ -2445,6 +2531,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
             // Connect (connect()) or a genuine bond re-arms it. We do NOT touch the bond/parse path — the bond
             // is real; the stale OS pairing is the problem, which the guide tells the user how to clear.
             autoReconnectPausedForBondLoop = true
+            armReconnectRecovery(reason: "bondLoop")
             if TestCentre.active(.connection) {
                 state.append(log: "reconnect paused=bondLoop (#617: \(postBondLoop.consecutiveBondTimeouts) bond-then-timeout cycles)", domain: .connection)
             }
@@ -2579,6 +2666,10 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
             3. Tap the strap repeatedly until its LEDs flash blue (pairing mode).
             4. Come back here and reconnect.
             """
+            // The OS pairing is stale, so a retry likely re-fails until the user re-pairs — but slow-retry
+            // anyway (harmless single pending connect / interval) so it self-heals if the strap frees up
+            // (e.g. the official WHOOP app releases it) without the user having to tap Connect. (#617 follow-up)
+            armReconnectRecovery(reason: "peerRemovedPairing")
             return
         }
         // Any other connect failure (e.g. a weak-signal encrypted-handshake timeout on a 5/MG at the
@@ -2785,6 +2876,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 // PII), and surface the honest paused hint. A genuine bond or a manual reconnect re-arms it.
                 if bondGiveUp.recordRefusal() {
                     autoReconnectPausedForBondLoop = true
+                    armReconnectRecovery(reason: "bondRefusal")
                     let opaque = BondRefusalGiveUp.opaqueId(fromLocalUUID: peripheral.identifier.uuidString)
                     log(BondRefusalGiveUp.epitaphLine(refusals: bondGiveUp.refusals, opaqueId: opaque))
                     state.pairingHint = BondRefusalGiveUp.pausedHint()

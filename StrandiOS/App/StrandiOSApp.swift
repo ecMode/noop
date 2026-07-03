@@ -134,6 +134,10 @@ struct StrandiOSApp: App {
         // safe no-op until the user opts in.
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
+                // #617 follow-up: record the strap data-gap fingerprint on resume BEFORE anything else
+                // pokes the link — this is our only window to see a suspended silent-stall (no didDisconnect
+                // fires, and the keepAlive watchdog is frozen while suspended), which a raw export can't show.
+                model.ble.noteForegroundResume()
                 model.drainPendingIntents()
                 // Re-arm the strap's smart alarm on foreground: the firmware alarm is a single instant
                 // and iOS can't re-arm it while suspended, so it would otherwise fire once and stop.
