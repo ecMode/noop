@@ -86,6 +86,57 @@ final class CloudSync {
         engine.state.add(pendingRecordZoneChanges: pending)
     }
 
+    /// Enqueue a save of a dismiss-tombstone singleton record. Called by `Repository` whenever it
+    /// mutates its dismissed-sleep / dismissed-detected-workout token sets. No-op when sync is off.
+    func enqueueTombstone(_ kind: TombstoneKind) {
+        guard let engine else { return }
+        engine.state.add(pendingRecordZoneChanges: [.saveRecord(kind.recordID)])
+    }
+
+    /// Whether a sleep session (by its detected startTs) has been dismissed by the user — checked before
+    /// applying an inbound sleep record so a night deleted on one device is never resurrected via sync.
+    private func isSleepTombstoned(_ startTs: Int) -> Bool {
+        (UserDefaults.standard.stringArray(forKey: TombstoneKind.sleep.defaultsKey) ?? []).contains { token in
+            let p = token.split(separator: ":")
+            return p.count == 2 && Int(p[0]) == startTs
+        }
+    }
+
+    /// Whether a DETECTED workout's window overlaps a dismissed span (same half-open test as
+    /// `WorkoutSource.isDismissed`) — checked before applying an inbound detected-workout record.
+    private func isWorkoutTombstoned(startTs: Int, endTs: Int) -> Bool {
+        let spans = WorkoutSource.parseDismissedSpans(
+            UserDefaults.standard.stringArray(forKey: TombstoneKind.workout.defaultsKey) ?? [])
+        return spans.contains { startTs < $0.end && $0.start < endTs }
+    }
+
+    /// Apply an inbound tombstone record: UNION the remote tokens into the local set (never remove — a
+    /// tombstone can't un-happen), delete any local rows the newly-arrived tokens cover, and re-upload
+    /// if we hold tokens the sender lacked (so both sides converge).
+    private func applyTombstoneRecord(_ kind: TombstoneKind, _ record: CKRecord, store: WhoopStore) async {
+        let remote: [String] = (record["payload"] as? String)
+            .flatMap { try? JSONDecoder().decode([String].self, from: Data($0.utf8)) } ?? []
+        let remoteSet = Set(remote)
+        let local = Set(UserDefaults.standard.stringArray(forKey: kind.defaultsKey) ?? [])
+        let union = local.union(remoteSet)
+        if union != local { UserDefaults.standard.set(Array(union), forKey: kind.defaultsKey) }
+
+        let newTokens = remoteSet.subtracting(local)
+        if !newTokens.isEmpty {
+            // A row the tombstone covers may have been re-detected locally before the tombstone landed.
+            // Sleep has no read-time dismissal filter, so remove it physically; detected workouts are
+            // already hidden by WorkoutSource.isDismissed once the span is present, so no delete needed.
+            if kind == .sleep {
+                let starts = newTokens.compactMap { Int($0.split(separator: ":").first.map(String.init) ?? "") }
+                let devs = (try? await store.distinctDeviceIds(.sleepSession)) ?? []
+                await store.applyingRemoteChanges {
+                    for dev in devs { for s in starts { _ = try? await store.deleteSleepSession(deviceId: dev, startTs: s) } }
+                }
+            }
+        }
+        if !local.subtracting(remoteSet).isEmpty { enqueueTombstone(kind) }
+    }
+
     private func ensureZone() async {
         guard let engine, !UserDefaults.standard.bool(forKey: Self.zoneCreatedKey) else { return }
         engine.state.add(pendingDatabaseChanges: [.saveZone(CKRecordZone(zoneID: SyncSchema.zoneID))])
@@ -140,6 +191,11 @@ final class CloudSync {
             }
         }
 
+        // Dismiss-tombstone singletons (only if we actually hold any tokens — no point creating empties).
+        for tk in TombstoneKind.allCases where !(UserDefaults.standard.stringArray(forKey: tk.defaultsKey) ?? []).isEmpty {
+            pending.append(.saveRecord(tk.recordID))
+        }
+
         if !pending.isEmpty { engine.state.add(pendingRecordZoneChanges: pending) }
         UserDefaults.standard.set(true, forKey: Self.bulkDoneKey)
         NSLog("CloudSync: queued \(pending.count) existing records for first-sync upload.")
@@ -173,6 +229,16 @@ final class CloudSync {
         guard let store = await repo?.storeHandle() else { return [:] }
         var out: [CKRecord.ID: CKRecord] = [:]
         for id in ids {
+            // Dismiss-tombstone singletons carry the current token array, not a store row.
+            if let tk = TombstoneKind(recordName: id.recordName) {
+                let base = meta.record(for: id) ?? CKRecord(recordType: tk.recordType, recordID: id)
+                let tokens = UserDefaults.standard.stringArray(forKey: tk.defaultsKey) ?? []
+                if let data = try? JSONEncoder().encode(tokens) {
+                    base["payload"] = String(decoding: data, as: UTF8.self) as CKRecordValue
+                }
+                out[id] = base
+                continue
+            }
             guard let (kind, deviceId, key) = SyncSchema.decodeRecordName(id.recordName) else { continue }
             let base = meta.record(for: id) ?? CKRecord(recordType: kind.recordType, recordID: id)
             switch kind {
@@ -216,14 +282,23 @@ final class CloudSync {
         for mod in event.modifications {
             let record = mod.record
             meta.update(record)
+            if let tk = TombstoneKind(recordName: record.recordID.recordName) {
+                await applyTombstoneRecord(tk, record, store: store)
+                touched = true
+                continue
+            }
             guard let (kind, deviceId, key) = SyncSchema.decodeRecordName(record.recordID.recordName) else { continue }
             switch kind {
             case .workout:
                 guard let (dev, row, route) = WorkoutRecord.decode(record) else { continue }
+                // Don't resurrect a detected workout the user dismissed on this device.
+                if WorkoutSource.classify(row.source) == .detected,
+                   isWorkoutTombstoned(startTs: row.startTs, endTs: row.endTs) { continue }
                 await store.applyingRemoteChanges { _ = try? await store.upsertWorkouts([row], deviceId: dev) }
                 if let route { RouteStore.store(route, startTs: row.startTs, sport: row.sport) }
             case .sleep:
                 guard let row = Payload.decode(CachedSleepSession.self, from: record) else { continue }
+                if isSleepTombstoned(row.startTs) { continue }   // dismissed here → don't resurrect
                 await store.applyingRemoteChanges { _ = try? await store.upsertSleepSessions([row], deviceId: deviceId) }
             case .daily:
                 guard let row = Payload.decode(DailyMetric.self, from: record) else { continue }

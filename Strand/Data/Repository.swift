@@ -954,7 +954,10 @@ final class Repository: ObservableObject {
     /// night that re-detects stays gone. (#68; Android twin: the `dismissedSleep` Room table.)
     private var dismissedSleepSpans: [String] {
         get { UserDefaults.standard.stringArray(forKey: Repository.dismissedSleepDefaultsKey) ?? [] }
-        set { UserDefaults.standard.set(newValue, forKey: Repository.dismissedSleepDefaultsKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: Repository.dismissedSleepDefaultsKey)
+            CloudSync.shared.enqueueTombstone(.sleep)   // mirror the dismissal to the other device (no-op if sync off)
+        }
     }
 
     /// UserDefaults key holding the dismissed-sleep spans (see `dismissedSleepSpans`).
@@ -1755,7 +1758,10 @@ final class Repository: ObservableObject {
     /// re-derives; only the read filter and these mutators consult it).
     private var dismissedDetectedSpans: [String] {
         get { UserDefaults.standard.stringArray(forKey: WorkoutSource.dismissedDefaultsKey) ?? [] }
-        set { UserDefaults.standard.set(newValue, forKey: WorkoutSource.dismissedDefaultsKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: WorkoutSource.dismissedDefaultsKey)
+            CloudSync.shared.enqueueTombstone(.workout)   // mirror the dismissal to the other device (no-op if sync off)
+        }
     }
 
     /// Persist a retroactive / edited manual workout under the strap source. `replacing` is the row the

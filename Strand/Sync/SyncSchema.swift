@@ -72,6 +72,45 @@ extension StoreChange.Kind {
     }
 }
 
+/// Dismiss-tombstone kinds. Unlike the natural-keyed rows, these are user-INTENT sets ("I deleted this
+/// auto-detected sleep/workout") kept in Repository/WorkoutSource UserDefaults, NOT the store. Each
+/// syncs as ONE singleton CKRecord holding the "startTs:endTs" token array; the merge is a UNION (a
+/// tombstone never un-happens), so a deletion of a re-derivable item sticks across devices instead of
+/// being resurrected by the other device's detector.
+enum TombstoneKind: CaseIterable {
+    case sleep, workout
+
+    /// Fixed, ASCII-safe record name (not the hex natural-key scheme — these are singletons).
+    var recordName: String {
+        switch self {
+        case .sleep: return "tombstone_sleep"
+        case .workout: return "tombstone_workout"
+        }
+    }
+    var recordType: String {
+        switch self {
+        case .sleep: return "DismissedSleep"
+        case .workout: return "DismissedWorkout"
+        }
+    }
+    /// The UserDefaults key holding the "startTs:endTs" token array this record mirrors.
+    var defaultsKey: String {
+        switch self {
+        case .sleep: return Repository.dismissedSleepDefaultsKey
+        case .workout: return WorkoutSource.dismissedDefaultsKey
+        }
+    }
+    var recordID: CKRecord.ID { CKRecord.ID(recordName: recordName, zoneID: SyncSchema.zoneID) }
+
+    init?(recordName: String) {
+        switch recordName {
+        case "tombstone_sleep": self = .sleep
+        case "tombstone_workout": self = .workout
+        default: return nil
+        }
+    }
+}
+
 /// Generic JSON-blob payload for the rollup record types whose whole model is `Codable` (everything
 /// except workouts, which also carry a route). `deviceId` is a top-level field for readability; the
 /// model itself is one `payload` string.
