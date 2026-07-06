@@ -123,11 +123,18 @@ final class SleepStagerV2Tests: XCTestCase {
     /// the byte-identical default (and the frozen-golden tests) is preserved.
     func testDetectSleepThreadsV2FlagIntoNormalNight() {
         // A 3 h still overnight window (anchored at 01:00 UTC → center ~02:30, clear of the daytime
-        // guard band at the default tzOffset=0) with sleep-band HR + a regular R-R stream.
+        // guard band at the default tzOffset=0) with sleep-band HR + a regular R-R stream. The first ~55 min
+        // hold a perfectly flat HR (lowest HR-flatness → a genuine multi-minute DEEP block that survives the
+        // fragment merge), then the slow staircase for light/REM — so the deep assertion below stays meaningful
+        // now that V2 runs the same sub-3-min fragment merge as V1 (a flat-staircase night expressed deep only
+        // as a ~2.5-min sliver, which the merge correctly absorbs).
         let start = 1_749_517_200            // 2026-06-10 01:00:00 UTC
         let dur = 3 * 60 * 60
         let grav = stillGravity(start: start, durationS: dur)
-        let hr = sleepHR(start: start, durationS: dur)
+        let hr: [HRSample] = (0..<dur).map { i in
+            let bpm = i < 55 * 60 ? 52 : 52 + (i / 60) % 3
+            return HRSample(ts: start + i, bpm: bpm)
+        }
         let rr = regularRRLong(start: start, durationS: dur)
 
         // Flag OFF (the default) — V1 path.

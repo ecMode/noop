@@ -114,7 +114,14 @@ public enum SleepStagerV2 {
 
         let feats = features(start: start, end: end, grav: gravS, hr: hrS, rr: rrS)
         if feats.isEmpty { return [StageSegment(start: start, end: end, stage: "light")] }
-        let labels = stageEpochs(feats)
+        let staged = stageEpochs(feats)
+
+        // Absorb sub-3-min stage flecks (the WHOOP 5/MG sparse-motion artefact) exactly as V1's pipeline does
+        // (#274). V2 is the 5/MG default yet omitted this merge, so its hypnogram read choppier — scattered
+        // single-epoch "awake" flecks — than V1's on the same night. Display/scoring only; the per-epoch
+        // staging above is unchanged. "awake" ranks as wake (0) in `stageDepthRank`, so tie-breaks bias to the
+        // lighter neighbour and never inflate deep/REM, matching V1.
+        let labels = SleepStager.mergeFragments(staged)
 
         // Tile [start, end] with one segment per staged epoch. The first segment back-fills [start, firstEpoch)
         // and the last extends to `end`; an interior coverage gap is carried by the preceding label. "awake"
@@ -155,6 +162,14 @@ public enum SleepStagerV2 {
 
     /// Weight of the RSA respiration-regularity term (regular → deep, irregular → REM).
     static let respWeight = 0.6
+
+    /// Weight on z-scored HR-variance in the AWAKE emission. On a dense-cardiac night `hrVar` is a reliable
+    /// arousal tell; on a sparse/PPG-derived night (no decoded R-R, typical 5/MG) it is noise that fires on
+    /// still, low-HR sleep and manufactures scattered wake. So we drop it to `…Sparse` on those nights and let
+    /// motion (`zmv`) and real elevated HR (`zhr`) carry the wake decision. Ports V1's #705 fix — which vets
+    /// the wake rule with HR only when the night's R-R is sparse — into V2, the engine that runs on 5/MG.
+    static let awakeHrVarWeight = 0.8
+    static let awakeHrVarWeightSparse = 0.0
 
     /// Transition matrix (rows = from, cols = to). Self-transitions dominate; deep↔rem rare; wake mostly
     /// to/from light. A priori, not fit.
@@ -404,6 +419,15 @@ public enum SleepStagerV2 {
     static func stageEpochs(_ feats: [Epoch]) -> [String] {
         if feats.isEmpty { return [] }
 
+        // Sparse-cardiac / PPG-derived night tell: most epochs carry NO R-R-derived respiration (the RSA beat
+        // window came up empty → `respReg == nil`), which means the HR is PPG-derived and its windowed variance
+        // (`hrVar`) is noisy. On those nights `hrVar` spikes on still, low-HR sleep and over-promote epochs to
+        // AWAKE, so we down-weight the `hrVar` term in the wake emission. Same 50%-of-epochs bar V1 uses for its
+        // R-R sparsity tell (`cardiacSparseEpochFrac`). (#705 port)
+        let sparseCount = feats.reduce(0) { $0 + ($1.respReg == nil ? 1 : 0) }
+        let cardiacSparse = Double(sparseCount) >= SleepStager.cardiacSparseEpochFrac * Double(feats.count)
+        let awakeHrVarW = cardiacSparse ? awakeHrVarWeightSparse : awakeHrVarWeight
+
         // Per-night z-score over the present values (population std; 0 std → 1 so a flat channel is neutral).
         func zfun(_ vals: [Double?]) -> (Double?) -> Double {
             let present = vals.compactMap { $0 }
@@ -436,7 +460,7 @@ public enum SleepStagerV2 {
                 "deep": -1.4 * zhvv - 0.2 * zhrv - 0.3 * zmvv - gate + baseLogPrior["deep"]!,
                 "rem": 0.6 * zhvv - 0.6 * zmvv + 0.4 * zhrv + baseLogPrior["rem"]!,
                 "light": baseLogPrior["light"]!,
-                "awake": 1.0 * zmvv + 0.8 * zhvv + 0.4 * zhrv + baseLogPrior["awake"]!,
+                "awake": 1.0 * zmvv + awakeHrVarW * zhvv + 0.4 * zhrv + baseLogPrior["awake"]!,
             ]
             let pr = cyclePrior(f.clock)
             for s in stageNames { em[s]! += pr[s]! }
