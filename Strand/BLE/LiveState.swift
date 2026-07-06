@@ -181,6 +181,16 @@ public final class LiveState: ObservableObject {
 
     @Published public var lastFrameType: String? = nil
     @Published public var lastEvent: String? = nil
+    /// #987: unix of the most recent strap frame FrameRouter routed. Deliberately NOT @Published - the
+    /// raw flood arrives per-notification and a published write per frame would re-render every observer
+    /// at frame rate (the exact churn the lastFrameType change-guard exists to avoid). The Test Centre
+    /// Connection readout reads it on its own render cadence, which is plenty for a freshness label.
+    /// Cleared with the other live readouts in clearBiometrics so it can't outlive the link.
+    public private(set) var lastFrameAtUnix: Int?
+
+    /// Stamp the last-frame instant (#987). One plain Int write per routed frame; called by FrameRouter
+    /// after the CRC guard so bad bytes never count as liveness.
+    public func noteFrameRouted(now: Int = Int(Date().timeIntervalSince1970)) { lastFrameAtUnix = now }
     /// The strap's BLE advertising name, read back from firmware via GET_ADVERTISING_NAME_HARVARD
     /// (cmd 76 — sent in the connect handshake, parsed by FrameRouter). nil until the first reply.
     /// WHOOP 4.0 only; the rename control in Settings shows this as the strap's current name.
@@ -443,6 +453,7 @@ public final class LiveState: ObservableObject {
         recentHrSamples.removeAll()       // Sleep readout buffers must not outlive the link (Group E)
         recentGravitySamples.removeAll()
         clearStrapRange()                 // a stale clock-drift window must not outlive the link either
+        lastFrameAtUnix = nil             // #987: a stale "last frame" freshness must not outlive it either
     }
 
     /// Cap on the in-app strap-log ring buffer. Raised from the old ~1h (200 lines) to retain a rolling
@@ -460,6 +471,14 @@ public final class LiveState: ObservableObject {
         log.append(Self.redactPii(tagged))
         if log.count > Self.maxLogLines { log.removeFirst(log.count - Self.maxLogLines) }
         Self.persistTail(log)
+        // #990: fold the Backfiller's per-session "session persisted N rows" summary into the persisted
+        // ALL-TIME drained-rows tally, right here at the single log sink (no new BLE seam). The summary
+        // is emitted unconditionally whenever rows landed (#150), so the cumulative counter accrues on
+        // every session, not only while the Connection test mode is on. The contains() pre-check keeps
+        // the common per-line cost to one substring scan.
+        if line.contains("session persisted"), let rows = ConnectionReadout.drainedRowsFromSummary(line) {
+            TestCentre.noteDrainedRows(rows)
+        }
     }
 
     /// The in-app log lines tagged for one test domain (for the Test Centre live readout). Read-only,
@@ -551,7 +570,7 @@ public final class LiveState: ObservableObject {
         #else
         let osName = "macOS"
         #endif
-        var header = "NOOP strap log — \(osName)\nApp: \(v)\n\(osName): "
+        var header = "NOOP strap log - \(osName)\nApp: \(v)\n\(osName): "
             + ProcessInfo.processInfo.operatingSystemVersionString + "\n"
         #if os(iOS)
         let diagLines = IOSDiagnostics.capture().summaryLines()

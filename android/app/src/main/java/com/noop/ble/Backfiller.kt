@@ -213,6 +213,10 @@ class Backfiller(
      */
     private val loggedLayoutVersions = HashSet<Int>()
 
+    /** SpO2 RE dump (PR #945, reimplemented): how many full-record dumps this session emitted, bounded by
+     *  [com.noop.analytics.Spo2ReTrace.MAX_SAMPLES]. Session-scoped so the cap spans chunks; reset in begin. */
+    private var spo2Dumped = 0
+
     /**
      * #547: logged once per session the first time the #547 ingest gate drops an implausible-timestamp
      * record (a bad strap clock/flash emitting far-past / year-2027-spike / future-dated `unix` values).
@@ -245,6 +249,7 @@ class Backfiller(
         loggedNoCursor = false
         loggedFutureRtc = false
         loggedLayoutVersions.clear()
+        spo2Dumped = 0
         loggedImplausibleClock = false
         sessionDroppedImplausible = 0
         // #547: the range markers belong to a connection's GET_DATA_RANGE, which the client re-sets per
@@ -344,6 +349,33 @@ class Backfiller(
                         }
                     }
                 }
+            // SpO2 RE dump (PR #945, reimplemented): while the Connection test mode is on, dump a few FULL
+            // historical records + their mapped raw SpO2 channels so an offline pass can tell whether the
+            // strap banks a COMPUTED SpO2 (a byte tracking the WHOOP app's nightly %) vs only the raw
+            // red/IR ADC we already decode. Log-only and bounded per session across chunks ([spo2Dumped],
+            // reset in begin); zero-cost when the mode is off (one Bool short-circuit). Only genuine
+            // historical records (decodeHistorical returns a map with `unix`) spend the sample budget -
+            // the strap's type-50 console frames carry no record bytes to correlate. Records dump whether
+            // or not they carry SpO2 channels, so "nothing banked" is provable too. Never a user-facing
+            // number (never-fabricate; the #194 lesson). Twin of the Swift Backfiller emit.
+            if (spo2Dumped < com.noop.analytics.Spo2ReTrace.MAX_SAMPLES && connectionActive()) {
+                for (f in frames) {
+                    if (spo2Dumped >= com.noop.analytics.Spo2ReTrace.MAX_SAMPLES) break
+                    val d = decodeHistorical(f, family) ?: continue
+                    val unix = d["unix"] as? Int ?: continue
+                    connectionLog(
+                        com.noop.analytics.Spo2ReTrace.recordLine(
+                            frame = f,
+                            version = d["hist_version"] as? Int,
+                            unix = unix,
+                            red = d["spo2_red"] as? Int,
+                            ir = d["spo2_ir"] as? Int,
+                            skinRaw = d["skin_temp_raw"] as? Int,
+                        ),
+                    )
+                    spo2Dumped++
+                }
+            }
             // #547: the strap is emitting records with implausible timestamps (a bad clock/flash —
             // far-past, a year-2027 spike, or future-dated `unix`). The ingest gate dropped them so they
             // can't pollute the day-windowed analytics; surface it ONCE per session so a bad-clock strap
@@ -363,8 +395,9 @@ class Backfiller(
             // destroyed while the UI reported "History synced". Classify PER FRAME (a type-50 console
             // frame decodes to 0 rows BY DESIGN and must not raise the alarm — the old chunk-level
             // isEmpty check counted it and could waste the hex sample on it; it also missed mixed chunks
-            // where one good row hid the losses). Archive the rejects durably FIRST, and only then allow
-            // the ack below. The WHOOP4 happy path (zero rejects) is unchanged.
+            // where one good row hid the losses). The rejects are archived durably AFTER the decoded
+            // insert below but ALWAYS before the ack (#1006, Swift-order parity — see the archive block
+            // for why insert goes first). The WHOOP4 happy path (zero rejects) is unchanged.
             val rejected = rejectedHistoricalRecords(frames, family)
             // #77 family: decoded no rows AND no genuine rejects ⇒ pure console output. Tally it so a
             // completed-but-empty offload (strap not banking) is distinguishable from a caught-up sync.
@@ -383,15 +416,15 @@ class Backfiller(
                     val hex = f.joinToString("") { "%02x".format(it) }
                     log("Backfill: rejected frame[$i] ${f.size}B: $hex")
                 }
-                // Archive must be durable BEFORE the ack. A false return means a genuine write failure
-                // (NOT the archive-full case, which returns true) — hold the cursor/ack so the strap
-                // re-sends the chunk on the next offload. No data loss either way.
-                if (!rejectedSink(rejected, trim)) {
-                    return
-                }
             }
+            // Commit the decoded rows FIRST (durable) — BEFORE the reject archive (#1006, matching the
+            // Swift twin). Insert-first means a rare insert failure — which returns below and re-sends
+            // the whole chunk next session — can't have already appended this chunk's reject frames to
+            // the append-only #91/#30 archive, so the retry can't leave duplicate lines in the corpus
+            // later firmware-layout mapping triangulates against. (The old archive-first order was a
+            // port slip: no data loss either way, but the insert-failure retry archived twice.)
             try {
-                val counts = repository.insert(decoded, deviceId) // DECODED FIRST (durable)
+                val counts = repository.insert(decoded, deviceId)
                 committed = decoded
                 // Success-side observability (#150): tally what actually persisted so the session can emit
                 // "persisted N rows (M with motion) across K night(s)" — the win-rate signal we never logged.
@@ -413,6 +446,17 @@ class Backfiller(
                 // Mirrors the Swift twin's log so a write-stall is falsifiable here too.
                 log("Backfill: failed to persist decoded rows (trim=$trim): $t, holding ack so the strap re-sends this chunk; history won't advance until the write succeeds.")
                 return // do NOT advance/ack, chunk was never durably committed
+            }
+            // #77 / #91: any genuinely-undecodable record in this chunk must be ARCHIVED durably before
+            // we ack — the ack frees the strap's copy, so the archive is the only remaining copy of an
+            // unmapped firmware's records. Runs AFTER the decoded insert (#1006, Swift-order parity; see
+            // the insert comment above). A false return means a genuine write failure (NOT the
+            // archive-full case, which returns true) — hold the cursor/ack so the strap re-sends the
+            // chunk next offload. The decoded rows are already durable, so that re-send's insert is an
+            // idempotent no-op while the archive retries. No data loss either way.
+            if (rejected.isNotEmpty() && !rejectedSink(rejected, trim)) {
+                log("Backfill: rejected-frame archive failed (trim=$trim) — holding ack so the strap re-sends.")
+                return
             }
         }
 

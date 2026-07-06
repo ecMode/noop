@@ -4,10 +4,12 @@ import android.content.Context
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.ActiveCaloriesBurnedRecord
+import androidx.health.connect.client.records.BodyFatRecord
 import androidx.health.connect.client.records.DistanceRecord
 import androidx.health.connect.client.records.ExerciseSessionRecord
 import androidx.health.connect.client.records.HeartRateRecord
 import androidx.health.connect.client.records.HeartRateVariabilityRmssdRecord
+import androidx.health.connect.client.records.LeanBodyMassRecord
 import androidx.health.connect.client.records.OxygenSaturationRecord
 import androidx.health.connect.client.records.Record
 import androidx.health.connect.client.records.RespiratoryRateRecord
@@ -19,10 +21,12 @@ import androidx.health.connect.client.records.Vo2MaxRecord
 import androidx.health.connect.client.records.WeightRecord
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
+import com.noop.analytics.FitnessAgeEngine
 import com.noop.data.AppleDaily
 import com.noop.data.DailyMetric
 import com.noop.data.ImportSummary
 import com.noop.data.MetricSeriesRow
+import com.noop.data.SleepSession
 import com.noop.data.WhoopRepository
 import com.noop.data.WorkoutRow
 import java.time.Instant
@@ -97,6 +101,8 @@ object HealthConnectImporter {
         RespiratoryRateRecord::class,
         Vo2MaxRecord::class,
         WeightRecord::class,
+        BodyFatRecord::class,
+        LeanBodyMassRecord::class,
         ExerciseSessionRecord::class,
         DistanceRecord::class,
     )
@@ -123,8 +129,11 @@ object HealthConnectImporter {
      * Read all configured record types, aggregate per local day, and upsert into [repo].
      * Assumes [PERMISSIONS] have already been granted. Returns [ImportSummary.failure] when
      * Health Connect is unavailable or the permissions are not actually granted.
+     *
+     * [heightCm] is the user's profile height, used ONLY to derive BMI on days that carry a weight
+     * (Health Connect has no BMI record, unlike Apple Health). Pass 0.0 to skip BMI derivation.
      */
-    suspend fun import(context: Context, repo: WhoopRepository): ImportSummary {
+    suspend fun import(context: Context, repo: WhoopRepository, heightCm: Double = 0.0): ImportSummary {
         if (sdkStatus(context) != HealthConnectClient.SDK_AVAILABLE) {
             return ImportSummary.failure(SOURCE, "Health Connect is not available on this device.")
         }
@@ -170,6 +179,11 @@ object HealthConnectImporter {
         // session can be credited with the calories burned inside its window (#117). Garmin/Fit write
         // ActiveCaloriesBurned as interval records; ExerciseSessionRecord itself carries no energy.
         val activeKcalRecords = ArrayList<Triple<Long, Long, Double>>()
+        // #983: HC-only users (no strap) had NO sleep at all — the importer collapsed each
+        // SleepSessionRecord to a per-day minute total and never wrote a SleepSession row, so the Sleep
+        // screen (which reads repo.sleepSessions) fell to its empty state. Keep each night's bounds +
+        // per-stage minutes here, paired with its wake day for the coveredDays gate at write-out.
+        val hcSleepSessions = ArrayList<Pair<String, SleepSession>>()
 
         try {
             // --- Steps ---
@@ -229,6 +243,16 @@ object HealthConnectImporter {
                 else (r.endTime.epochSecond - r.startTime.epochSecond) / 60.0
                 b.sleepMin += totalMin
                 b.hasSleep = true
+                // #983: also keep the session itself so the Sleep screen has a night to show. startTs/endTs
+                // are epoch SECONDS (what repo.sleepSessions queries). Per-stage minutes -> stagesJSON in the
+                // same shape the WHOOP CSV / Xiaomi importers use; a generic-SLEEPING-only night has no
+                // sub-stage breakdown so stagesJSON is null and the row rides on totalSleepMin.
+                hcSleepSessions.add(day to SleepSession(
+                    deviceId = WHOOP,
+                    startTs = r.startTime.epochSecond,
+                    endTs = r.endTime.epochSecond,
+                    stagesJSON = hcStagesJson(r),
+                ))
             }
             // --- SpO2 (%) -> per-day average ---
             readAll(client, OxygenSaturationRecord::class, filter, selfPackage) { r ->
@@ -256,6 +280,24 @@ object HealthConnectImporter {
                 if (r.time.epochSecond >= b.weightTs) {
                     b.weightKg = r.weight.inKilograms
                     b.weightTs = r.time.epochSecond
+                }
+            }
+            // --- Body fat (%) -> latest value of the day wins. Health Connect's Percentage.value is
+            // already 0-100 (unlike Apple's 0..1 fraction), so it stores as-is and matches the iOS
+            // "body_fat" key. ---
+            readAll(client, BodyFatRecord::class, filter, selfPackage) { r ->
+                val b = bucket(dayOf(r.time))
+                if (r.time.epochSecond >= b.bodyFatTs) {
+                    b.bodyFatPct = r.percentage.value
+                    b.bodyFatTs = r.time.epochSecond
+                }
+            }
+            // --- Lean body mass (kg) -> latest value of the day wins (iOS "lean_mass" twin). ---
+            readAll(client, LeanBodyMassRecord::class, filter, selfPackage) { r ->
+                val b = bucket(dayOf(r.time))
+                if (r.time.epochSecond >= b.leanMassTs) {
+                    b.leanMassKg = r.mass.inKilograms
+                    b.leanMassTs = r.time.epochSecond
                 }
             }
             // --- Exercise sessions -> WorkoutRow(source="health-connect") ---
@@ -412,7 +454,23 @@ object HealthConnectImporter {
                     )
                 )
                 a.weightKg?.let { metricSeriesRows += MetricSeriesRow(HC_DEVICE, day, "weight", round2(it)) }
+                // Health Connect has NO BMI record (Apple Health carries one, which iOS imports directly),
+                // so DERIVE it from the day's weight + the user's PROFILE height — the same height NOOP
+                // already uses for its calorie / fitness-age estimates (it defaults to 178 cm until the user
+                // sets theirs, so this reflects the profile, not a measured BMI). It sits inside the weight
+                // gate because BMI needs a weight; the heightCm > 0 guard skips it when a caller passes none.
+                // Compare labels this as profile-derived so it isn't mistaken for a measured reading.
+                derivedBmi(a.weightKg, heightCm)?.let {
+                    metricSeriesRows += MetricSeriesRow(HC_DEVICE, day, "bmi", it)
+                }
             }
+
+            // Body composition from a smart scale (e.g. a Garmin Index synced via Garmin Connect) is
+            // metricSeries-only (no AppleDaily column), so emit it OUTSIDE the hasApple gate — a scale-only
+            // day with no steps/HR still records its readings. Same keys + units as the iOS Apple Health
+            // import: body_fat as a 0-100 percent, lean_mass in kg.
+            a.bodyFatPct?.let { metricSeriesRows += MetricSeriesRow(HC_DEVICE, day, "body_fat", round2(it)) }
+            a.leanMassKg?.let { metricSeriesRows += MetricSeriesRow(HC_DEVICE, day, "lean_mass", round2(it)) }
 
             // DailyMetric (my-whoop): resting-HR / HRV / sleep-minutes / SpO2 / respiration,
             // ONLY for days the strap does not already cover (raw OR computed).
@@ -452,6 +510,13 @@ object HealthConnectImporter {
             if (dailyRows.isNotEmpty()) {
                 repo.upsertDevice(WHOOP, name = "WHOOP")
                 repo.upsertDailyMetrics(dailyRows)
+            }
+            // #983: write the collected sleep sessions under WHOOP, but ONLY for days the strap does not
+            // already cover (same guard as the daily rows) so a real strap night is never shadowed.
+            val sleepRows = hcSleepSessions.filter { it.first !in coveredDays }.map { it.second }
+            if (sleepRows.isNotEmpty()) {
+                repo.upsertDevice(WHOOP, name = "WHOOP")
+                repo.upsertSleepSessions(sleepRows)
             }
             if (workouts.isNotEmpty()) {
                 repo.upsertWorkouts(workouts)
@@ -628,6 +693,32 @@ object HealthConnectImporter {
         return min
     }
 
+    /** Build the `[{stage,min},...]` stagesJSON (same shape as the WHOOP CSV / Xiaomi importers) from a
+     *  Health Connect sleep session's per-stage segments (#983). Returns null when the session carries no
+     *  sub-stage breakdown (e.g. a generic STAGE_TYPE_SLEEPING-only record), so the night rides on its
+     *  total minutes alone. */
+    private fun hcStagesJson(r: SleepSessionRecord): String? {
+        if (r.stages.isEmpty()) return null
+        var light = 0.0; var deep = 0.0; var rem = 0.0; var awake = 0.0
+        for (s in r.stages) {
+            val min = (s.endTime.epochSecond - s.startTime.epochSecond) / 60.0
+            when (s.stage) {
+                SleepSessionRecord.STAGE_TYPE_LIGHT -> light += min
+                SleepSessionRecord.STAGE_TYPE_DEEP -> deep += min
+                SleepSessionRecord.STAGE_TYPE_REM -> rem += min
+                SleepSessionRecord.STAGE_TYPE_AWAKE -> awake += min
+                else -> {}   // SLEEPING (generic) / UNKNOWN: counted in totalSleepMin, no sub-stage split
+            }
+        }
+        if (light == 0.0 && deep == 0.0 && rem == 0.0 && awake == 0.0) return null
+        val arr = org.json.JSONArray()
+        fun seg(stage: String, min: Double) {
+            if (min > 0.0) arr.put(org.json.JSONObject().put("stage", stage).put("min", min))
+        }
+        seg("light", light); seg("deep", deep); seg("rem", rem); seg("awake", awake)
+        return if (arr.length() == 0) null else arr.toString()
+    }
+
     /** SleepSessionRecord stage ints that count as "asleep". */
     private val ASLEEP_STAGES: Set<Int> = setOf(
         SleepSessionRecord.STAGE_TYPE_LIGHT,
@@ -657,6 +748,21 @@ object HealthConnectImporter {
 
     /** #589 de-overlap for a per-source calorie map (Double twin of [maxSourceLong]); empty -> 0.0. */
     internal fun maxSourceDouble(bySource: Map<String, Double>): Double = bySource.values.maxOrNull() ?: 0.0
+
+    /**
+     * #951 — the BMI value the importer stores for a day, DERIVED from the day's weight + the user's
+     * profile height (Health Connect has no BMI record, unlike Apple Health). Returns null — so no
+     * "bmi" metricSeries point is written — when there's no weight that day or no usable profile
+     * height (heightCm <= 0), so a missing height never fabricates a value. Uses the same
+     * [FitnessAgeEngine.bmi] the calorie / fitness-age estimates use, rounded to two places like the
+     * other body-composition series. Factored out (and internal) so the derive-or-skip contract can be
+     * unit-tested without a HealthConnectClient.
+     */
+    internal fun derivedBmi(weightKg: Double?, heightCm: Double): Double? {
+        if (heightCm <= 0.0) return null
+        val w = weightKg ?: return null
+        return round2(FitnessAgeEngine.bmi(w, heightCm))
+    }
 
     /**
      * Derive basal kcal = total - active when both are present and positive; else null.
@@ -770,6 +876,11 @@ object HealthConnectImporter {
 
         var weightKg: Double? = null
         var weightTs: Long = Long.MIN_VALUE
+
+        var bodyFatPct: Double? = null
+        var bodyFatTs: Long = Long.MIN_VALUE
+        var leanMassKg: Double? = null
+        var leanMassTs: Long = Long.MIN_VALUE
 
         var exerciseCount: Int = 0
     }

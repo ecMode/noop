@@ -162,6 +162,21 @@ data class StepSample(
     val synced: Int = 0,
 )
 
+/**
+ * The strap's OWN per-record band sleep_state (#175). The decoder reads the v18 @81 high nibble
+ * (`(sb ushr 4) and 3`) as 0 wake / 1 still / 2 asleep / 3 up. The BYTE + offset are read off real captured
+ * frames exactly like every other v18 field; ONLY the non-zero code meanings are community/structure
+ * inference (every real capture we hold reads 0, a worn daytime wake), so this is carried VERBATIM (the
+ * strap's own byte) and surfaced/persisted as the strap's reported state, NOT trusted to override the derived
+ * hypnogram. Added by MIGRATION_14_15 (Swift WhoopStore v21 parity). PK (deviceId, ts). Swift `SleepStateSample`.
+ */
+@Entity(tableName = "sleepStateSample", primaryKeys = ["deviceId", "ts"])
+data class SleepStateSampleEntity(
+    val deviceId: String,
+    val ts: Long,
+    val state: Int,   // 0 wake / 1 still / 2 asleep / 3 up (band's own high-nibble code)
+)
+
 /** Respiration raw-ADC sample (type-47). Swift `respSample` (v3). PK (deviceId, ts). */
 @Entity(tableName = "respSample", primaryKeys = ["deviceId", "ts"])
 data class RespSample(
@@ -357,6 +372,13 @@ data class JournalEntry(
     val question: String,
     val answeredYes: Boolean,
     val notes: String? = null,
+    /**
+     * Optional numeric reading for a numeric journal item (e.g. caffeine mg, alcohol units), #322.
+     * null for a plain yes/no answer and for every imported WHOOP row. A numeric log writes
+     * answeredYes=true AND numericValue=v, so the EffectRanker with/without split is unchanged.
+     * Swift twin: JournalEntry.numericValue (v20). Room maps `Double?` -> nullable REAL.
+     */
+    val numericValue: Double? = null,
 )
 
 /**
@@ -406,7 +428,8 @@ data class DismissedWorkout(
  * Durable tombstone for a user-DELETED sleep session (#33): keeps a deleted computed night from being
  * re-derived by the recompute, mirroring [DismissedWorkout] (#107). PK (deviceId, startTs), keyed on
  * the deleted session's start; `endTs` is the span the recompute's overlap test uses (a re-detected
- * onset can drift second-to-second). Android-only (iOS has no sleep-delete path). Added by MIGRATION_9_10.
+ * onset can drift second-to-second). iOS has the twin sleep-delete path since #68 (its tombstones live in
+ * UserDefaults, not a table); the undo lifts a tombstone by (deviceId, startTs) (#65). Added by MIGRATION_9_10.
  */
 @Entity(tableName = "dismissedSleep", primaryKeys = ["deviceId", "startTs"])
 data class DismissedSleep(
@@ -431,4 +454,26 @@ data class AppleDaily(
     val maxHr: Int? = null,
     val walkingHr: Int? = null,
     val weightKg: Double? = null,
+)
+
+/**
+ * One Live Session (silent guardian) record (v22 / MIGRATION_15_16). Natural key (deviceId, startTs).
+ * `endTs` is null while the session is still in progress. Fields are declared in the SAME order as the
+ * Swift WhoopStore `liveSession` schema so the migration SQL matches Room's generated shape. Twin of the
+ * Swift `LiveSessionRow`. See docs/superpowers/specs/2026-07-04-live-sessions-design.md.
+ */
+@Entity(tableName = "liveSession", primaryKeys = ["deviceId", "startTs"])
+data class LiveSessionRow(
+    val deviceId: String,
+    val startTs: Long,
+    val endTs: Long?,
+    val chargeAtStart: Double?,
+    val floorBpm: Double,
+    val ceilingBpm: Double,
+    val inBandSec: Double,
+    val belowSec: Double,
+    val aboveSec: Double,
+    val pushCount: Int,
+    val easeCount: Int,
+    val hrSource: String,
 )

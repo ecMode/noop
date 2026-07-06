@@ -12,10 +12,10 @@ enum BuzzPattern: String, CaseIterable, Codable, Identifiable {
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .single: return "Single"
-        case .double: return "Double"
-        case .triple: return "Triple"
-        case .long:   return "Long"
+        case .single: return String(localized: "Single")
+        case .double: return String(localized: "Double")
+        case .triple: return String(localized: "Triple")
+        case .long:   return String(localized: "Long")
         }
     }
     /// Repeat count handed to the haptic command.

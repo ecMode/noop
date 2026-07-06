@@ -18,7 +18,7 @@ import StrandImport
 
 /// One-line privacy note the UI should display verbatim near the composer / settings.
 public let aiCoachPrivacyNote =
-    "Private by default: nothing is sent until you add your own key and ask a question — only a short text summary of your metrics goes to the provider you pick."
+    "Private by default: nothing is sent until you add your own key and ask a question - only a short text summary of your metrics goes to the provider you pick."
 
 // MARK: - Chat model
 
@@ -130,7 +130,7 @@ enum AICoachError: LocalizedError {
         case .rateLimited:
             return "The provider is rate-limiting requests right now. Wait a moment and try again."
         case .server(let code, let detail):
-            let extra = detail.isEmpty ? "" : " — \(detail)"
+            let extra = detail.isEmpty ? "" : " - \(detail)"
             return "The provider returned an error (\(code))\(extra)."
         case .network(let detail):
             return "Network problem: \(detail). The coach is the only feature that needs the internet."
@@ -211,19 +211,19 @@ final class AICoachEngine: ObservableObject {
     /// custom is stored. Editing the live prompt overrides this via `systemPromptKey`.
     static let defaultSystemPrompt = """
     You are an elite, supportive recovery and performance coach with a real training methodology. \
-    You may be given a summary of the user's own wearable data (charge 0–100, effort 0–100, rest 0–100, \
+    You may be given a summary of the user's own wearable data (charge 0-100, effort 0-100, rest 0-100, \
     HRV, resting heart rate) and recent workouts. Charge is the daily recovery/readiness score, effort \
     is the daily cardiovascular load score, and rest is the nightly sleep-quality score. \
     Coach using autoregulation:
-    • Readiness → prescription: charge 67–100 = green light to build/push, higher effort is fine; \
-    34–66 = maintain, quality over volume, keep it controlled; 0–33 = active recovery only \
+    • Readiness → prescription: charge 67-100 = green light to build/push, higher effort is fine; \
+    34-66 = maintain, quality over volume, keep it controlled; 0-33 = active recovery only \
     (Zone 2, mobility, extra sleep) and protect against accumulating effort debt.
     • Workout optimisation: progressive overload, polarised ~80/20 intensity, space hard sessions, \
     program deloads/periodisation, and treat sleep as the single biggest recovery lever.
     • Always cite the user's ACTUAL numbers, give a concrete plan (today and the week ahead), and \
-    be specific, punchy and motivating — like a coach who knows them.
+    be specific, punchy and motivating - like a coach who knows them.
     If no data is provided, coach generally and invite them to turn on data access for personalised \
-    advice. You are NOT a doctor — never diagnose; suggest a professional for genuine health concerns.
+    advice. You are NOT a doctor - never diagnose; suggest a professional for genuine health concerns.
     Format replies in simple Markdown, chat-sized: short paragraphs, **bold** for key numbers, \
     bullet or numbered lists for plans, ### headings only when structure genuinely helps, and a \
     small table only for a week-ahead plan. No code blocks.

@@ -406,7 +406,7 @@ final class HealthKitBridge: ObservableObject {
             lastSync = Date()
             lastError = nil
         } catch {
-            lastError = "Apple Health sync failed: \(error.localizedDescription)"
+            lastError = String(localized: "Apple Health sync failed: \(error.localizedDescription)")
         }
     }
 

@@ -40,12 +40,22 @@ enum DocumentPicker {
     /// the directory itself is selectable and the button enables on a folder. The returned URL is
     /// security-scoped; the caller bookmarks it (see `FolderBackup.saveFolder`, which brackets the scoped
     /// access while minting the bookmark) so the chosen folder survives relaunch.
+    ///
+    /// `startingAt` (#1000a): an explicit starting directory — the caller's last-used folder when there
+    /// is one, else our own Documents. Some iOS builds reportedly keep the Open/Select button disabled
+    /// when the picker opens on its default "Recents"-style root; giving it a concrete `directoryURL`
+    /// lands it on a real, selectable directory. HONESTY NOTE: we could not reproduce the dead button
+    /// in-house and Apple documents `directoryURL` only as a hint, so on the affected iOS build this
+    /// may or may not be the whole fix — which is why `BackupSyncView` now also surfaces a visible
+    /// message when the picker comes back empty instead of failing silently.
     @MainActor
-    static func pickFolder() async -> URL? {
+    static func pickFolder(startingAt root: URL? = nil) async -> URL? {
         await present { coordinator in
             let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
             picker.delegate = coordinator
             picker.allowsMultipleSelection = false
+            picker.directoryURL = root
+                ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             return picker
         }
     }

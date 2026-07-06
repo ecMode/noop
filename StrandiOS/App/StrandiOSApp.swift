@@ -107,6 +107,27 @@ struct StrandiOSApp: App {
                 .onReceive(model.live.$connected) { isConnected in
                     pushLiveActivity(connected: isConnected)
                 }
+                // #911/#759: republish the Home/Lock-Screen widget whenever the dashboard caches actually
+                // change mid-session. The only other publish site is the scenePhase .active handler, so
+                // during a long foreground session the widget froze at the last-foreground snapshot while
+                // Today and the Live Activity kept updating. `refreshSeq` is diff-guarded (Repository.refresh
+                // skips the bump when the merged caches are byte-identical) and refresh() assigns every cache
+                // BEFORE bumping the seq, so this publish always reads fresh data. `dropFirst()` skips the
+                // publisher's attach-time replay of the current value; the .active publish already covers
+                // launch. BUDGET: this app runs with bluetooth-central, so the process is NOT suspended in
+                // the background, and the 15-minute analyze tick + backfill-completion refreshes bump the
+                // seq back there too, where WidgetKit reloads DO count against the daily budget. Hence the
+                // foreground gate: publish only while .active (foreground-initiated reloads are budget
+                // exempt); a background bump is covered by the widget's own 15-minute timeline policy and
+                // by the .active republish on return.
+                .onReceive(model.repo.$refreshSeq.dropFirst()) { _ in
+                    guard scenePhase == .active else { return }
+                    Task { await WidgetSnapshot.publish(from: model) }
+                    // The watch rides the same active-only hook because the bridge now SELF-THROTTLES
+                    // (30-minute spacing + headline-change dedup, both must pass, see WatchSessionBridge),
+                    // so a refresh storm can't burn the ~50/day complication transfer budget.
+                    Task { await watch.pushLatest(from: model) }
+                }
                 // #581: the `noop://import-health` deep link the iOS Shortcut opens after building the
                 // HealthKit-free payload. Filter on the host so other future schemes don't trip the
                 // importer; macOS never registers the scheme so this stays iOS-only.

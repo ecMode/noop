@@ -240,15 +240,19 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * Point the WHOOP scan at a specific family, then present nearby straps WITHOUT auto-connecting (the
-     * Add-a-device wizard's WHOOP path). [prepareForModelSwitch] first idles the engine + clears any
-     * sticky bond/connection, then [WhoopBleClient.scanForWhoops] takes over the LE scanner in present-
-     * mode (it stops the connect scan and re-arms an accumulate-not-connect scan). Mirrors the macOS
-     * AppModel.presentWhoopScan. The persisted family selection is updated too so a later real connect to
-     * the chosen strap targets the right family.
+     * Add-a-device wizard's WHOOP path). [WhoopBleClient.prepareForPresentScan] KEEPS a live same-model
+     * connection (#74, the Android half of the v5.2.3 iOS fix: the old unconditional
+     * prepareForModelSwitch dropped a live strap mid-session, left it disconnected for good if the wizard
+     * was dismissed without picking, and on a 5/MG risked the insufficient-auth re-bond refusal loop) and
+     * only idles the engine on a genuine family switch. [WhoopBleClient.scanForWhoops] then takes over
+     * the LE scanner in present-mode (accumulate, don't connect) without disturbing the kept link.
+     * Mirrors the macOS AppModel.presentWhoopScan + BLEManager.prepareForPresentScan. The persisted
+     * family selection is updated too so a later real connect to the chosen strap targets the right
+     * family.
      */
     fun presentWhoopScan(model: WhoopModel) {
         _selectedModel.value = model
-        ble.prepareForModelSwitch()
+        ble.prepareForPresentScan(model)
         ble.scanForWhoops(model)
     }
 
@@ -488,12 +492,34 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         repository.recentDaysMergedFlow(deviceId)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    /**
+     * #78 hole-4: the app-foreground hook for the bond-loop salvage probe. Every activity resume runs
+     * [WhoopBleClient.salvageProbeIfBondLoopPaused], which no-ops unless the #747 give-up pause is
+     * latched AND its 10-minute floor has passed - so this is one cheap StateFlow read per resume in the
+     * healthy case, and the self-heal path for a paused strap the user has since freed. Registered on the
+     * Application (no lifecycle-process dependency needed); unregistered in [onCleared]. The iOS twin
+     * observes didBecomeActive inside BLEManager itself.
+     */
+    private val salvageProbeLifecycleCallbacks = object : Application.ActivityLifecycleCallbacks {
+        override fun onActivityResumed(activity: android.app.Activity) {
+            ble.salvageProbeIfBondLoopPaused()
+        }
+        override fun onActivityCreated(activity: android.app.Activity, savedInstanceState: android.os.Bundle?) {}
+        override fun onActivityStarted(activity: android.app.Activity) {}
+        override fun onActivityPaused(activity: android.app.Activity) {}
+        override fun onActivityStopped(activity: android.app.Activity) {}
+        override fun onActivitySaveInstanceState(activity: android.app.Activity, outState: android.os.Bundle) {}
+        override fun onActivityDestroyed(activity: android.app.Activity) {}
+    }
+
     init {
         // Multi-source coordinator (Phase 1B): reconcile the live source against the registry's active
         // device ONCE at launch. DORMANT for a single-WHOOP install (the default) — it no-ops and the
         // existing WHOOP flow below runs unchanged; it only acts when a non-WHOOP strap is the active
         // device. The Devices screen (next task) calls onActiveDeviceChanged after a setActive.
         noopApp.sourceCoordinator.start()
+        // #78 hole-4: wire the app-foreground salvage probe (see salvageProbeLifecycleCallbacks above).
+        noopApp.registerActivityLifecycleCallbacks(salvageProbeLifecycleCallbacks)
         // Resolve the active band's name for the Live screen header (MW-6). Falls back to "WHOOP" in the
         // UI until this first read lands.
         refreshActiveDeviceName()
@@ -661,7 +687,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                     if (purged > 0) {
                         ble.externalLog(
                             "Heal #547: purged $purged row(s) with an implausible timestamp " +
-                                "(bad strap clock — far-past or future-dated); rescoring clean days.",
+                                "(bad strap clock - far-past or future-dated); rescoring clean days.",
                         )
                     }
                     NoopPrefs.setTsHealDone(appContext)
@@ -778,6 +804,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                             if (com.noop.testcentre.TestCentre.from(appContext)
                                     .active(com.noop.testcentre.TestDomain.UNIVERSAL))
                                 { line -> ble.externalLog(line, com.noop.testcentre.TestDomain.UNIVERSAL) }
+                            else null,
+                        // Workouts & GPS test mode (#975): when the WORKOUTS domain is on, route each detected-
+                        // bout persist/drop decision into the .workouts-tagged strap log so an "auto workout
+                        // appeared then vanished" is explainable from an export (previously the auto path
+                        // produced NO trace). Zero-cost when off: one SharedPreferences bool read and the sink
+                        // stays null, so the detected-bout persist path is byte-identical. Mirrors macOS.
+                        workoutsTraceSink =
+                            if (com.noop.testcentre.TestCentre.from(appContext)
+                                    .active(com.noop.testcentre.TestDomain.WORKOUTS))
+                                { line -> ble.externalLog(line, com.noop.testcentre.TestDomain.WORKOUTS) }
                             else null,
                     )
                     // analyzeRecent now hops to Dispatchers.Default; a scope cancellation surfaces as a
@@ -1150,6 +1186,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         rescoreAfterEdit()
     }
 
+    /** Undo the most recent sleep delete (#65): restore the row into its ORIGINAL namespace, lift the
+     *  tombstone, then re-score so the day recomputes WITH the night again, matching Swift SleepView's
+     *  analyzeRecent() after undoDeleteSleepSession. Swallows persist failures. */
+    suspend fun undoDeleteSleepSession(session: com.noop.data.SleepSession) {
+        runCatching { repository.undoDeleteSleepSession(session) }
+        rescoreAfterEdit()
+    }
+
     /** Manually add a missed nap as its OWN session (#508) — staged from raw, written under the computed
      *  source with userEdited=true so the recompute guard keeps it and it's never folded into main sleep —
      *  then re-score the affected day immediately so the day's aggregates pick up the new session, matching
@@ -1239,8 +1283,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             val lifting = repository.workouts(LiftingImporter.SOURCE_ID, 0L, now)
             val markers = repository.dismissedDetected(deviceId)
             // Fill imported sessions' missing HR from strap samples (#77), same as before; detected /
-            // manual rows already carry their own HR so they pass through unchanged.
-            val filled = repository.fillWorkoutHrFromStrap((whoop + apple + detected))
+            // manual rows already carry their own HR so they pass through unchanged. #961: also backfill a
+            // strap-native row's Effort (strain) from the strap trace when it's null, so a live/manual
+            // session that ended with sparse HR can't show a blank Effort while the day total counted it.
+            val filled = repository.fillWorkoutHrFromStrap(
+                (whoop + apple + detected),
+                strainMaxHR = profileStore.hrMax.toDouble(),
+                strainSex = profileStore.sex,
+            )
             // #687: collapse the SAME activity tracked live under the strap AND imported from Health
             // Connect / Apple Health into one richer entry — they sit under different sources so without
             // this they show as two sessions. Dedup runs on the dismissed-filtered set, before the sort.
@@ -1297,7 +1347,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 add(ScheduledReportPolicy.durationLabel(durMin))
                 row.avgHr?.let { add("avg $it bpm") }
             }
-            "Workout logged — ${WorkoutEditing.displaySport(row.sport)}" to
+            "Workout logged: ${WorkoutEditing.displaySport(row.sport)}" to
                 (pieces.joinToString(" · ") + ". Summarised after your strap synced.")
         }
         ScheduledReportNotifier.onWorkout(appContext, row.startTs, title, body)
@@ -1364,6 +1414,32 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteWorkout(row: WorkoutRow) {
         viewModelScope.launch {
             runCatching { repository.deleteWorkout(row) }
+            loadWorkouts()
+        }
+    }
+
+    /**
+     * #64: merge the selected MANUAL / DETECTED sessions into one manual session, then reload. [sport] is
+     * passed only when every selected row is a bare detected bout and the user picked a label. No-op when
+     * the selection can't merge (fewer than two, or any imported row) — imported history is never touched.
+     */
+    fun mergeWorkouts(rows: List<WorkoutRow>, sport: String? = null) {
+        if (!WorkoutMerge.canMerge(rows)) return
+        val merged = WorkoutMerge.merge(rows, sport = sport, strapDeviceId = deviceId) ?: return
+        viewModelScope.launch {
+            runCatching { repository.mergeWorkouts(rows, merged) }
+            // #598: rescore the merged row's strain from the strap's HR over its window now, so its Effort
+            // appears immediately instead of waiting for the next analyze tick.
+            rescoreAfterEdit()
+            loadWorkouts()
+        }
+    }
+
+    /** #64: bulk-delete the selected sessions (per-class routing), then reload. Imported rows are never
+     *  selectable, so a stray one is skipped by the repository. */
+    fun bulkDeleteWorkouts(rows: List<WorkoutRow>) {
+        viewModelScope.launch {
+            runCatching { repository.bulkDeleteWorkouts(rows) }
             loadWorkouts()
         }
     }
@@ -1446,6 +1522,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun setContinuousHrv(enabled: Boolean) {
         NoopPrefs.setContinuousHrv(appContext, enabled)
+        ble.setKeepStreamForData(continuousHrvEffective())
+    }
+
+    /**
+     * Flip "Overnight only" for Continuous HRV capture (#927, driven by Settings → Strap). Persists the
+     * preference and re-pushes the UNCHANGED keep-stream want, purely so the BLE reconciler re-derives
+     * the window gate immediately: flipping it on outside the window disarms the stream now, flipping it
+     * off re-arms it. The BLE client re-reads this preference at every arm site, so no stale value can
+     * keep the stream armed outside the window between reconciles.
+     */
+    fun setContinuousHrvOvernight(enabled: Boolean) {
+        NoopPrefs.setContinuousHrvOvernight(appContext, enabled)
         ble.setKeepStreamForData(continuousHrvEffective())
     }
 
@@ -1585,7 +1673,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }.getOrDefault(emptySet())
                 // Partial permissions are fine (#150): auto-import as long as at least one type is granted.
                 if (granted.none { it in HealthConnectImporter.PERMISSIONS }) return@withContext false
-                runCatching { HealthConnectImporter.import(appContext, repository) }.isSuccess
+                // Pass the profile height so the importer can derive BMI (Health Connect has no BMI record).
+                runCatching { HealthConnectImporter.import(appContext, repository, profileStore.heightCm) }.isSuccess
             }
             if (ran) {
                 val t = System.currentTimeMillis()
@@ -1820,8 +1909,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         ble.armStrapAlarm(epochSec)
     }
 
-    /** Fire a haptic buzz on the strap (requires a bonded connection). */
+    /** Fire a haptic buzz on the strap (requires a bonded connection). Scheduled cues only; for a
+     *  user-facing "buzz the strap now" action use [buzzStrapOnce] instead (#921). */
     fun buzz(loops: Int = 2) = ble.buzz(loops)
+
+    /** One-shot user buzz (#921): the confirmed pattern + RUN_ALARM sequence, written acknowledged
+     *  (RUN_ALARM only where the family gate allows it). Drives the Live-screen Buzz button. */
+    fun buzzStrapOnce() = ble.buzzStrapOnce()
 
     /** Tell the strap to stop an in-progress haptic pattern (#769). Best-effort; no-op when not connected
      *  or on a 5/MG (cmd 122 isn't confirmed on its 0x13 path). Used by the Breathe session teardown. */
@@ -1938,6 +2032,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         super.onCleared()
+        // #78 hole-4: drop the app-foreground salvage-probe hook with this ViewModel (the next Activity's
+        // ViewModel re-registers its own), so a cleared VM can never leak resume callbacks.
+        noopApp.unregisterActivityLifecycleCallbacks(salvageProbeLifecycleCallbacks)
         // The BLE client is process-owned (NoopApplication) and may be held up by
         // WhoopConnectionService, so we never shut it down here. Only drop the connection when the
         // user hasn't opted into background streaming — otherwise closing the UI would defeat the

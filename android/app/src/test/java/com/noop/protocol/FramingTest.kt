@@ -37,6 +37,26 @@ class FramingTest {
     }
 
     @Test
+    fun buildCommand_oneShotBuzzSequence_exactBytes() {
+        // #921 one-shot buzz (WhoopBleClient.buzzStrapOnce, twin of Swift buzzStrapOnce): the
+        // on-device-confirmed WHOOP 4.0 sequence is RUN_HAPTICS_PATTERN(79) [patternId=2, loops=3,
+        // 0, 0, 0] immediately followed by RUN_ALARM(68) [0x01], on consecutive seq bytes. Golden
+        // hexes generated independently (Python: zlib CRC-32, table CRC-8) so a drift in either
+        // frame, payload, or command number fails here. On a 5/MG the pattern write is remapped to
+        // the maverick 0x13 frame pinned in puffinCommandFrame_hapticsMatchesMaverickGolden, and
+        // RUN_ALARM is deliberately NOT sent (the Android 5/MG allow-list excludes it).
+        val haptics = Framing.buildCommand(
+            CommandNumber.RUN_HAPTICS_PATTERN, byteArrayOf(2, 3, 0, 0, 0), seq = 1,
+        )
+        assertEquals("aa0c00fc23014f02030000005ff5d722", hex(haptics))
+        val runAlarm = Framing.buildCommand(CommandNumber.RUN_ALARM, byteArrayOf(0x01), seq = 2)
+        assertEquals("aa0800a82302440135b15573", hex(runAlarm))
+        // The payload bytes themselves, pinned once more without the envelope: patternId=2, 3 loops.
+        assertArrayEquals(byteArrayOf(2, 3, 0, 0, 0), haptics.copyOfRange(7, 12))
+        assertEquals(CommandNumber.RUN_ALARM.rawValue, runAlarm[6].toInt() and 0xFF)
+    }
+
+    @Test
     fun buildCommand_envelopeShapeIsCorrect() {
         val frame = Framing.buildCommand(CommandNumber.GET_CLOCK, byteArrayOf(0), seq = 0)
         assertEquals(0xAA.toByte(), frame[0])                 // SOF

@@ -211,9 +211,12 @@ private fun StrapAlarmCard(vm: AppViewModel) {
                     Text("Strap wake-alarm", style = NoopType.title2, color = Palette.textPrimary)
                 }
             }
+            // Truth-sync (#535): the WHOOP 4.0 alarm payload was captured from the official app and
+            // confirmed buzzing on a real 4.0 by the capture author, so the copy no longer calls the
+            // 4.0 path experimental. The 5/MG Experimental-gate branch below is deliberately untouched.
             ToggleRowLocal(
                 label = "Wake me with a strap buzz",
-                help = "Arms the strap to buzz at your wake time, even if NOOP is closed. Still experimental on WHOOP 4.0, so keep a backup alarm until you've confirmed it wakes you.",
+                help = "Arms the strap to buzz at your wake time, even if NOOP is closed. Sends the exact alarm command the official app sends, confirmed buzzing on a real WHOOP 4.0 (community wire capture + on-device test, #535). Keep a backup alarm for anything you truly can't miss.",
                 checked = smartAlarm,
                 onChange = { vm.setSmartAlarmEnabled(it) },
             )
@@ -248,12 +251,25 @@ private fun StrapAlarmCard(vm: AppViewModel) {
                             "Experimental). Right now your wake time is saved but the strap is NOT armed.",
                         style = NoopType.footnote, color = Palette.statusWarning,
                     )
+                } else if (live.whoop5Detected) {
+                    // 5/MG with Experimental ON: the strap IS armed (experimental rev-4 payload) but a
+                    // strap-driven wake has NEVER been captured on 5/MG, so the "confirmed on 4.0" copy must
+                    // NOT show here (#864 honesty). Byte-identical wording to the Swift SmartAlarmView twin.
+                    Text(
+                        if (live.bonded)
+                            "Armed on the strap itself with the experimental 5/MG command. A strap-driven wake is still unconfirmed on 5/MG on our side (confirmed only on WHOOP 4.0), so keep a backup alarm for anything you truly can't miss."
+                        else
+                            "Connect your strap to arm this; it's set on the strap's own firmware alarm. Confirmed working on WHOOP 4.0; still experimental on 5.0 and MG. Keep a backup alarm for anything you truly can't miss.",
+                        style = NoopType.footnote, color = Palette.textTertiary,
+                    )
                 } else {
                     Text(
                         if (live.bonded)
-                            "Armed on the strap itself, so it can buzz at your wake time even if your phone is asleep or NOOP is closed. Still experimental, so we can't yet guarantee it fires; keep a backup alarm."
+                            // Truth-sync (#535): confirmed buzzing on a real WHOOP 4.0; byte-identical
+                            // wording to the Swift SmartAlarmView.
+                            "Armed on the strap itself, so it can buzz at your wake time even if your phone is asleep or NOOP is closed. Sends the exact alarm command the official app sends, confirmed buzzing on a real WHOOP 4.0 (community wire capture + on-device test, #535). Keep a backup alarm for anything you truly can't miss."
                         else
-                            "Connect your strap to arm this; it's set on the strap's own firmware alarm. Still experimental, so keep a backup alarm until you've confirmed it wakes you.",
+                            "Connect your strap to arm this; it's set on the strap's own firmware alarm. Confirmed working on WHOOP 4.0; still experimental on 5.0 and MG. Keep a backup alarm for anything you truly can't miss.",
                         style = NoopType.footnote, color = Palette.textTertiary,
                     )
                 }
@@ -290,7 +306,7 @@ private fun WindowCard(enabled: Boolean, targetMinutes: Int, windowMinutes: Int)
                         Text(hhmm(deadline), style = NoopType.number(28f), color = DomainTheme.Rest.bright)
                     }
                     Text(
-                        "A backup alarm is set for ${hhmm(deadline)} — it fires even if Bluetooth drops, the strap isn't worn, or NOOP is closed.",
+                        "A backup alarm is set for ${hhmm(deadline)}. It fires even if Bluetooth drops, the strap isn't worn, or NOOP is closed.",
                         style = NoopType.footnote, color = Palette.textSecondary,
                     )
                 } else {
@@ -355,13 +371,13 @@ private fun ExplanationCard() {
             Text(
                 "While you're inside the window, NOOP watches your live heart rate from the strap. Deep " +
                     "sleep sits near your nightly low and stays steady; when your heart rate lifts above " +
-                    "that — a sign you're sleeping more lightly or starting to stir — NOOP wakes you a " +
+                    "that (a sign you're sleeping more lightly or starting to stir), NOOP wakes you a " +
                     "little early so you come up from a lighter phase.",
                 style = NoopType.footnote, color = Palette.textSecondary,
             )
             Text(
                 "This is a coarse cue from heart rate, not a clinical sleep-stage reading. If the strap " +
-                    "isn't streaming — Bluetooth off, not worn, app killed — no early wake happens and the " +
+                    "isn't streaming (Bluetooth off, not worn, app killed), no early wake happens and the " +
                     "guaranteed alarm at the window's end still wakes you.",
                 style = NoopType.footnote, color = Palette.textTertiary,
             )

@@ -27,6 +27,7 @@ final class NavRouter: ObservableObject {
         case rhythm
         case trends
         case activeWorkout
+        case liveSession
 
         var id: String { rawValue }
 
@@ -72,4 +73,8 @@ final class NavRouter: ObservableObject {
     /// presents the in-exercise screen even when the workout is already running, in one tap from the Today
     /// indicator card. The flag is consumed (and cleared) by `LiveView.consumeActiveWorkoutRequest()`.
     func openActiveWorkout() { presentActiveWorkout = true; requestedDestination = .activeWorkout }
+    /// Open a Live Session (silent guardian, beta). The Liquid Today entry presents the session screen
+    /// directly today; this route exists for deep-link parity so a future shell/inbox item can raise it
+    /// the same way as every other destination.
+    func openLiveSession() { requestedDestination = .liveSession }
 }

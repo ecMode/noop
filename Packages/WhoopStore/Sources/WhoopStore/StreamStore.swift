@@ -140,6 +140,19 @@ extension WhoopStore {
                     try stmt.execute(arguments: [deviceId, s.ts, s.counter, s.activityClass])
                 }
             }
+            // Band sleep_state (#175). Persist-only, same as steps — the strap's OWN @81 high-nibble state
+            // (0 wake/1 still/2 asleep/3 up), decoded and streamed but dropped at storage until now. Keyed by
+            // (deviceId, ts); ON CONFLICT DO NOTHING keeps the first-seen state for a second so a re-sync is
+            // idempotent. The raw 0-3 code is stored verbatim — a strap that never reports it inserts nothing.
+            if !streams.sleepState.isEmpty {
+                let stmt = try db.cachedStatement(sql: """
+                    INSERT INTO sleepStateSample (deviceId, ts, state) VALUES (?, ?, ?)
+                    ON CONFLICT(deviceId, ts) DO NOTHING
+                    """)
+                for s in streams.sleepState {
+                    try stmt.execute(arguments: [deviceId, s.ts, s.state])
+                }
+            }
             // PPG-derived HR from the v26 optical buffer (#156). Persist-only, same as steps, the count
             // is not added to the 8-field return tuple (the Backfiller call site reads that tuple by name;
             // extending it would ripple), so it is inserted without being counted. ON CONFLICT DO NOTHING
@@ -162,15 +175,15 @@ extension WhoopStore {
     /// Long-format CSV column order. One stream's columns are filled per row; the rest stay blank.
     private static let rawCSVHeader =
         "unix_s,iso_utc,stream,hr_bpm,rr_ms,grav_x,grav_y,grav_z,step_counter," +
-        "ppg_bpm,ppg_conf,spo2_red,spo2_ir,skintemp_raw,resp_raw,event_kind,event_payload"
+        "ppg_bpm,ppg_conf,spo2_red,spo2_ir,skintemp_raw,resp_raw,band_sleep_state,event_kind,event_payload"
 
-    /// One assembled CSV line: the 15 columns AFTER the `unix_s,iso_utc` prefix, joined with commas.
-    /// `cols[0]` is the `stream` name; `cols[1...14]` are the per-stream value slots, only the ones
+    /// One assembled CSV line: the 16 columns AFTER the `unix_s,iso_utc` prefix, joined with commas.
+    /// `cols[0]` is the `stream` name; `cols[1...15]` are the per-stream value slots, only the ones
     /// that belong to this row's stream are non-empty.
     private struct RawCSVRow {
         let ts: Int
         var cols: [String]
-        init(ts: Int) { self.ts = ts; self.cols = Array(repeating: "", count: 15) }
+        init(ts: Int) { self.ts = ts; self.cols = Array(repeating: "", count: 16) }
     }
 
     /// Export the decoded per-sample sensor streams NOOP already stores to ONE combined long-format CSV
@@ -253,14 +266,23 @@ extension WhoopStore {
                 row.cols[12] = WhoopStore.intStr(r["raw"])
                 out.append(row)
             }
-            // event: stream=event → event_kind/event_payload (cols 15–16). Payload is free-form JSON,
+            // band sleep_state (#175): stream=band_sleep_state → band_sleep_state (col 15). The strap's
+            // OWN @81 high-nibble state (0 wake/1 still/2 asleep/3 up), carried verbatim.
+            for r in try Row.fetchAll(db, sql:
+                "SELECT ts, state FROM sleepStateSample WHERE deviceId = ? AND ts >= ? ORDER BY ts",
+                arguments: [deviceId, floor]) {
+                var row = RawCSVRow(ts: r["ts"]); row.cols[0] = "band_sleep_state"
+                row.cols[13] = WhoopStore.intStr(r["state"])
+                out.append(row)
+            }
+            // event: stream=event → event_kind/event_payload (cols 16–17). Payload is free-form JSON,
             // so it always goes through the CSV-quote escaper (commas/quotes/newlines).
             for r in try Row.fetchAll(db, sql:
                 "SELECT ts, kind, payloadJSON FROM event WHERE deviceId = ? AND ts >= ? ORDER BY ts",
                 arguments: [deviceId, floor]) {
                 var row = RawCSVRow(ts: r["ts"]); row.cols[0] = "event"
-                row.cols[13] = WhoopStore.csvField(r["kind"] ?? "")
-                row.cols[14] = WhoopStore.csvField(r["payloadJSON"] ?? "")
+                row.cols[14] = WhoopStore.csvField(r["kind"] ?? "")
+                row.cols[15] = WhoopStore.csvField(r["payloadJSON"] ?? "")
                 out.append(row)
             }
 
@@ -340,6 +362,26 @@ extension WhoopStore {
 
     public func stepCountForTest() async throws -> Int {
         try syncRead { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM stepSample") ?? 0 }
+    }
+
+    /// The strap's OWN banked band sleep_state samples (#175) in `[from, to]` for one device, ascending by
+    /// ts. Each `(ts, state)` is the raw @81 high-nibble code (0 wake/1 still/2 asleep/3 up) carried
+    /// verbatim off the offload stream. Empty when the strap never reported it (a WHOOP 4.0, or a not-yet-
+    /// offloaded window). Feeds the Deep Timeline band-state track and the per-session grid the H7 guard reads.
+    public func sleepStateSamples(deviceId: String, from: Int, to: Int, limit: Int = 200_000) async throws
+        -> [SleepStateSample] {
+        try syncRead { db in
+            try Row.fetchAll(db, sql: """
+                SELECT ts, state FROM sleepStateSample
+                WHERE deviceId = ? AND ts >= ? AND ts <= ?
+                ORDER BY ts LIMIT ?
+                """, arguments: [deviceId, from, to, limit])
+                .map { SleepStateSample(ts: $0["ts"], state: $0["state"]) }
+        }
+    }
+
+    public func sleepStateCountForTest() async throws -> Int {
+        try syncRead { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sleepStateSample") ?? 0 }
     }
 
     public func ppgHrCountForTest() async throws -> Int {

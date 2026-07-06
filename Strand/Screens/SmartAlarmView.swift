@@ -133,7 +133,7 @@ struct SmartAlarmView: View {
                         Text("Wake me with a strap buzz")
                             .font(StrandFont.body)
                             .foregroundStyle(StrandPalette.textPrimary)
-                        Text("Arms the strap to buzz at your wake time, even if NOOP is closed. Still experimental on WHOOP 4.0, so keep a backup alarm until you've confirmed it wakes you.")
+                        Text("Arms the strap to buzz at your wake time, even if NOOP is closed. Sends the exact alarm command the official app sends, confirmed buzzing on a real WHOOP 4.0 (community wire capture + on-device test, #535). Keep a backup alarm for anything you truly can't miss.")
                             .font(StrandFont.footnote)
                             .foregroundStyle(StrandPalette.textTertiary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -161,15 +161,25 @@ struct SmartAlarmView: View {
                     // BLEManager.armStrapAlarm, which logs "not armed" and returns otherwise). Without this
                     // branch the card claimed "Armed on the strap itself" to a 5/MG owner whose strap was
                     // NOT armed, an honest-data violation (reporter: 5/MG, Experimental off, never buzzed).
-                    // Mirrors the Android SmartAlarmScreen StrapAlarmCard wording exactly. The WHOOP 4.0
-                    // path (the else) is unchanged.
+                    // Mirrors the Android SmartAlarmScreen StrapAlarmCard wording exactly. The else copy
+                    // was truth-synced once a real 4.0 wake was confirmed (PR #535: official-app wire
+                    // capture + on-device buzz by the capture author); 5/MG remains unconfirmed, so this
+                    // gated branch keeps its honesty wording.
                     if model.whoop5Detected && !PuffinExperiment.isEnabled {
                         Text("Your WHOOP 5/MG won't arm this until Experimental mode is on (Settings, Experimental). Right now your wake time is saved but the strap is NOT armed. Even with Experimental on, a 5/MG strap-driven wake is still unconfirmed on our side, so keep a backup alarm.")
                             .font(StrandFont.footnote)
                             .foregroundStyle(StrandPalette.statusWarning)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                    } else if model.whoop5Detected {
+                        // 5/MG with Experimental ON: the strap IS armed (the rev-4 puffin payload), but a
+                        // strap-driven wake has NEVER been captured on 5/MG - so the "confirmed on 4.0" copy
+                        // must NOT show here (#864 honesty). Keep the 5/MG-unconfirmed caveat.
+                        Text("Armed on the strap itself with the experimental 5/MG command. A strap-driven wake is still unconfirmed on 5/MG on our side (confirmed only on WHOOP 4.0), so keep a backup alarm for anything you truly can't miss.")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        Text("Armed on the strap itself, so it can buzz at your wake time even if your phone is asleep or NOOP is closed. We send the same alarm command the official app sends, but a strap-driven wake-up hasn't been confirmed on our side yet, so please keep a backup alarm for now.")
+                        Text("Armed on the strap itself, so it can buzz at your wake time even if your phone is asleep or NOOP is closed. Sends the exact alarm command the official app sends, confirmed buzzing on a real WHOOP 4.0 (community wire capture + on-device test, #535). Keep a backup alarm for anything you truly can't miss.")
                             .font(StrandFont.footnote)
                             .foregroundStyle(StrandPalette.textTertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -252,7 +262,7 @@ struct SmartAlarmView: View {
                 Text("Different wake time per day")
                     .font(StrandFont.body)
                     .foregroundStyle(StrandPalette.textPrimary)
-                Text("Set a wake time for specific days — a lie-in at the weekend, say. Days you leave alone use the time above.")
+                Text("Set a wake time for specific days (a lie-in at the weekend, say). Days you leave alone use the time above.")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -335,8 +345,10 @@ struct SmartAlarmView: View {
 
     /// Full weekday name for a Calendar weekday number (1=Sun…7=Sat).
     private static func weekdayName(_ dow: Int) -> String {
-        let names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-        return (1...7).contains(dow) ? names[dow - 1] : "Day \(dow)"
+        let names = [String(localized: "Sunday"), String(localized: "Monday"), String(localized: "Tuesday"),
+                     String(localized: "Wednesday"), String(localized: "Thursday"), String(localized: "Friday"),
+                     String(localized: "Saturday")]
+        return (1...7).contains(dow) ? names[dow - 1] : String(localized: "Day \(dow)")
     }
 
     // Bridges the minutes-since-midnight store to a DatePicker's Date, persisting + rescheduling.
@@ -429,34 +441,29 @@ struct SmartAlarmView: View {
 
     /// Human-readable summary of the selection.
     nonisolated static func alarmWeekdaySummary(_ days: Set<Int>) -> String {
-        if days.isEmpty || days.count == 7 { return "Every day" }
-        if days == Set(2...6) { return "Weekdays" }
-        if days == Set([1, 7]) { return "Weekends" }
+        if days.isEmpty || days.count == 7 { return String(localized: "Every day") }
+        if days == Set(2...6) { return String(localized: "Weekdays") }
+        if days == Set([1, 7]) { return String(localized: "Weekends") }
         return weekdayOrder.filter { days.contains($0) }.map { alarmWeekdayShort($0) }.joined(separator: ", ")
     }
 
+    /// One-letter day chip. Derived from the localized short name so the initials follow the
+    /// language (and Tue/Thu or Sat/Sun never share a single collision-prone key). English output
+    /// is byte-identical to the old hardcoded initials.
     private static func alarmWeekdayInitial(_ dow: Int) -> String {
-        switch dow {
-        case 1: return "S"
-        case 2: return "M"
-        case 3: return "T"
-        case 4: return "W"
-        case 5: return "T"
-        case 6: return "F"
-        case 7: return "S"
-        default: return "?"
-        }
+        let short = alarmWeekdayShort(dow)
+        return short == "?" ? "?" : String(short.prefix(1))
     }
 
     nonisolated private static func alarmWeekdayShort(_ dow: Int) -> String {
         switch dow {
-        case 1: return "Sun"
-        case 2: return "Mon"
-        case 3: return "Tue"
-        case 4: return "Wed"
-        case 5: return "Thu"
-        case 6: return "Fri"
-        case 7: return "Sat"
+        case 1: return String(localized: "Sun")
+        case 2: return String(localized: "Mon")
+        case 3: return String(localized: "Tue")
+        case 4: return String(localized: "Wed")
+        case 5: return String(localized: "Thu")
+        case 6: return String(localized: "Fri")
+        case 7: return String(localized: "Sat")
         default: return "?"
         }
     }

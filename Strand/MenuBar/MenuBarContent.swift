@@ -101,7 +101,8 @@ public struct MenuBarContent: View {
     }
 
     private var connectionTitle: String {
-        isStreaming ? "STREAMING" : live.connected ? "CONNECTED" : "OFFLINE"
+        isStreaming ? String(localized: "STREAMING")
+            : live.connected ? String(localized: "CONNECTED") : String(localized: "OFFLINE")
     }
 
     private var batteryTone: StrandTone {
@@ -256,22 +257,29 @@ public struct MenuBarContent: View {
 
     /// Honest sync line (ports the Android Live line, ed6a31d): pulsing pill while an offload runs,
     /// the stalled-offload error if the last one died, else "History synced N ago". The popover body
-    /// is rebuilt on every open, so the relative label is fresh without a timer. EmptyView when there
-    /// is nothing to say (never synced, no error) — the layout then matches today's exactly.
-    @ViewBuilder
+    /// is rebuilt on every open, so the relative label is fresh without a timer.
+    ///
+    /// The slot always reserves its height, even with nothing to say (never synced, no error): the
+    /// MenuBarExtra panel animates every height change, so the pill<->text<->empty swaps (sync state
+    /// lands right after first layout; `backfilling` toggles per offload chunk) made the popover
+    /// visibly slide into place from the corner on open and bounce while open. Pinning a constant
+    /// 24pt height stops the panel resizing under those swaps. A rare multi-line error may still grow it.
     private var syncLine: some View {
-        if live.backfilling {
-            StatePill("Syncing strap history…", tone: .accent, pulsing: true)
-        } else if let error = live.lastSyncError {
-            Text(error)
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.statusWarning)
-                .fixedSize(horizontal: false, vertical: true)
-        } else if let at = live.lastSyncedAt {
-            Text("History synced \(relativeAgo(at))")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
+        ZStack(alignment: .leading) {
+            if live.backfilling {
+                StatePill("Syncing strap history…", tone: .accent, pulsing: true)
+            } else if let error = live.lastSyncError {
+                Text(error)
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.statusWarning)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let at = live.lastSyncedAt {
+                Text("History synced \(relativeAgo(at))")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
         }
+        .frame(minHeight: 24, alignment: .leading)
     }
 
     // MARK: Actions

@@ -6,7 +6,7 @@ import SwiftUI
 // the uniform, instrument-grade look from the reference. Do not invent ad-hoc cards.
 
 public enum NoopMetrics {
-    public static let cardRadius: CGFloat = 20   // Apple x WHOOP: rounded cards
+    public static let cardRadius: CGFloat = 22   // Apple x WHOOP rounded cards — matches the liquid home card (LiquidTodayView.card)   // Apple x WHOOP: rounded cards
     public static let cardPadding: CGFloat = 16  // Apple x WHOOP: roomier card interior
     public static let gap: CGFloat = 12          // gap between cards
     public static let sectionGap: CGFloat = 22   // Apple x WHOOP: breathing room (not cramped)
@@ -254,7 +254,9 @@ public struct TrendChip: View {
     public var body: some View {
         HStack(spacing: 3) {
             if let symbol { Image(systemName: symbol).font(.system(size: 8, weight: .bold)) }
-            Text(text).font(StrandFont.captionNumber)
+            // One line, always: a long chip (e.g. a workout's kcal) truncates rather than wraps, so
+            // the pill never grows a tile past its floor. Matches Android's unconditional ellipsize (#934).
+            Text(text).font(StrandFont.captionNumber).lineLimit(1)
         }
         .foregroundStyle(color)
         .padding(.horizontal, 6).padding(.vertical, 2)
@@ -361,15 +363,24 @@ public struct InsightCard: View {
 public struct SegmentedPillControl<T: Hashable>: View {
     let items: [T]
     let label: (T) -> String
+    /// Per-segment availability (#943): a disabled segment stays visible (so users learn the
+    /// option exists) but renders extra-dim and ignores taps; VoiceOver announces it dimmed.
+    /// Defaults to everything enabled; ADDED additively, no existing call site touched.
+    let isEnabled: (T) -> Bool
     @Binding var selection: T
     @Environment(\.colorScheme) private var scheme
     public init(_ items: [T], selection: Binding<T>, label: @escaping (T) -> String) {
-        self.items = items; self._selection = selection; self.label = label
+        self.init(items, selection: selection, isEnabled: { _ in true }, label: label)
+    }
+    public init(_ items: [T], selection: Binding<T>, isEnabled: @escaping (T) -> Bool,
+                label: @escaping (T) -> String) {
+        self.items = items; self._selection = selection; self.isEnabled = isEnabled; self.label = label
     }
     public var body: some View {
         HStack(spacing: 4) {
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 let sel = item == selection
+                let enabled = isEnabled(item)
                 Button {
                     guard selection != item else { return }   // re-tapping the active segment stays silent
                     StrandHaptic.selection.play()
@@ -380,13 +391,14 @@ public struct SegmentedPillControl<T: Hashable>: View {
                         // Active segment is SELECTION CHROME, so it follows the accent: on dark a
                         // gold-gradient pill with gold-deep ink; on light a flat blue accent pill with
                         // white ink (so the light theme's selection matches its blue chrome, not gold).
+                        // Disabled segments drop to a fainter tertiary so the lock reads at a glance.
                         .foregroundStyle(sel ? (scheme == .light ? Color.white : StrandPalette.textPrimary)
-                                             : StrandPalette.textTertiary)
+                                             : StrandPalette.textTertiary.opacity(enabled ? 1 : 0.35))
                         // Fill the segment height so the selected pill has EQUAL margins to the track
                         // on every side. (The old compact pill inside a taller 44pt touch frame left
                         // more vertical margin than horizontal — it read as off-centre.)
-                        .frame(minWidth: 32, maxHeight: .infinity)
-                        .padding(.horizontal, 12)
+                        .frame(minWidth: 26, maxHeight: .infinity)
+                        .padding(.horizontal, 9)
                         .background(
                             // WHOOP selection chrome: a flat LIGHTER-grey pill on dark (white ink), a flat
                             // blue accent pill on light — no gold, no gradient.
@@ -399,12 +411,13 @@ public struct SegmentedPillControl<T: Hashable>: View {
                         .contentShape(Capsule(style: .continuous))
                 }
                 .buttonStyle(.plain)
-                .frame(height: 36)   // segment height; the pill fills it for an even inset
+                .frame(height: 32)   // segment height; the pill fills it for an even inset
+                .disabled(!enabled)
                 // Announce the active range to VoiceOver and give a non-colour cue.
                 .accessibilityAddTraits(sel ? .isSelected : [])
             }
         }
-        .padding(4)
+        .padding(3)
         .background(StrandPalette.surfaceInset, in: Capsule(style: .continuous))
         .overlay(Capsule(style: .continuous).strokeBorder(StrandPalette.hairline, lineWidth: 1))
     }

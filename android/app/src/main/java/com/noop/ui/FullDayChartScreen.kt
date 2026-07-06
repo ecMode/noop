@@ -26,6 +26,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.noop.analytics.HrvAnalyzer
+import com.noop.ble.WhoopModel
+import com.noop.protocol.DeviceFamily
+import com.noop.protocol.skinTempCelsius
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -49,6 +52,10 @@ private enum class TimelineMetric(val title: String) {
     SkinTemp("Skin Temp"),
     Respiration("Respiration"),
     Motion("Motion"),
+    // #175: the strap's OWN band sleep_state track (0 wake/1 still/2 asleep/3 up), shown as a distinct
+    // stepped track alongside the derived hypnogram. This is the band's REPORTED state, NOT a stage NOOP
+    // trusts as truth — the pill names it "Band Sleep State" so it can't be mistaken for the derived stages.
+    BandSleepState("Band Sleep State"),
 }
 
 @Composable
@@ -75,6 +82,11 @@ fun FullDayChartScreen(vm: AppViewModel, onBack: () -> Unit) {
     var dayStartSec by remember { mutableStateOf(todayStart) }
     var didLand by remember { mutableStateOf(false) }
     val dayBounds = dayStartSec..(dayStartSec + 86_400)
+    // #986: a continuous left-drag can scroll back to the shown day plus the two before it (a rolling 3-day
+    // window), so older HR is reachable by dragging, not only the day-stepper. Deliberately bounded so one
+    // drag can't fling through weeks; the reload keys on the visible window so panned-to days load, and a day
+    // with no data falls to the empty state (parity with iOS FullDayChartView.panBounds).
+    val panBounds = (dayStartSec - 2 * 86_400)..(dayStartSec + 86_400)
 
     var metric by remember { mutableStateOf(TimelineMetric.Hr) }
     var ownedOnly by remember { mutableStateOf(true) }
@@ -140,7 +152,7 @@ fun FullDayChartScreen(vm: AppViewModel, onBack: () -> Unit) {
 
     ScreenScaffold(
         title = "Deep Timeline",
-        subtitle = "Every second of your day, zoomable.",
+        subtitle = "Every second of your day. Drag back up to 3 days.",
     ) {
         // METRIC PILLS — horizontally scrollable so all six fit on a phone.
         Row(modifier = Modifier.horizontalScroll(rememberScrollState())) {
@@ -210,7 +222,7 @@ fun FullDayChartScreen(vm: AppViewModel, onBack: () -> Unit) {
                             points = points,
                             windowStart = visible.first,
                             windowEnd = visible.last,
-                            bounds = dayBounds,
+                            bounds = panBounds,   // #986: pan clamp is the rolling 3-day window, not one day
                             color = metricColor(metric),
                             modifier = Modifier.fillMaxWidth().height(280.dp),
                             onWindowChange = { window = it },
@@ -232,7 +244,7 @@ fun FullDayChartScreen(vm: AppViewModel, onBack: () -> Unit) {
         // ZOOM HINT + reset.
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                if (window == null) "Pinch to zoom · drag to pan" else "Zoomed in — drag to pan",
+                if (window == null) "Pinch to zoom · drag to pan" else "Zoomed in - drag to pan",
                 style = NoopType.footnote, color = Palette.textTertiary,
             )
             Spacer(Modifier.weight(1f))
@@ -317,15 +329,30 @@ private suspend fun readTimeline(
         TimelineMetric.Spo2 ->
             runCatching { repo.spo2Samples(deviceId, from, to, 200_000) }.getOrDefault(emptyList())
                 .mapNotNull { if (it.ir > 0) TimelinePoint(it.ts, it.red.toDouble() / it.ir) else null }
-        TimelineMetric.SkinTemp ->
+        TimelineMetric.SkinTemp -> {
+            // #938: family-aware raw→°C — 5/MG centidegrees (raw/100, #156), a WHOOP 4.0 v24 raw ADC map.
+            // Resolve the strap family from [deviceId]'s registry model; a positively-identified 4.0 → WHOOP4,
+            // everything else → WHOOP5 (the prior /100 behaviour). Mirrors Swift Repository.timelineRawMetric.
+            val model = runCatching { vm.pairedDevices() }.getOrDefault(emptyList())
+                .firstOrNull { it.id == deviceId }?.model
+            val family = if (WhoopModel.entries.firstOrNull { it.displayName == model } == WhoopModel.WHOOP4)
+                DeviceFamily.WHOOP4 else DeviceFamily.WHOOP5
             runCatching { repo.skinTempSamples(deviceId, from, to, 200_000) }.getOrDefault(emptyList())
-                .map { TimelinePoint(it.ts, it.raw / 100.0) } // centidegrees → °C (#156)
+                .map { TimelinePoint(it.ts, skinTempCelsius(it.raw, family)) }
+        }
         TimelineMetric.Respiration ->
             runCatching { repo.respSamples(deviceId, from, to, 200_000) }.getOrDefault(emptyList())
                 .map { TimelinePoint(it.ts, it.raw.toDouble()) }
         TimelineMetric.Motion ->
             runCatching { repo.gravitySamples(deviceId, from, to, 200_000) }.getOrDefault(emptyList())
                 .map { TimelinePoint(it.ts, kotlin.math.sqrt(it.x * it.x + it.y * it.y + it.z * it.z)) }
+        TimelineMetric.BandSleepState ->
+            // #175: the strap's OWN band sleep_state (0 wake/1 still/2 asleep/3 up) as a stepped track. Read
+            // the raw per-record stream (far sparser than 1 Hz HR, safe to load a day) and plot the 0-3 code
+            // VERBATIM. Empty when the strap never reported it (a WHOOP 4.0, or a not-yet-offloaded window),
+            // which the view renders as its honest "nothing here" state — never a fabricated flat line.
+            runCatching { repo.sleepStateSamples(deviceId, from, to, 200_000) }.getOrDefault(emptyList())
+                .map { TimelinePoint(it.ts, it.state.toDouble()) }
     }
     if (raw.isEmpty() || bucket <= 1L) return@withContext raw
     downsampleTimeline(raw, bucket)
@@ -362,6 +389,8 @@ private fun metricColor(metric: TimelineMetric): Color = when (metric) {
     TimelineMetric.SkinTemp -> Palette.strain033
     TimelineMetric.Hrv, TimelineMetric.Spo2 -> Palette.sleepLight
     TimelineMetric.Respiration, TimelineMetric.Motion -> Palette.textSecondary
+    // #175: the band-state track uses the deep-sleep hue so it reads as a distinct sleep track.
+    TimelineMetric.BandSleepState -> Palette.sleepDeep
 }
 
 private fun unitSuffix(metric: TimelineMetric): String = when (metric) {
@@ -375,6 +404,16 @@ private fun formatValue(metric: TimelineMetric, v: Double): String = when (metri
     TimelineMetric.Hr, TimelineMetric.Respiration, TimelineMetric.Hrv -> v.toInt().toString()
     TimelineMetric.SkinTemp -> String.format(Locale.US, "%.1f", v)
     TimelineMetric.Spo2, TimelineMetric.Motion -> String.format(Locale.US, "%.2f", v)
+    // #175: name the band's own state at the nearest code so the readout reads "asleep", not "2.0". A
+    // bucket-averaged fractional value (when zoomed out) rounds to the nearest code — honest for a readout
+    // label; the track itself plots the numeric code. Names the BAND's reported state, never a derived stage.
+    TimelineMetric.BandSleepState -> when (Math.round(v).toInt()) {
+        0 -> "wake"
+        1 -> "still"
+        2 -> "asleep"
+        3 -> "up"
+        else -> Math.round(v).toInt().toString()
+    }
 }
 
 /** Parse a yyyy-MM-dd day key to its LOCAL midnight epoch-seconds, or null if unparseable (#597). */

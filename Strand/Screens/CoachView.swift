@@ -35,15 +35,19 @@ struct CoachView: View {
     private let customModelTag = "__custom__"
 
     private let suggestions = [
-        "How's my charge trending?",
-        "What should today's training look like?",
-        "Analyse my sleep",
-        "Why am I run down?",
+        String(localized: "How's my charge trending?"),
+        String(localized: "What should today's training look like?"),
+        String(localized: "Analyse my sleep"),
+        String(localized: "Why am I run down?"),
     ]
 
     var body: some View {
         ScreenScaffold(title: "Coach",
-                       subtitle: "Ask about your charge, effort, rest and workouts — grounded in your own numbers.") {
+                       subtitle: "Ask about your charge, effort, rest and workouts, grounded in your own numbers.",
+                       // Liquid finish: the same full-bleed day-of-sky backdrop Today + the other liquid
+                       // tabs carry, so Coach sits in one atmosphere. Static + non-interactive; the frosted
+                       // message/setup cards below sit on the opaque canvas and stay legible.
+                       topBackground: liquidScaffoldSky()) {
             if coach.isConfigured {
                 connectedHeader
                 consentBar
@@ -91,8 +95,8 @@ struct CoachView: View {
                     Text("Let the coach use my data")
                         .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
                     Text(coach.dataConsent
-                         ? "On — your charge, rest, HRV and workouts are shared with the provider for tailored coaching."
-                         : "Off — the coach answers generally and sends none of your metrics.")
+                         ? "On: your charge, rest, HRV and workouts are shared with the provider for tailored coaching."
+                         : "Off: the coach answers generally and sends none of your metrics.")
                         .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -116,8 +120,8 @@ struct CoachView: View {
                     Text("Also share my patterns & Lab Book")
                         .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
                     Text(coach.includeOnDeviceSignals
-                         ? "On — a short summary of your strongest patterns and logged health numbers is added. Summaries only, never raw readings."
-                         : "Off — only your core metrics are shared, not your patterns or Lab Book.")
+                         ? "On: a short summary of your strongest patterns and logged health numbers is added. Summaries only, never raw readings."
+                         : "Off: only your core metrics are shared, not your patterns or Lab Book.")
                         .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -246,7 +250,7 @@ struct CoachView: View {
                                 .strokeBorder(StrandPalette.hairline, lineWidth: 1))
                             .disableAutocorrection(true)
                             .accessibilityLabel("Server URL")
-                        Text("Any OpenAI-compatible server — Ollama, LM Studio, llama.cpp, or your own gateway. Stays on your network; nothing leaves \(Platform.deviceNounPhrase).")
+                        Text("Any OpenAI-compatible server: Ollama, LM Studio, llama.cpp, or your own gateway. Stays on your network; nothing leaves \(Platform.deviceNounPhrase).")
                             .font(StrandFont.footnote)
                             .foregroundStyle(StrandPalette.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -511,7 +515,9 @@ struct CoachView: View {
                             .background(StrandPalette.surfaceInset, in: Capsule(style: .continuous))
                             .overlay(Capsule(style: .continuous).strokeBorder(StrandPalette.hairline, lineWidth: 1))
                     }
-                    .buttonStyle(.plain)
+                    // Liquid tap response: the physical settle-inward every tappable liquid
+                    // affordance gets, replacing the flat `.plain` press.
+                    .buttonStyle(LiquidPressStyle())
                     .disabled(coach.sending)
                     .accessibilityLabel("Suggested prompt: \(prompt)")
                 }
@@ -570,8 +576,8 @@ struct CoachView: View {
     private var privacyFootnote: some View {
         Label {
             Text(coach.provider == .custom
-                 ? "Coach talks only to the server URL you set — point it at a local model (Ollama, LM Studio, llama.cpp) to keep everything on your own machine. Nothing is sent until you ask."
-                 : "This is the only feature that leaves \(Platform.deviceNounPhrase) — it sends a summary of your metrics to \(coach.provider.displayName) using your own key. Nothing is sent until you ask.")
+                 ? "Coach talks only to the server URL you set. Point it at a local model (Ollama, LM Studio, llama.cpp) to keep everything on your own machine. Nothing is sent until you ask."
+                 : "This is the only feature that leaves \(Platform.deviceNounPhrase). It sends a summary of your metrics to \(coach.provider.displayName) using your own key. Nothing is sent until you ask.")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)

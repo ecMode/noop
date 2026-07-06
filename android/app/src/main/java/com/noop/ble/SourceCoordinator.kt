@@ -152,6 +152,11 @@ class SourceCoordinator(
     /** The last active id we reconciled, so a repeated [onActiveDeviceChanged] for the same id is a no-op
      *  (mirrors Swift's `removeDuplicates()` on the published active id). */
     private var lastSeenId: String? = null
+    /** The address of the strap the WHOOP link is CURRENTLY connected to, learned from
+     *  [connectedPeripheralChanged]. Lets a WHOOP→WHOOP make-active adopt IN PLACE when the newly-activated
+     *  row is the same physical strap (#74 keep): a stop/start churn there would drop the live link and
+     *  reconnect through the scan path. Cleared on disconnect (null address). */
+    private var connectedWhoopAddress: String? = null
 
     /**
      * Reconcile once against the CURRENT active id (launch). For a single-WHOOP install this resolves to
@@ -188,6 +193,10 @@ class SourceCoordinator(
      *   • it already matches → nothing to write.
      */
     fun connectedPeripheralChanged(address: String?) {
+        // Track the live strap's address for the WHOOP->WHOOP adopt-in-place skip (#74). A null address is a
+        // disconnect/never-connected republish: clear it so a later make-active can't wrongly match a stale
+        // link, then fall through to the existing ignore.
+        connectedWhoopAddress = address
         if (address == null) return
         scope.launch {
             val activeId = registry.activeDeviceId() ?: return@launch
@@ -231,7 +240,7 @@ class SourceCoordinator(
         } catch (t: Throwable) {
             lastSeenId = null
             log("SourceCoordinator: device switch to '$id' failed: ${t.javaClass.simpleName}: ${t.message}")
-            straplog("HR-strap: activating this device failed (${t.javaClass.simpleName}: ${t.message}) — " +
+            straplog("HR-strap: activating this device failed (${t.javaClass.simpleName}: ${t.message}) - " +
                 "staying on the previous source. Please share this log so we can fix it.")
         }
     }
@@ -264,6 +273,13 @@ class SourceCoordinator(
                 // existing WHOOP flow — kicked off elsewhere on launch — uses it. For the seeded "my-whoop"
                 // (peripheralId null, id "my-whoop") this is setWhoopPreferredAddress(null) and NO
                 // setActiveDeviceId / NO scan / NO disconnect: byte-for-byte today's behaviour.
+                pointWhoop(id, peripheralId)
+            }
+            peripheralId != null && peripheralId.equals(connectedWhoopAddress, ignoreCase = true) -> {
+                // WHOOP → the SAME physical strap (make-active on the row we're already connected to, e.g. the
+                // pick-same-strap Add flow): adopt IN PLACE. A stop/start churn here would drop the #74-kept
+                // live link and force a scan reconnect (wrong-family default + OS-bond status=133). Just
+                // re-point the targeting so samples land under this id; the connection is untouched.
                 pointWhoop(id, peripheralId)
             }
             else -> {

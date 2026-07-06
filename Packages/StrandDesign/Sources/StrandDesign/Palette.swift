@@ -323,11 +323,11 @@ public enum StrandPalette {
     /// DEPLETED · LOW · MODERATE · PRIMED · PEAK
     public static func recoveryState(_ score: Double) -> String {
         switch score {
-        case ..<25:  return "DEPLETED"
-        case ..<50:  return "LOW"
-        case ..<70:  return "MODERATE"
-        case ..<88:  return "PRIMED"
-        default:     return "PEAK"
+        case ..<25:  return String(localized: "DEPLETED", bundle: .module)
+        case ..<50:  return String(localized: "LOW", bundle: .module)
+        case ..<70:  return String(localized: "MODERATE", bundle: .module)
+        case ..<88:  return String(localized: "PRIMED", bundle: .module)
+        default:     return String(localized: "PEAK", bundle: .module)
         }
     }
 
@@ -456,9 +456,9 @@ public enum SleepStage: String, CaseIterable, Sendable {
     /// Display label.
     public var label: String {
         switch self {
-        case .awake: return "Awake"
-        case .light: return "Light"
-        case .deep:  return "Deep"
+        case .awake: return String(localized: "Awake", bundle: .module)
+        case .light: return String(localized: "Light", bundle: .module)
+        case .deep:  return String(localized: "Deep", bundle: .module)
         case .rem:   return "REM"
         }
     }

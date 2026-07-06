@@ -15,6 +15,15 @@ if [ -n "$LEAK" ]; then
   echo "$LEAK" | head -20 >&2
   exit 1
 fi
+# Codename guard: the word "Strand" must never reach a USER-FACING string literal (a shipped Android
+# toast said "reopen Strand" until v8.2.0). Identifier prefixes (StrandFont/StrandPalette/…) and
+# path/comment mentions are fine; a quoted standalone-word use is not.
+CODENAME="$(git grep -nE '"[^"]*\bStrand\b[^"]*"' -- '*.swift' '*.kt' 2>/dev/null | grep -vE 'Strand(Font|Palette|Design|Analytics|Tests|iOS)|Strand/|/Strand|scheme|CFBundle|xcodeproj|\.swift"' || true)"
+if [ -n "$CODENAME" ]; then
+  echo "✗ CODENAME LEAK in a user-facing string, refusing to build:" >&2
+  echo "$CODENAME" | head -20 >&2
+  exit 1
+fi
 echo "✓ anonymity source-scan clean"
 
 VER="${1:-7.0.1}"
