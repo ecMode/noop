@@ -130,9 +130,15 @@ targets:
         # id, so the existing DB under ~/Library/Containers/com.noopapp.noop/... must be copied into the
         # new ~/Library/Containers/com.ecmode.loop/... container (one-time migration).
         PRODUCT_BUNDLE_IDENTIFIER: com.ecmode.loop
-        PRODUCT_NAME: NOOP
+        # The built product is Loop.app / a `Loop` executable, so the macOS Dock, app switcher, and app menu
+        # all read "Loop" — the CFBundleName/CFBundleDisplayName Info.plist keys are already "Loop", but the
+        # bundle filename + CFBundleExecutable ($(EXECUTABLE_NAME) → PRODUCT_NAME) were the last surfaces still
+        # literally "NOOP" that leaked into the Dock. Bundle id (com.ecmode.loop) is unchanged, so the sandbox
+        # container / iCloud store are unaffected. NOTE: the release/packaging tooling in Tools/*.sh and the
+        # docs still refer to the product as NOOP.app — update those too if a distributable is ever cut.
+        PRODUCT_NAME: Loop
         # Pin the Swift module name so `@testable import Strand` resolves even though PRODUCT_NAME is
-        # NOOP — the test target and shared sources refer to the app module as `Strand`.
+        # Loop — the test target and shared sources refer to the app module as `Strand`.
         PRODUCT_MODULE_NAME: Strand
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
@@ -165,7 +171,8 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.noopapp.strandtests
         # Host the unit tests in the app so `@testable import Strand` links against the real app module.
-        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/NOOP.app/Contents/MacOS/NOOP"
+        # Path follows the macOS app's PRODUCT_NAME (now Loop → Loop.app / MacOS/Loop).
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Loop.app/Contents/MacOS/Loop"
         BUNDLE_LOADER: "$(TEST_HOST)"
 
   # ---------------------------------------------------------------------------

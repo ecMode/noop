@@ -101,7 +101,9 @@ final class WatchScoreSnapshotTests: XCTestCase {
 
     func testStorageContractMatchesWatchSideExpectation() {
         // The cross-lane contract: app group + key are fixed strings both sides hard-agree on.
-        XCTAssertEqual(WatchScoreSnapshot.appGroupId, "group.com.noopapp.noop")
+        // This (ecMode) build overrides the app group to group.com.ecmode.loop (see APP_GROUP_ID in
+        // project.yml); the canary asserts the value the phone + watch actually share, not the upstream default.
+        XCTAssertEqual(WatchScoreSnapshot.appGroupId, "group.com.ecmode.loop")
         XCTAssertEqual(WatchScoreSnapshot.storageKey, "latestWatchSnapshot")
     }
 }
