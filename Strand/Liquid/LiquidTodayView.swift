@@ -78,6 +78,11 @@ struct LiquidTodayView: View {
     private let liquidHeart = Color(.sRGB, red: 1, green: 107 / 255, blue: 129 / 255, opacity: 1)
     /// Hero card fill: a translucent near-black so it floats over the sky (mock rgba(13,14,20,.78)).
     private let heroFill = Color(.sRGB, red: 13 / 255, green: 14 / 255, blue: 20 / 255, opacity: 0.80)
+    /// "Card transparency" (0–100, default 100): fades every liquid card surface here — the hero, the
+    /// session-start row, the metric tiles and the `card` helper — in lockstep with the frosted cards.
+    /// Content sits above the surface so it stays readable. Mirrors Kotlin `NoopPrefs.cardOpacityPercent`.
+    @AppStorage(CardAppearancePrefs.opacityKey) private var cardOpacityPercent = CardAppearancePrefs.defaultPercent
+    private var cardOpacity: Double { max(0, min(1, Double(cardOpacityPercent) / 100)) }
 
     // MARK: - Day navigation (ported from classic Today: swipe + calendar, day-keyed reads)
 
@@ -410,6 +415,7 @@ struct LiquidTodayView: View {
                     .fill(heroFill)
                     .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
                         .strokeBorder(.white.opacity(0.11), lineWidth: 1))
+                    .opacity(cardOpacity)
             )
         }
         .buttonStyle(LiquidPressStyle())
@@ -433,6 +439,7 @@ struct LiquidTodayView: View {
                 .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous)
                     .strokeBorder(.white.opacity(0.11), lineWidth: 1))
                 .shadow(color: .black.opacity(0.6), radius: 30, y: 16)
+                .opacity(cardOpacity)
         )
     }
 
@@ -579,6 +586,7 @@ struct LiquidTodayView: View {
                     .fill(StrandPalette.surfaceRaised)
                     .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
                         .strokeBorder(StrandPalette.hairline, lineWidth: 1))
+                    .opacity(cardOpacity)
             )
         }
         .buttonStyle(LiquidPressStyle())
@@ -722,6 +730,7 @@ struct LiquidTodayView: View {
                 .fill(StrandPalette.surfaceRaised)
                 .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .strokeBorder(StrandPalette.hairline, lineWidth: 1))
+                .opacity(cardOpacity)
         )
     }
 
@@ -809,6 +818,7 @@ struct LiquidTodayView: View {
                     .fill(StrandPalette.surfaceRaised)
                     .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
                         .strokeBorder(StrandPalette.hairline, lineWidth: 1))
+                    .opacity(cardOpacity)
             )
     }
 
