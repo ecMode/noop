@@ -555,6 +555,20 @@ public final class BLEManager: NSObject, ObservableObject {
     /// toggle only on the false↔true edge instead of on every input change. Cleared on disconnect — the
     /// strap forgets the toggle across a connection, and the post-bond branch re-arms from `wantsRealtime`.
     private var realtimeArmed = false
+    /// Desired firmware-alarm instant (absolute wake time), or nil when disarmed. INTENT that survives
+    /// reconnects — the same reconciler idea as `wantsRealtime`. `armStrapAlarm`/`disableStrapAlarm` set
+    /// it; the 5/MG post-bond handshake re-asserts it on EVERY (re)bond so a fire-and-forget SET_ALARM_TIME
+    /// dropped while the link was down (e.g. the foreground-resume re-arm) still reaches the strap the
+    /// moment it's back. Without this, arming only ever landed by luck: the log showed the wake was armed
+    /// solely on the disconnected resume path (`send … ignored — not connected`) and never actually set,
+    /// so the strap held no alarm and never buzzed. 5/MG only. (missed-wake fix)
+    private var desiredAlarmInstant: Date?
+    /// True when a command write would actually go out right now (mirrors `send()`'s own gate). Lets the
+    /// alarm path tell a real "armed" from a dropped send, so the log stops claiming "armed" on a write
+    /// that never left the phone.
+    private var strapWriteReady: Bool {
+        state.connected && peripheral?.state == .connected && cmdCharacteristic != nil
+    }
     /// #80 marginal-radio fallback: tracks consecutive arm-then-quick-timeout cycles. When it trips,
     /// `standardHRFallback` goes true and the next connect skips arming R10/R11 (relies on 0x2A37).
     private var marginalRadio = MarginalRadioDetector()
@@ -2476,6 +2490,11 @@ public final class BLEManager: NSObject, ObservableObject {
     /// has NOT been captured on our side (no STRAP_DRIVEN_ALARM_EXECUTED event observed yet) — do
     /// not present the 5/MG alarm as guaranteed until one is.
     func armStrapAlarm(at date: Date) {
+        // Remember the intent BEFORE attempting the send: the write below is fire-and-forget and is
+        // silently dropped if the link isn't up right now (the missed-wake bug — the re-arm often fired
+        // on the disconnected foreground-resume path). The 5/MG post-bond handshake re-asserts this on
+        // the next (re)bond so the wake still lands. `disableStrapAlarm()` clears it.
+        desiredAlarmInstant = date
         // Log the wake time in the user's LOCAL zone. `Date` prints in UTC by default, so an alarm
         // for (say) 07:00 in New York logged as "11:00:00 +0000" reads like a timezone bug — but it
         // isn't: SET_ALARM_TIME carries the absolute instant of the chosen local time, and the strap
@@ -2495,7 +2514,13 @@ public final class BLEManager: NSObject, ObservableObject {
             // pattern, overallLoop 7, 30 s]. No SET_CLOCK preamble (see doc comment above).
             let wakeMs = Int64((date.timeIntervalSince1970 * 1000).rounded())
             send(.setAlarmTime, payload: AlarmPayload.setAlarmRev4(wakeEpochMs: wakeMs))
-            log("Alarm: armed 5/MG rev4 for \(localFmt.string(from: date)) — your local wake time")
+            // Honesty: only claim "armed" when the write actually went out. A dropped send used to log
+            // "armed" anyway, masking the miss; say it's queued so the post-bond re-assert is expected.
+            if strapWriteReady {
+                log("Alarm: armed 5/MG rev4 for \(localFmt.string(from: date)) — your local wake time")
+            } else {
+                log("Alarm: 5/MG wake \(localFmt.string(from: date)) queued — not connected; will arm on the next strap connection")
+            }
             return
         }
         // Clamp rather than trap: an out-of-range alarm date (pre-1970 / post-2106) must not crash.
@@ -2514,6 +2539,7 @@ public final class BLEManager: NSObject, ObservableObject {
 
     /// Disarm the currently-armed firmware alarm.
     func disableStrapAlarm() {
+        desiredAlarmInstant = nil   // clear intent so the post-bond re-assert stops re-arming
         if selectedModel.deviceFamily == .whoop5 {
             // 5/MG DISABLE_ALARM is REVISION_2 [0x02, 0xFF]; the rev-1 [0x01] form below is WHOOP4.
             send(.disableAlarm, payload: AlarmPayload.disableRev2())
@@ -3270,6 +3296,17 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 send(.setClock, payload: BLEManager.setClockPayload())
                 send(.getClock, payload: [])
                 log("WHOOP 5/MG: clock synced (set/get) — strap can persist history now")
+                // RECONCILE the firmware alarm on every (re)bond — this is what makes arming as reliable
+                // as the Set Clock above (both ride this one-per-connection handshake, which the strap log
+                // shows lands every ~10-min reconnect all night). The edge-triggered re-arms (foreground
+                // resume, the bonded sink) fire a fire-and-forget send that send() drops when the write
+                // path isn't ready yet, so the wake never actually reached the strap. Re-send AFTER Set
+                // Clock (the strap needs its RTC before an absolute-instant alarm means anything), and only
+                // a still-future instant so a stale past wake can't buzz on a daytime reconnect. Gated on
+                // Experimental inside armStrapAlarm. (missed-wake fix)
+                if let wake = desiredAlarmInstant, wake > Date() {
+                    armStrapAlarm(at: wake)
+                }
                 log("WHOOP 5/MG: scheduling first historical offload (connect)")
                 // Deferred ~1.5s so the puffin notify subscriptions settle before SEND_HISTORICAL_DATA,
                 // mirroring the WHOOP4 kick. requestSync → beginBackfill is itself gated on

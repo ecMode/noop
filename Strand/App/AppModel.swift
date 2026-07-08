@@ -332,6 +332,12 @@ final class AppModel: ObservableObject {
         // (and the bond sink above re-applies it on every reconnect).
         ble.setKeepRealtimeForData(PuffinExperiment.keepRealtimeForDataEnabled)
 
+        // Seed the firmware-alarm intent from launch so the 5/MG post-bond reconciler can re-assert it on
+        // the FIRST connect too, not only after a settings change or the bonded sink races char-readiness.
+        // Self-gates on `smartAlarmEnabled` (disarms if off); the iOS backup-notification schedule inside
+        // is a no-op when notifications aren't authorized.
+        applySmartAlarm()
+
         // Turn the strap's offloaded raw data into dashboard scores on launch and every 15
         // minutes, so recovery / strain / sleep populate from the strap itself with no import.
         // IntelligenceEngine computes, persists under "my-whoop-noop", and refreshes the dashboard.
