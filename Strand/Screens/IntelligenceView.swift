@@ -4,6 +4,11 @@ import StrandAnalytics
 
 /// Intelligence — NOOP's own recovery/strain/sleep scores, computed on-device from raw strap data
 /// using the WHOOP model shape. Makes the app independent of WHOOP's cloud for live-collected days.
+///
+/// i18n: the By-Day core labels (Effort/Charge/Rest/HRV/RHR) and the Charge-model "Effort" heading are
+/// looked up via `String(localized:)` so non-English locales (e.g. German, issue #1020) actually
+/// translate them instead of rendering the English literal. pt-PT catalog strings adopted from
+/// tigercraft4's PR #1018 (marked needs_review — machine ES→PT conversion pending native review).
 struct IntelligenceView: View {
     @EnvironmentObject var intelligence: IntelligenceEngine
     // NOTE: IntelligenceView deliberately does NOT observe `LiveState`. A connected strap publishes at
@@ -210,7 +215,7 @@ struct IntelligenceView: View {
                     weightRow(String(localized: "Respiration"), "~5%", fraction: 0.05, color: StrandPalette.accent)
                     weightRow(String(localized: "Skin-temperature deviation"), "~5%", fraction: 0.05, color: StrandPalette.metricAmber)
                     HStack {
-                        Text("Effort").font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
+                        Text(String(localized: "Effort")).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
                         Spacer()
                         Text("0-\(UnitFormatter.effortScaleMax(effortScale)) scale")
                             .font(StrandFont.captionNumber).foregroundStyle(StrandPalette.effortColor)
@@ -276,8 +281,8 @@ struct IntelligenceView: View {
                     stat(String(localized: "Effort"), d.strain.map { UnitFormatter.effortDisplay($0, scale: effortScale) } ?? "—",
                          d.strain.map { StrandPalette.strainColor($0) } ?? StrandPalette.textSecondary)
                     stat(String(localized: "Rest"), d.sleepMin.map { "\(Int($0 / 60))h \(Int($0.truncatingRemainder(dividingBy: 60)))m" } ?? "—", StrandPalette.restColor)
-                    stat("HRV", d.hrv.map { "\(Int($0.rounded()))" } ?? "—", StrandPalette.metricPurple)
-                    stat("RHR", d.rhr.map { "\($0)" } ?? "—", StrandPalette.metricRose)
+                    stat(String(localized: "HRV"), d.hrv.map { "\(Int($0.rounded()))" } ?? "—", StrandPalette.metricPurple)
+                    stat(String(localized: "RHR"), d.rhr.map { "\($0)" } ?? "—", StrandPalette.metricRose)
                 }
                 // Effort load meter (0–100) as a filling LiquidTube — the horizontal liquid vessel Today's
                 // Key Metrics + Sleep's stage bars use — tinted along the strain ramp so it reads as

@@ -371,7 +371,7 @@ private struct BreathingContent: View {
                             .font(StrandFont.number(40))
                             .foregroundStyle(StrandPalette.textPrimary)
                     }
-                    Text("BPM")
+                    Text(String(localized: "BPM"))
                         .font(StrandFont.footnote)
                         .tracking(0.8)
                         .foregroundStyle(StrandPalette.textTertiary)
@@ -460,7 +460,7 @@ private struct BreathingContent: View {
                         accent: StrandPalette.metricRose,
                         caption: live.worn ? String(localized: "Live") : String(localized: "Strap not worn"))
 
-            readoutTile(label: "HRV (RMSSD)",
+            readoutTile(label: String(localized: "HRV (RMSSD)"),
                         value: rmssd.map { String(format: "%.0f", $0) } ?? "—",
                         unit: "ms",
                         accent: StrandPalette.metricPurple,

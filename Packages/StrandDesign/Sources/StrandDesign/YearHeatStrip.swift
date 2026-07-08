@@ -138,14 +138,23 @@ public struct YearHeatStrip: View {
 
         VStack(alignment: .leading, spacing: spacing) {
             if showsMonthLabels {
-                HStack(spacing: spacing) {
-                    // align with the weekday-label gutter
-                    Color.clear.frame(width: gridOriginX - spacing, height: monthLabelHeight)
-                    ForEach(weeks) { week in
-                        Text(week.monthLabel ?? "")
-                            .font(.system(size: 8))
-                            .foregroundStyle(StrandPalette.textTertiary)
-                            .frame(width: cellSize, alignment: .leading)
+                // #1021: month labels were each boxed to ONE cell width (~12pt), so a 3-letter month
+                // ("Jul"/"May") truncated to "J…"/"M…". A month marker also needs to sit at the exact x of
+                // the week column where the month starts. Positioning each label absolutely (topLeading +
+                // .offset) at its column x, and letting it render at its natural width (.fixedSize), gives
+                // the full month name room to overflow to the right — the ~4 empty columns before the next
+                // month absorb it, and the grid cells below stay column-aligned (they're in their own HStack).
+                ZStack(alignment: .topLeading) {
+                    // Reserve the row's height + full grid width so the ZStack lays out over the columns.
+                    Color.clear.frame(width: gridWidth, height: monthLabelHeight)
+                    ForEach(Array(weeks.enumerated()), id: \.element.id) { weekIndex, week in
+                        if let label = week.monthLabel, !label.isEmpty {
+                            Text(label)
+                                .font(.system(size: 8))
+                                .foregroundStyle(StrandPalette.textTertiary)
+                                .fixedSize()
+                                .offset(x: gridOriginX + CGFloat(weekIndex) * (cellSize + spacing))
+                        }
                     }
                 }
             }

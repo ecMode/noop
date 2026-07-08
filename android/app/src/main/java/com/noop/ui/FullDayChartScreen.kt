@@ -317,15 +317,20 @@ private suspend fun readTimeline(
     }
     val raw: List<TimelinePoint> = when (metric) {
         TimelineMetric.Hr -> emptyList()
-        TimelineMetric.Hrv ->
+        TimelineMetric.Hrv -> {
             // #803: plot a rolling rMSSD (ms) over the RR series, NOT the raw RR interval. Raw RR is the
             // beat-to-beat heart PERIOD, not variability, so labelling it "HRV" was dishonest. HrvAnalyzer
             // applies the SAME Malik/range artifact filter the nightly RMSSD uses, then slides a 5-min
             // window. The result is already (ts, value); skip the in-process downsample below (the
-            // windowing IS the smoothing) by returning here.
+            // windowing IS the smoothing) by returning here. A thinning stride (window/8, mirroring the
+            // Swift Repository caller) keeps a 1 Hz RR stream from emitting a point per beat and flooding
+            // the chart at day scale (the #575 point-count risk downsampleTimeline handles for the others).
+            // #1036 (ryanbr): stepSec closes this Android-only day-scale flood gap.
+            val hrvWindow = HrvAnalyzer.DEFAULT_ROLLING_WINDOW_SEC
             return@withContext runCatching { repo.rrIntervals(deviceId, from, to, 200_000) }.getOrDefault(emptyList())
-                .let { HrvAnalyzer.rollingRmssd(it) }
+                .let { HrvAnalyzer.rollingRmssd(it, windowSec = hrvWindow, stepSec = maxOf(1, hrvWindow / 8)) }
                 .map { (ts, v) -> TimelinePoint(ts, v) }
+        }
         TimelineMetric.Spo2 ->
             runCatching { repo.spo2Samples(deviceId, from, to, 200_000) }.getOrDefault(emptyList())
                 .mapNotNull { if (it.ir > 0) TimelinePoint(it.ts, it.red.toDouble() / it.ir) else null }

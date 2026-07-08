@@ -1540,6 +1540,8 @@ class WhoopBleClient(
         // reconnect streak so this scan (and any reconnects it spawns) starts back at the snappy
         // LOW_LATENCY scan mode + the 3s backoff base, never inheriting a backed-off lower-power scan.
         resetReconnectBackoff()
+        // #1030 (ryanbr): an explicit user Connect supersedes any pending involuntary reconnect timer.
+        cancelPendingReconnect()
         selectedModel = model
         val adp = adapter
         // No Bluetooth LE hardware at all (most often an emulator / virtual device).
@@ -1662,6 +1664,8 @@ class WhoopBleClient(
     fun disconnect() {
         intentionalDisconnect = true
         handler.removeCallbacks(scanTimeoutRunnable)
+        // #1030 (ryanbr): a user teardown supersedes any pending involuntary reconnect timer.
+        cancelPendingReconnect()
         stopScan()
         // A user-initiated teardown is a clean slate: clear the #617 bond-loop streak so the next (manual)
         // reconnect starts fresh rather than inheriting old suspicion. Twin of macOS disconnect().
@@ -1721,6 +1725,8 @@ class WhoopBleClient(
     fun onBluetoothRadioOn() {
         handler.post {
             if (gatt != null || _state.value.connected) return@post   // already (re)connected
+            // #1030 (ryanbr): this radio-on reconnect supersedes any pending backoff timer (both branches below (re)connect).
+            cancelPendingReconnect()
             val dev = lastDevice
             // Multi-WHOOP: only fast-path reconnect to [lastDevice] when it's still the pinned strap; an
             // un-pinned (or differently-pinned) last device falls through to the pin-aware rescan, mirroring
@@ -1940,6 +1946,8 @@ class WhoopBleClient(
         selectedModel = model
         intentionalDisconnect = false
         log("Auto-reconnecting to your saved ${model.displayName}…")
+        // #1030 (ryanbr): a targeted reconnect supersedes any pending involuntary backoff timer.
+        cancelPendingReconnect()
         connectToDevice(device, autoConnect = true)
     }
 
@@ -2503,6 +2511,41 @@ class WhoopBleClient(
         failedReconnectAttempts = 0
     }
 
+    // #1030 (author: ryanbr): make the involuntary-reconnect timer CANCELLABLE so a stale backoff
+    // reconnect can't fire after the link is already back and tear down the live connection.
+    /** The pending involuntary-reconnect timer, if one is scheduled. Held as a field (NOT an inline
+     *  lambda) so a real (re)connect or an explicit user Connect can CANCEL it, and so its body can
+     *  no-op if we're already back — otherwise a stale backoff reconnect fires AFTER the link returns
+     *  and tears the live connection down (reset+close) or starts a redundant scan. iOS gets this free:
+     *  its connectCore() early-returns on an already-connected peripheral; this ports that guard. */
+    @Volatile
+    private var pendingReconnectRunnable: Runnable? = null
+
+    /** Schedule an involuntary reconnect [action] after [delayMs], replacing any already-pending timer.
+     *  When it fires the action is skipped if we've been told to stop (intentional teardown / bond-loop
+     *  pause) OR we're already connected-or-connecting — a stale timer must never tear down a live link. */
+    private fun scheduleReconnect(delayMs: Long, action: () -> Unit) {
+        cancelPendingReconnect()
+        val r = Runnable {
+            pendingReconnectRunnable = null
+            // #78 hole-3: a timer in flight when the give-up trips must not fire an extra attempt.
+            if (intentionalDisconnect || autoReconnectPausedForBondLoop) return@Runnable
+            // A reconnect that fires AFTER we've re-linked (user Connect / radio-on beat the timer) must
+            // not reset+close the live connection or start a redundant scan. handleDisconnect nulls `gatt`
+            // and sets connected=false BEFORE scheduling, so a genuinely-disconnected state still proceeds.
+            if (gatt != null || _state.value.connected) return@Runnable
+            action()
+        }
+        pendingReconnectRunnable = r
+        handler.postDelayed(r, delayMs)
+    }
+
+    /** Cancel any pending involuntary reconnect — a real (re)connect superseded it. */
+    private fun cancelPendingReconnect() {
+        pendingReconnectRunnable?.let { handler.removeCallbacks(it) }
+        pendingReconnectRunnable = null
+    }
+
     /** Clear the pairing-hint streak + any published hint for a FRESH user-initiated Connect (#78). Kept
      *  off the involuntary-reconnect path on purpose: the streak must SURVIVE automatic reconnects (like
      *  the #52 pinnedBondRefusals counter) so it can accumulate to the threshold across the strap dropping
@@ -2833,6 +2876,9 @@ class WhoopBleClient(
                 BluetoothProfile.STATE_CONNECTED -> {
                     // Port of didConnect: mark connected, negotiate a larger ATT MTU, THEN discover.
                     handler.removeCallbacks(scanTimeoutRunnable)
+                    // #1030 (ryanbr): a real link is up — cancel any pending involuntary reconnect so a
+                    // stale backoff timer can't fire and reset+close this connection.
+                    cancelPendingReconnect()
                     // A successful connect clears the reconnect backoff — the next involuntary drop
                     // starts the 3,6,12…s schedule afresh (iOS didConnect: failedConnectAttempts=0, #48).
                     resetReconnectBackoff()
@@ -4922,10 +4968,9 @@ class WhoopBleClient(
                         """.trimIndent()
                     ) }
                 }
-                handler.postDelayed({
-                    // #78 hole-3: a timer in flight when the give-up trips must not fire an extra attempt.
-                    if (!intentionalDisconnect && !autoReconnectPausedForBondLoop) connect(selectedModel)
-                }, RECONNECT_DELAY_MS)
+                // #1030 (ryanbr): route through scheduleReconnect so this backoff timer is cancellable
+                // and can't tear down a link that returns before it fires.
+                scheduleReconnect(RECONNECT_DELAY_MS) { connect(selectedModel) }
                 return
             }
             val dev = lastDevice
@@ -4944,17 +4989,13 @@ class WhoopBleClient(
                 // resets on the next STATE_CONNECTED and on an explicit user Connect. (#48)
                 val directDelay = nextReconnectDelayMs()
                 log("Disconnected (status=$status); reconnecting directly in ${directDelay / 1000}s (attempt $failedReconnectAttempts)")
-                handler.postDelayed({
-                    // #78 hole-3: a timer in flight when the give-up trips must not fire an extra attempt.
-                    if (!intentionalDisconnect && !autoReconnectPausedForBondLoop) connectToDevice(dev, autoConnect = true)
-                }, directDelay)
+                // #1030 (ryanbr): cancellable backoff timer (see scheduleReconnect).
+                scheduleReconnect(directDelay) { connectToDevice(dev, autoConnect = true) }
             } else {
                 val rescanDelay = nextReconnectDelayMs()
                 log("Disconnected (status=$status); rescanning in ${rescanDelay / 1000}s (attempt $failedReconnectAttempts)")
-                handler.postDelayed({
-                    // #78 hole-3: a timer in flight when the give-up trips must not fire an extra attempt.
-                    if (!intentionalDisconnect && !autoReconnectPausedForBondLoop) connect(selectedModel)
-                }, rescanDelay)
+                // #1030 (ryanbr): cancellable backoff timer (see scheduleReconnect).
+                scheduleReconnect(rescanDelay) { connect(selectedModel) }
             }
         } else {
             log("Disconnected (intentional)")

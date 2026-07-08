@@ -86,8 +86,62 @@ object ReadinessEngine {
     /**
      * Evaluate readiness from daily metrics. [days] may be in any order; the most recent day is
      * treated as "today" unless [today] (a YYYY-MM-DD string) is given.
+     *
+     * #1034 (ryanbr) perf: [evaluateUncached] SORTS the entire daily history and walks trailing windows on
+     * every call, and it is read from Compose recompositions (TodayScreen / CoupledScreen) — so a recompose
+     * on each ~1 Hz live-HR tick re-ran the full-history sort. Some call sites `remember{}` it; this
+     * engine-level memo additionally shields the un-remembered ones and the first/uncached read, mirroring
+     * the Swift ReadinessEngine.evaluateCache. Key = [today] + an ORDER-INDEPENDENT fingerprint over ONLY
+     * the rows' readiness fields (day + avgHrv/restingHr/respRateBpm/strain), so a new sync re-keys but a
+     * cosmetic reorder does not. The cached result is a small immutable [Readiness]; no row arrays retained.
      */
     fun evaluate(days: List<DailyMetric>, today: String? = null): Readiness {
+        val key = readinessKey(today, days)
+        synchronized(evaluateCacheLock) { evaluateCache[key] }?.let { return it }
+        val result = evaluateUncached(days, today)   // computed OUTSIDE the lock (the expensive sort/walk)
+        synchronized(evaluateCacheLock) { evaluateCache[key] = result }
+        return result
+    }
+
+    private data class ReadinessKey(
+        val today: String?, val count: Int, val minDay: Int, val maxDay: Int, val checksum: Long,
+    )
+
+    private const val EVALUATE_CACHE_CAP = 16
+
+    /** Access-order LRU (cap [EVALUATE_CACHE_CAP]); every access is under [evaluateCacheLock] because a
+     *  LinkedHashMap in access order mutates on `get`. Twin of Swift's AnalyticsMemoCache(capacity: 16). */
+    private val evaluateCache: LinkedHashMap<ReadinessKey, Readiness> =
+        object : LinkedHashMap<ReadinessKey, Readiness>(EVALUATE_CACHE_CAP, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<ReadinessKey, Readiness>): Boolean =
+                size > EVALUATE_CACHE_CAP
+        }
+    private val evaluateCacheLock = Any()
+
+    /** Order-independent fingerprint of the readiness-relevant columns — a new sync re-keys, a cosmetic
+     *  reorder does not. Internal to this process's cache only (never compared cross-platform), so it need
+     *  NOT match the Swift hash byte-for-byte; a collision only costs one extra recompute. Mirrors Swift
+     *  `rowsFingerprint`: FNV-style commutative fold over (day, avgHrv, restingHr, respRateBpm, strain). */
+    private fun readinessKey(today: String?, days: List<DailyMetric>): ReadinessKey {
+        var sum = 1469598103934665603L
+        var minDay = 0
+        var maxDay = 0
+        for ((i, d) in days.withIndex()) {
+            var h = d.day.hashCode().toLong()
+            h = h * 1099511628211L xor (d.avgHrv ?: -1.0).toRawBits()
+            h = h * 1099511628211L xor (d.restingHr?.toLong() ?: Long.MAX_VALUE)
+            h = h * 1099511628211L xor (d.respRateBpm ?: -1.0).toRawBits()
+            h = h * 1099511628211L xor (d.strain ?: -1.0).toRawBits()
+            sum = sum xor h   // commutative fold → order-independent
+            val dh = d.day.hashCode()
+            if (i == 0) { minDay = dh; maxDay = dh } else { minDay = minOf(minDay, dh); maxDay = maxOf(maxDay, dh) }
+        }
+        return ReadinessKey(today, days.size, minDay, maxDay, sum)
+    }
+
+    /** The uncached readiness synthesis (formerly the body of [evaluate]). [days] may be in any order; the
+     *  most recent day is "today" unless [today] is given. */
+    private fun evaluateUncached(days: List<DailyMetric>, today: String? = null): Readiness {
         val sorted = days.sortedBy { it.day }
         // When an explicit [today] is given (the dashboard passes the device's real local day key), use
         // the row for THAT day and nothing else: a stale historical import has no row for today, so the
@@ -250,7 +304,10 @@ object ReadinessEngine {
         else String.format(Locale.US, "%.${decimals}f", x)
 
     private fun acwrSignal(ratio: Double, acute: Double, chronic: Double): Signal {
-        val pct = String.format("%.2f", ratio)
+        // #1033 (ryanbr): route the acute:chronic ratio through the Locale.US-pinned [fmt] helper (matching
+        // the evidence line below) so a comma-decimal device locale can't render "1,15" — iOS's
+        // String(format:) is already locale-independent. Pure separator fix, no behavior change.
+        val pct = fmt(ratio, 2)
         // Evidence: the two strain loads the ratio is built from, 1 dp each.
         val evidence = "7d ${fmt(acute, 1)} / 28d ${fmt(chronic, 1)}"
         return when {

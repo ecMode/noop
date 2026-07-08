@@ -293,9 +293,12 @@ public struct TrendChart: View {
             }
         }
         .frame(height: height)
-        // Belt-and-suspenders: also bound the whole chart (axes + overlay) to its frame so nothing
-        // a Charts internal might draw outside the plot can reach the surrounding layout.
-        .clipped()
+        // NOTE: no outer `.clipped()` here. The PLOT is already clipped to its own bounds by
+        // `.chartPlotStyle { plotArea.clipped() }` above (that's what contains the catmullRom overshoot +
+        // the unclipped AreaMark bleed). An additional clip on the WHOLE chart also cropped the axis-label
+        // gutter — cutting the top y-axis value (e.g. "90") in half and clipping the first/last x-axis
+        // labels ("Apr 19"…"May") at the frame edges (#1019). Dropping it lets Swift Charts render the
+        // reserved label regions in full; the marks stay contained by the plot clip, so nothing bleeds.
         // Collapse the Charts marks (line/area/points) into ONE meaningful VoiceOver element instead
         // of letting VoiceOver walk raw per-mark axis values with no series context. The decorative
         // stacked under-glow copy (showsHover:false, no label) is hidden so the same series isn't

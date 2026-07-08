@@ -114,11 +114,14 @@ struct LiquidTodayView: View {
     /// The big header title: Today / Yesterday / weekday for older days.
     private var dayTitle: String {
         switch selectedDayOffset {
-        case 0: return "Today"
-        case 1: return "Yesterday"
+        // #1013: these must localize — the header showed English "Today"/"Yesterday"/weekday even when the
+        // system UI (tab bar etc.) was another language. "Today"/"Yesterday" go through String(localized:)
+        // (matching the classic TodayView.dayNavLabel), and the weekday name is formatted in the user's
+        // locale, not the en_US_POSIX one used only for machine day-keys.
+        case 0: return String(localized: "Today")
+        case 1: return String(localized: "Yesterday")
         default:
-            let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "EEEE"
-            return f.string(from: selectedLogicalDay)
+            return selectedLogicalDay.formatted(.dateTime.weekday(.wide).locale(Locale.autoupdatingCurrent))
         }
     }
     /// Two-way binding for the graphical calendar: reads the shown day, writes back an offset.
@@ -384,18 +387,21 @@ struct LiquidTodayView: View {
                 Image(systemName: "shield.lefthalf.filled")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(StrandPalette.metricCyan)
+                // The session-start row shares the hero card's pinned-dark `heroFill`, so its text/chevron
+                // use the on-dark tokens — textPrimary/Secondary/Tertiary flip to dark ink in Light mode and
+                // went dark-on-near-black here too (#1013).
                 Text("Start session")
                     .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textPrimary)
+                    .foregroundStyle(StrandPalette.onDarkPrimary)
                 Text("BETA")
                     .font(StrandFont.overlineScaled(8.5)).tracking(1.2)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .foregroundStyle(StrandPalette.onDarkSecondary)
                     .padding(.horizontal, 8).padding(.vertical, 2.5)
                     .background(Capsule().fill(.white.opacity(0.05))
                         .overlay(Capsule().strokeBorder(.white.opacity(0.18), lineWidth: 1)))
                 Spacer(minLength: 8)
                 Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .foregroundStyle(StrandPalette.onDarkTertiary)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 11)
@@ -956,10 +962,11 @@ struct LiquidTodayView: View {
     }
 
     private var dateLine: String {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "EEEE, d MMMM"
-        return f.string(from: selectedLogicalDay)
+        // #1013: localize the sub-header date. The old en_US_POSIX "EEEE, d MMMM" formatter forced English
+        // weekday + month names regardless of the UI language. A locale-aware field template localizes both
+        // the names AND the field order (e.g. fr "mercredi 4 juillet") in the user's locale.
+        return selectedLogicalDay.formatted(
+            .dateTime.weekday(.wide).day().month(.wide).locale(Locale.autoupdatingCurrent))
     }
 
     /// Provenance caption for the recovery-vitals card, keyed on the row a vital actually came from — NOT a
@@ -1085,14 +1092,18 @@ private struct HeroScoreCell: View {
                     Text(label.uppercased()).font(StrandFont.overline).tracking(1.6)
                     Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).opacity(0.6)
                 }
-                .foregroundStyle(StrandPalette.textSecondary)
+                // The hero card fill is pinned dark in BOTH themes, so the CHARGE/EFFORT/REST label must use
+                // the scheme-invariant on-dark token — textSecondary flips to dark ink in Light mode and
+                // went dark-on-near-black here (#1013).
+                .foregroundStyle(StrandPalette.onDarkSecondary)
             }
             .buttonStyle(.plain)
             .accessibilityLabel(Text("\(label), \(score.map { String(Int($0.rounded())) } ?? "no data yet"). See how it is scored."))
             if let pill {
                 Text(pill)
                     .font(StrandFont.overlineScaled(8.5)).tracking(1.2)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    // WHOOP pill on the pinned-dark hero card → on-dark token, not the theme-flipping one (#1013).
+                    .foregroundStyle(StrandPalette.onDarkSecondary)
                     .padding(.horizontal, 8).padding(.vertical, 2.5)
                     .background(Capsule().fill(.white.opacity(0.05))
                         .overlay(Capsule().strokeBorder(.white.opacity(0.18), lineWidth: 1)))

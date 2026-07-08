@@ -180,7 +180,9 @@ struct RootTabView: View {
             }
             .background(StrandPalette.surfaceBase.ignoresSafeArea())
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(StrandPalette.surfaceBase, for: .navigationBar)
+            // #1027: same fix as quickScreen — the pillar screens draw the full-bleed liquid sky, so a
+            // transparent nav bar keeps it edge-to-edge instead of an opaque band clipping the top on scroll.
+            .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { routedPillar = nil }
@@ -228,7 +230,12 @@ struct RootTabView: View {
             view
                 .background(StrandPalette.surfaceBase.ignoresSafeArea())
                 .navigationBarTitleDisplayMode(.inline)
-                .toolbarBackground(StrandPalette.surfaceBase, for: .navigationBar)
+                // #1027: these screens draw a full-bleed liquid sky (ScreenScaffold topBackground) that runs
+                // edge-to-edge under a transparent bar — exactly how the tab roots present it. An OPAQUE
+                // surfaceBase toolbar background sat on top of that sky and, as the content scrolled up, its
+                // extended status-bar band CLIPPED the sky + the in-content header ("Live Body Console").
+                // Hiding the bar background lets the sky stay continuous under the floating Done button.
+                .toolbarBackground(.hidden, for: .navigationBar)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button("Done") { quickAction = nil }
@@ -245,7 +252,9 @@ struct RootTabView: View {
             DevicesView()
                 .background(StrandPalette.surfaceBase.ignoresSafeArea())
                 .navigationBarTitleDisplayMode(.inline)
-                .toolbarBackground(StrandPalette.surfaceBase, for: .navigationBar)
+                // #1027: same fix as quickScreen — Devices draws the full-bleed liquid sky, so a transparent
+                // nav bar keeps it edge-to-edge instead of an opaque band clipping the top on scroll.
+                .toolbarBackground(.hidden, for: .navigationBar)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button("Done") { showDevices = false }
@@ -411,7 +420,11 @@ private struct MoreRow<Destination: View>: View {
             destination()
                 .background(StrandPalette.surfaceBase.ignoresSafeArea())
                 .navigationBarTitleDisplayMode(.inline)
-                .toolbarBackground(StrandPalette.surfaceBase, for: .navigationBar)
+                // #1027: a pushed sky-scaffold screen (Live, Workouts, Health, …) draws a full-bleed liquid
+                // sky; an opaque surfaceBase nav-bar band sat over it and clipped the top on scroll. A hidden
+                // bar background keeps the sky edge-to-edge. On the flat (no-sky) screens this is visually
+                // identical at rest — the destination's own surfaceBase background shows through the bar.
+                .toolbarBackground(.hidden, for: .navigationBar)
         } label: {
             HStack(spacing: 14) {
                 // Pin the icon to the accent explicitly. A plain inherited tint gets re-resolved by iOS to
