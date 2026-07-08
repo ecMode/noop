@@ -22,18 +22,90 @@ enum DebugDataDiagnostics {
         lines.append(String(repeating: "─", count: 40))
         lines.append("Strap & data")
         let d = UserDefaults.standard
+        // The persisted value is the WhoopModel rawValue ("WHOOP 5.0 / MG"), NOT a short code — comparing
+        // against "whoop5"/"whoop4" mislabelled every paired strap as "unknown". Compare the rawValues.
         let model: String
         switch d.string(forKey: "selectedWhoopModel") {
-        case "whoop5": model = "WHOOP 5.0 / MG"
-        case "whoop4": model = "WHOOP 4.0"
-        default:       model = "unknown (never paired)"
+        case WhoopModel.whoop5mg.rawValue: model = WhoopModel.whoop5mg.rawValue
+        case WhoopModel.whoop4.rawValue:   model = WhoopModel.whoop4.rawValue
+        default:                           model = "unknown (never paired)"
         }
         lines.append("Model:       \(model)")
         lines.append("Firmware:    \(d.string(forKey: "noop.lastFirmware") ?? "unknown (connect to record)")")
         let syncSec = d.double(forKey: "lastSyncedAt")
         lines.append("Last sync:   \(syncSec > 0 ? relTime(Date().timeIntervalSince1970 - syncSec) : "never")")
         lines.append("Timezone:    \(tzLine())")
+        lines += alarmLines()   // self-delimited block; rides both the scheduled + interactive export paths
         return lines
+    }
+
+    /// Alarm triage for the debug export (#34): the configured wake, the model + 5/MG experimental gate,
+    /// strap-clock skew, the last arm's sent-vs-strap-reports (mismatch flag), and last-fired — so a
+    /// "didn't buzz" report is decidable at a glance across the didn't-arm / didn't-stick / didn't-fire
+    /// legs. Reads persisted defaults (written by BLEManager.armStrapAlarm + recordAlarmArm, the FrameRouter
+    /// readback + event-57, and LiveState.setStrapRange). Sync + guarded.
+    static func alarmLines() -> [String] {
+        var lines: [String] = []
+        lines.append(String(repeating: "─", count: 40))
+        lines.append("Alarm")
+        let d = UserDefaults.standard
+        let on = d.bool(forKey: "behavior.smartAlarmEnabled")
+        let mins = (d.object(forKey: "behavior.smartAlarmMinutes") as? Int) ?? 7 * 60
+        lines.append("Enabled: \(on ? "yes" : "no") · set \(String(format: "%02d:%02d", mins / 60, mins % 60))")
+        // Model + the 5/MG experimental gate: a 5/MG firmware alarm is NOT armed unless Experimental is on
+        // (the #1 "5/MG alarm never fires" cause). Compare the stored rawValue, not a short code.
+        if d.string(forKey: "selectedWhoopModel") == WhoopModel.whoop5mg.rawValue {
+            lines.append("Model: \(WhoopModel.whoop5mg.rawValue) · experimental: "
+                + (PuffinExperiment.isEnabled ? "on" : "off → firmware alarm NOT armed"))
+        } else if d.string(forKey: "selectedWhoopModel") == WhoopModel.whoop4.rawValue {
+            lines.append("Model: \(WhoopModel.whoop4.rawValue)")
+        } else {
+            lines.append("Model: unknown (never paired)")
+        }
+        // Strap clock health: a reset/stale (behind) OR future-dated (ahead) RTC breaks the firmware alarm
+        // even when armed, because the strap fires by comparing the absolute wake epoch to its own clock.
+        if let newest = d.object(forKey: "strap.newestRecordTs") as? Int, newest > 0 {
+            let skew = Int(Date().timeIntervalSince1970) - newest
+            if skew > 3 * 86400 {
+                lines.append("Strap clock: \(skew / 86400)d behind wall (reset/stale — alarm unreliable)")
+            } else if skew < -3 * 86400 {
+                lines.append("Strap clock: \(-skew / 86400)d ahead of wall (future-dated — alarm unreliable)")
+            } else {
+                lines.append("Strap clock: OK")
+            }
+        }
+        if let sent = d.object(forKey: "alarm.lastArmSentEpoch") as? Int {
+            var line = "Last arm: sent \(alarmStamp(sent))"
+            if let at = d.object(forKey: "alarm.lastArmAt") as? Double {
+                line += " · \(relTime(Date().timeIntervalSince1970 - at))"
+            }
+            if !d.bool(forKey: "alarm.lastArmConnected") { line += " · strap NOT connected (queued)" }
+            lines.append(line)
+            if let reported = d.object(forKey: "alarm.lastReportedEpoch") as? Int {
+                let mismatch = abs(reported - sent) > 120
+                lines.append("Strap reports: \(alarmStamp(reported))"
+                    + (mismatch ? "  ⚠️ MISMATCH — strap didn't accept the time" : "  ✓ matches"))
+            } else {
+                lines.append("Strap reports: (no readback)")
+            }
+        } else {
+            lines.append("Last arm: never")
+        }
+        // Did the strap actually fire? (STRAP_DRIVEN_ALARM_EXECUTED / event 57) — the leg that confirms the
+        // 5/MG firmware alarm buzzes on its own, still never observed on this fork.
+        if let firedAt = d.object(forKey: "alarm.lastFiredAt") as? Double {
+            lines.append("Last fired: \(relTime(Date().timeIntervalSince1970 - firedAt))")
+        } else {
+            lines.append("Last fired: never observed")
+        }
+        return lines
+    }
+
+    private static func alarmStamp(_ epochSec: Int) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        return f.string(from: Date(timeIntervalSince1970: TimeInterval(epochSec)))
     }
 
     /// The full dynamic block: strap state + data spine (preloaded `repo.days`) + the REM/skin-temp funnels
@@ -81,7 +153,7 @@ enum DebugDataDiagnostics {
         }
         let det = SleepSession(start: cs.startTs, end: cs.endTs, efficiency: cs.efficiency ?? 0,
                                stages: [], restingHR: cs.restingHr, avgHRV: cs.avgHrv)
-        let family: DeviceFamily = (UserDefaults.standard.string(forKey: "selectedWhoopModel") == "whoop5") ? .whoop5 : .whoop4
+        let family: DeviceFamily = (UserDefaults.standard.string(forKey: "selectedWhoopModel") == WhoopModel.whoop5mg.rawValue) ? .whoop5 : .whoop4
         lines.append(AnalyticsEngine.skinTempFunnel([det], hr: hr, skinTemp: skin, family: family).summary)
         return lines
     }

@@ -2514,6 +2514,7 @@ public final class BLEManager: NSObject, ObservableObject {
             // pattern, overallLoop 7, 30 s]. No SET_CLOCK preamble (see doc comment above).
             let wakeMs = Int64((date.timeIntervalSince1970 * 1000).rounded())
             send(.setAlarmTime, payload: AlarmPayload.setAlarmRev4(wakeEpochMs: wakeMs))
+            recordAlarmArm(sentEpoch: Int(wakeMs / 1000))
             // Honesty: only claim "armed" when the write actually went out. A dropped send used to log
             // "armed" anyway, masking the miss; say it's queued so the post-bond re-assert is expected.
             if strapWriteReady {
@@ -2527,6 +2528,7 @@ public final class BLEManager: NSObject, ObservableObject {
         let epochSec = UInt32(clamping: Int64(date.timeIntervalSince1970))
         sendSetClockBothForms()
         send(.setAlarmTime, payload: WhoopCommand.setAlarmPayload(epochSec: epochSec))
+        recordAlarmArm(sentEpoch: Int(epochSec))
         log("Alarm: armed for \(localFmt.string(from: date)) — your local wake time (sent as UTC epoch \(epochSec))")
         // Arm READBACK (#401 close-out): ask the strap what it now has armed (GET_ALARM_TIME, cmd 67) so
         // the strap log carries armed + strap-reports + fired as one decidable sequence in any future
@@ -2535,6 +2537,15 @@ public final class BLEManager: NSObject, ObservableObject {
         // Log-only: FrameRouter parses the cmd-67 COMMAND_RESPONSE defensively and NEVER gates behaviour
         // on it (the 4.0 response layout is undocumented; unparseable replies log raw hex).
         send(.getAlarmTime, payload: [0x01])
+    }
+
+    /// #34: persist the last alarm arm for the debug export's Alarm block (sent epoch + when + whether the
+    /// write actually went out), so a "didn't buzz" report shows sent-vs-strap-reports at a glance.
+    private func recordAlarmArm(sentEpoch: Int) {
+        let d = UserDefaults.standard
+        d.set(sentEpoch, forKey: "alarm.lastArmSentEpoch")
+        d.set(Date().timeIntervalSince1970, forKey: "alarm.lastArmAt")
+        d.set(strapWriteReady, forKey: "alarm.lastArmConnected")
     }
 
     /// Disarm the currently-armed firmware alarm.
