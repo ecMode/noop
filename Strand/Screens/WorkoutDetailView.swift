@@ -113,7 +113,7 @@ struct WorkoutDetailView: View {
             }
         }
         if minutes == nil {
-            minutes = await repo.workoutZoneMinutes(from: row.startTs, to: row.endTs, age: profile.age)
+            minutes = await repo.workoutZoneMinutes(from: row.startTs, to: row.endTs, maxHR: Double(profile.hrMax))
         }
 
         await MainActor.run {

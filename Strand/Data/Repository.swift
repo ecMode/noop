@@ -2381,11 +2381,14 @@ final class Repository: ObservableObject {
     /// `zonesJSON` still gets a real time-in-zone split. Returns nil when the window carries no HR (so
     /// the view shows nothing rather than five empty bars). `age <= 0` falls back to a 30 y default ,
     /// the zones are approximate either way and clearly labelled as such in the UI.
-    func workoutZoneMinutes(from: Int, to: Int, age: Int) async -> [Double]? {
+    func workoutZoneMinutes(from: Int, to: Int, maxHR: Double) async -> [Double]? {
         guard to > from else { return nil }
         let samples = await hrSamples(from: from, to: to)
         guard !samples.isEmpty else { return nil }
-        let zoneSet = HRZones.zones(age: age > 0 ? Double(age) : 30)
+        // Karvonen %HRR zones so the summary matches the live rail + spoken announcements. Resting HR from
+        // the day spine (0 → degrades to %HRmax); maxHR from the caller's profile.
+        let rest = Double(today?.restingHr ?? days.last(where: { $0.restingHr != nil })?.restingHr ?? 0)
+        let zoneSet = HRZones.reserveZones(maxHR: maxHR > 0 ? maxHR : 190, restingHR: rest)
         let tiz = HRZones.timeInZone(samples, zoneSet: zoneSet)
         let minutes = tiz.seconds.map { $0 / 60.0 }
         return minutes.contains(where: { $0 > 0 }) ? minutes : nil

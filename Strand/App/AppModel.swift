@@ -148,6 +148,11 @@ final class AppModel: ObservableObject {
     // phone run. All three reseed in `startWorkout` so a new run starts clean.
     private let workoutVoice = WorkoutVoice()
     private var lastSpokenZone: Int = -1
+    /// When we last spoke a zone-change line. A cooldown throttles zone callouts so a HR hovering on a
+    /// zone boundary can't ping-pong announcements every couple of seconds.
+    private var lastZoneAnnounceAt: Date = .distantPast
+    /// Minimum gap between spoken zone-change announcements.
+    private static let zoneAnnounceCooldown: TimeInterval = 20
     private var lastAnnouncedMile: Int = 0
     private var lastMileMarkerAt: Date = .distantPast
     // L3 stress-onset detector state: a rolling R-R buffer + the replay-safe detector state (persisted
@@ -556,6 +561,7 @@ final class AppModel: ObservableObject {
         // Reseed the spoken-audio trackers too: no zone announced yet, no mile crossed, and the first
         // mile is timed from the workout start.
         lastSpokenZone = -1
+        lastZoneAnnounceAt = .distantPast
         lastAnnouncedMile = 0
         lastMileMarkerAt = started
         // #524: arm GPS route recording for a distance-type sport (run / ride / walk / hike), mirroring
@@ -1324,12 +1330,29 @@ final class AppModel: ObservableObject {
     /// HR-zone haptic coaching: during a workout, buzz when crossing UP into your configured alert zone
     /// (default 5 — ease off at your top zone; set lower to be nudged at, e.g., the zone 2→3 boundary),
     /// and a single buzz on dropping back to recovery. Workout-gated so it only fires on an active run.
+    /// The running-announcement HR zone (1…5) for `bpm`, using **Karvonen %heart-rate-reserve** rather
+    /// than %HRmax: `pct = (bpm − restingHR) / (hrMax − restingHR)`, edges 0.6/0.7/0.8/0.9. Reserve-based
+    /// so it accounts for the user's resting HR — a plain %HRmax model buries a low-RHR runner a zone too
+    /// low (e.g. at max 183 / RHR ~46 it called an easy 135 bpm run "Zone 3"). Uses the SAME daily-restingHr
+    /// source the live target band uses ([[LiveSessionEngine]]) so the two %HRR systems agree. When no
+    /// resting HR is known yet, `rest` falls back to 0, which degrades this EXACTLY to the old %HRmax
+    /// (`pct = bpm / hrMax`) — never worse than before. Returns nil only when hrMax is unset.
+    /// Resting HR feeding the Karvonen %HRR running zones — the same daily restingHr the live target band
+    /// uses, so the two %HRR systems agree; 0 when none is known yet (degrades the zones to %HRmax). Shared
+    /// with `LiveWorkoutView`'s zone rail so voice and screen use one resting-HR source.
+    var zoneRestingHR: Double {
+        Double(repo.today?.restingHr ?? repo.days.last(where: { $0.restingHr != nil })?.restingHr ?? 0)
+    }
+
+    private func hrReserveZone(forBPM bpm: Int) -> Int? {
+        let maxHR = Double(profile.hrMax)
+        guard maxHR > 0 else { return nil }
+        return HRZones.reserveZoneNumber(bpm: Double(bpm), maxHR: maxHR, restingHR: zoneRestingHR)
+    }
+
     private func coachZone(_ hr: Int?) {
         guard behavior.zoneCoaching, activeWorkout != nil, live.bonded, live.worn, let hr, hr >= 30 else { return }
-        let maxHR = Double(profile.hrMax)
-        guard maxHR > 0 else { return }
-        let pct = Double(hr) / maxHR
-        let zone = pct >= 0.9 ? 5 : pct >= 0.8 ? 4 : pct >= 0.7 ? 3 : pct >= 0.6 ? 2 : 1
+        guard let zone = hrReserveZone(forBPM: hr) else { return }
         defer { lastCoachZone = zone }
         guard lastCoachZone != -1, zone != lastCoachZone else { return }
         let alert = min(5, max(2, behavior.zoneCoachAlertZone))
@@ -1341,17 +1364,22 @@ final class AppModel: ObservableObject {
     /// Spoken HR-zone announcements during a workout (behavior.workoutAudioAlerts). Announces every zone
     /// change, up or down ("entering zone 3" / "dropped to zone 2"). Deliberately NOT gated on the strap
     /// bond or wrist-worn state — TTS needs no BLE, so this works on an unbonded phone run where the
-    /// haptic `coachZone` above stays silent.
+    /// haptic `coachZone` above stays silent. Zones are Karvonen %HRR (see `hrReserveZone`).
     private func announceZoneAudio(_ hr: Int?) {
         guard behavior.workoutAudioAlerts, activeWorkout != nil, let hr, hr >= 30 else { return }
-        let maxHR = Double(profile.hrMax)
-        guard maxHR > 0 else { return }
-        let pct = Double(hr) / maxHR
-        let zone = pct >= 0.9 ? 5 : pct >= 0.8 ? 4 : pct >= 0.7 ? 3 : pct >= 0.6 ? 2 : 1
-        defer { lastSpokenZone = zone }
-        guard lastSpokenZone != -1, zone != lastSpokenZone else { return }
-        if zone > lastSpokenZone { workoutVoice.announce("Entering zone \(zone)") }
-        else { workoutVoice.announce("Dropped to zone \(zone)") }
+        guard let zone = hrReserveZone(forBPM: hr) else { return }
+        // First sample of the run only seeds the baseline (never speaks), and an unchanged zone is silent.
+        // NOTE: unlike the other trackers we DON'T update `lastSpokenZone` on every call — only when we
+        // actually speak — so a change suppressed by the cooldown below is still announced (at the CURRENT
+        // zone) once the cooldown clears, rather than being silently swallowed.
+        guard lastSpokenZone == -1 || zone != lastSpokenZone else { return }
+        if lastSpokenZone == -1 { lastSpokenZone = zone; return }   // baseline only, no announcement
+        // 20s cooldown so a HR sitting on a zone boundary can't flip-flop announcements every few seconds.
+        guard Date().timeIntervalSince(lastZoneAnnounceAt) >= Self.zoneAnnounceCooldown else { return }
+        let direction = zone > lastSpokenZone ? "Entering zone" : "Dropped to zone"
+        workoutVoice.announce("\(direction) \(zone). Heart rate \(hr).")
+        lastSpokenZone = zone
+        lastZoneAnnounceAt = Date()
     }
 
     /// Meters in one mile — splits are announced per mile (US units), per the user's preference.

@@ -34,8 +34,17 @@ struct LiveWorkoutView: View {
     /// the moment it leaves, which is exactly the bounded usage Apple asks for. iOS-only (no-op on Mac).
     @AppStorage("workoutKeepScreenOn") private var keepScreenOn = false
 
-    private var zoneSet: HRZoneSet { HRZones.zones(maxHR: Double(model.profile.hrMax)) }
-    private var zone: Int { model.bpm.map { zoneSet.zoneNumber(forBPM: Double($0)) } ?? 0 }
+    // Karvonen %HRR zones (reserve-based) so the rail agrees with the spoken/haptic announcements, which
+    // use the same `reserveZoneNumber`. `zoneSet` drives the band-range label; `zone` (the highlight) uses
+    // the identical function the voice does so they never disagree.
+    private var zoneSet: HRZoneSet {
+        HRZones.reserveZones(maxHR: Double(model.profile.hrMax), restingHR: model.zoneRestingHR)
+    }
+    private var zone: Int {
+        model.bpm.map {
+            HRZones.reserveZoneNumber(bpm: Double($0), maxHR: Double(model.profile.hrMax), restingHR: model.zoneRestingHR)
+        } ?? 0
+    }
 
     var body: some View {
         ScrollView {
@@ -183,7 +192,7 @@ struct LiveWorkoutView: View {
                 }
             }
             if let band = zoneSet.zones.first(where: { $0.number == zone }) {
-                Text("Zone \(zone): \(Int(band.lower))-\(Int(band.upper)) bpm (\(Int(band.lowerPct * 100))-\(Int(band.upperPct * 100))% max HR)")
+                Text("Zone \(zone): \(Int(band.lower))-\(Int(band.upper)) bpm (\(Int(band.lowerPct * 100))-\(Int(band.upperPct * 100))% HRR)")
                     .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
             } else {
                 Text("Warming up. Keep moving to climb into Zone 1.")

@@ -137,6 +137,38 @@ public enum HRZones {
         return HRZoneSet(zones: built, maxHR: maxHR, source: source)
     }
 
+    /// Karvonen **%heart-rate-reserve** zone (1…5) for a bpm: `pct = (bpm − restingHR) / (maxHR − restingHR)`,
+    /// same edges as `%HRmax` but shifted to account for resting HR — so a low-RHR runner isn't buried a zone
+    /// low. Convention matches the running announcements: Z1 is everything below 60% reserve (no "below zone
+    /// 1"). When `restingHR <= 0` (unknown), it degrades EXACTLY to `%HRmax` (`bpm / maxHR`). Single source of
+    /// truth so the spoken/haptic announcements and the on-screen zone rail always agree.
+    public static func reserveZoneNumber(bpm: Double, maxHR: Double, restingHR: Double) -> Int {
+        guard maxHR > 0 else { return 1 }
+        let rest = restingHR > 0 ? restingHR : 0
+        let reserve = max(maxHR - rest, 1)
+        let pct = (bpm - rest) / reserve
+        return pct >= 0.9 ? 5 : pct >= 0.8 ? 4 : pct >= 0.7 ? 3 : pct >= 0.6 ? 2 : 1
+    }
+
+    /// A reserve-based (Karvonen) zone SET for display + time-in-zone: bands are `restingHR + pct×(maxHR −
+    /// restingHR)` using the same `zoneEdges`. `zoneNumber`/`timeInZone` work unchanged on it — just shifted
+    /// to reserve. Falls back to the `%HRmax` bands when `restingHR <= 0` so callers never special-case.
+    public static func reserveZones(maxHR: Double, restingHR: Double) -> HRZoneSet {
+        guard restingHR > 0, maxHR > restingHR else { return zones(maxHR: maxHR, source: "hrmax") }
+        let reserve = maxHR - restingHR
+        var built: [HRZone] = []
+        for i in 0..<5 {
+            built.append(HRZone(
+                number: i + 1,
+                lower: restingHR + zoneEdges[i] * reserve,
+                upper: restingHR + zoneEdges[i + 1] * reserve,
+                lowerPct: zoneEdges[i],
+                upperPct: zoneEdges[i + 1]
+            ))
+        }
+        return HRZoneSet(zones: built, maxHR: maxHR, source: "hrr")
+    }
+
     /// Compute time-in-zone (seconds) from a time-ordered HR stream.
     ///
     /// Each sample is credited with the duration until the next sample (the
