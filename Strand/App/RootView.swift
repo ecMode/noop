@@ -397,9 +397,9 @@ struct RootView: View {
     private var brand: some View {
         HStack(spacing: 8) {
             // In-app logo: the open recovery-ring mark so the wordmark reads as a true lockup
-            // (README logo system — mark + "NOOP"). Flat gold gradient, low glow per the v3 restraint.
+            // (README logo system — mark + "LOOP"). Flat gold gradient, low glow per the v3 restraint.
             BrandMark(size: 22)
-            Text("NOOP")
+            Text("LOOP")
                 .font(StrandFont.rounded(20, weight: .bold))
                 .foregroundStyle(StrandPalette.textPrimary)
             Spacer()

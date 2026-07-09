@@ -1002,9 +1002,9 @@ private struct PullOffsetKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
-// MARK: - NOOP wordmark (centred, with a tap easter egg)
+// MARK: - LOOP wordmark (centred, with a tap easter egg)
 
-/// The subtle NOOP wordmark. Built as a row of letters (not `Text(...).tracking()`, which adds a
+/// The subtle LOOP wordmark. Built as a row of letters (not `Text(...).tracking()`, which adds a
 /// trailing gap after the last glyph and pushes the word off-centre), so it sits DEAD centre. Tap it
 /// for a little easter egg: it plays one of several random one-shot animations — wiggle, shake, flip,
 /// spin, bounce, or a jelly squash — with a light haptic.
@@ -1018,7 +1018,7 @@ private struct LiquidWordmark: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            ForEach(Array("NOOP".enumerated()), id: \.offset) { _, ch in
+            ForEach(Array("LOOP".enumerated()), id: \.offset) { _, ch in
                 Text(String(ch))
                     .font(StrandFont.rounded(16, weight: .bold))
                     .foregroundStyle(.white.opacity(0.5))

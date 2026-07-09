@@ -140,13 +140,13 @@ public struct RecoveryRing: View {
 
     // MARK: Brand layers
 
-    /// Micro "NOOP" wordmark above the number — the recovery ring carries the
-    /// lock-up so its centre reads as the "O" in NOOP. ALL-CAPS, tertiary,
+    /// Micro "LOOP" wordmark above the number — the recovery ring carries the
+    /// lock-up so its centre reads as the "O" in LOOP. ALL-CAPS, tertiary,
     /// letter-spacing ≈ .34em (× the cap height per the spec). Nudged up so it
     /// sits clear above BevelGauge's centred number.
     private var wordmark: some View {
         let size = diameter * 0.052
-        return Text("NOOP")
+        return Text("LOOP")
             .font(StrandFont.rounded(size, weight: .bold))
             .tracking(size * 0.34)                 // ≈ .34em
             .foregroundStyle(StrandPalette.textTertiary)
