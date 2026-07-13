@@ -704,7 +704,14 @@ final class AppModel: ObservableObject {
             distanceM: route?.distanceM, zonesJSON: nil, notes: nil)
         // Persist the route polyline under the row's natural key so WorkoutDetailView can draw it. On
         // device only; mirrors the moments / sleepMarks UserDefaults persistence. (#524)
-        if let route { RouteStore.store(route, startTs: startTs, sport: w.sport) }
+        if let route {
+            RouteStore.store(route, startTs: startTs, sport: w.sport)
+            // Persist the per-point capture times PARALLEL to the polyline (same natural key) so the detail
+            // screen can rebuild a timestamped track and compute per-mile/km splits. Device-local; only GPS
+            // runs from here on carry timing (older runs stored none, so they show no splits — honest).
+            let times = gpsRecorder.capturedTrackTimed().map { Int($0.tMs / 1000) }
+            TrackTimeStore.store(times, startTs: startTs, sport: w.sport)
+        }
         lastWorkout = row
         // Strava auto-upload (opt-in, bring-your-own-app): hand the finished run to the uploader, which
         // builds a timestamped TCX and queues it for upload. No-op unless the user connected Strava and

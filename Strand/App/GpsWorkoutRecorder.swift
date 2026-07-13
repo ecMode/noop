@@ -1,6 +1,7 @@
 import Foundation
 import CoreLocation
 import StrandAnalytics   // WorkoutsTrace + TestCentre: the GPS-fix line for the Workouts test mode
+import WhoopProtocol     // HRSample — averaged into per-mile/km splits (RunSplits below)
 
 // MARK: - GPS workout recording on Apple (#524)
 //
@@ -272,6 +273,61 @@ enum RouteStore {
     }
 }
 
+// MARK: - TrackTimeStore (on-device side-store: per-point capture times)
+
+/// The per-point capture TIMES (unix seconds) for a finished GPS run, keyed by the same natural key as its
+/// route. Stored PARALLEL to `RouteStore`'s polyline — the two arrays are 1:1 (both come from the recorder's
+/// single accepted-points array), so the detail screen can zip the decoded polyline back with these times to
+/// reconstruct a timestamped track and compute per-mile/km splits WITHOUT re-storing the positions. Kept
+/// separate (not folded into the synced `WorkoutRoute`) so this stays device-local and doesn't touch the
+/// CloudKit workout schema. Capped like `RouteStore`. Only runs recorded after this shipped carry times —
+/// older runs have none and simply show no splits (honest, never fabricated).
+enum TrackTimeStore {
+    /// Single `UserDefaults` key holding a JSON `[key: [Int]]` map (times in unix seconds).
+    static let defaultsKey = "noop.workoutTrackTimes"
+    /// Cap on stored timed tracks — newest kept, oldest evicted (keys sort by the leading startTs). A timed
+    /// track is a few KB, so this bounds the blob across an install's lifetime.
+    static let maxTracks = 300
+
+    /// Natural key for a session's times: "<startTs>|<sport>" — the SAME key `RouteStore` uses.
+    static func key(startTs: Int, sport: String) -> String { "\(startTs)|\(sport)" }
+
+    static func loadMap(from defaults: UserDefaults = .standard) -> [String: [Int]] {
+        guard let data = defaults.data(forKey: defaultsKey),
+              let raw = try? JSONDecoder().decode([String: [Int]].self, from: data) else { return [:] }
+        return raw
+    }
+
+    /// The per-point capture times for a finished workout, or nil if none were recorded.
+    static func load(startTs: Int, sport: String, from defaults: UserDefaults = .standard) -> [Int]? {
+        loadMap(from: defaults)[key(startTs: startTs, sport: sport)]
+    }
+
+    /// Persist `times` for a workout, evicting the oldest entries past the cap. A no-op with fewer than two
+    /// points (no timing to split on), so we never store an unusable placeholder.
+    static func store(_ times: [Int], startTs: Int, sport: String, into defaults: UserDefaults = .standard) {
+        guard times.count >= 2 else { return }
+        var map = loadMap(from: defaults)
+        map[key(startTs: startTs, sport: sport)] = times
+        if map.count > maxTracks {
+            let ordered = map.keys.sorted {
+                (Int($0.split(separator: "|").first ?? "") ?? 0) < (Int($1.split(separator: "|").first ?? "") ?? 0)
+            }
+            for k in ordered.prefix(map.count - maxTracks) { map.removeValue(forKey: k) }
+        }
+        guard let data = try? JSONEncoder().encode(map) else { return }
+        defaults.set(data, forKey: defaultsKey)
+    }
+
+    /// Remove a workout's times (used when a session is deleted; keeps the side-store from leaking).
+    static func remove(startTs: Int, sport: String, from defaults: UserDefaults = .standard) {
+        var map = loadMap(from: defaults)
+        guard map.removeValue(forKey: key(startTs: startTs, sport: sport)) != nil,
+              let data = try? JSONEncoder().encode(map) else { return }
+        defaults.set(data, forKey: defaultsKey)
+    }
+}
+
 // MARK: - GpsWorkoutRecorder (CoreLocation wrapper)
 
 /// Records the route of an in-flight GPS workout from CoreLocation. Thin and fail-safe: requests
@@ -488,5 +544,108 @@ extension GpsWorkoutRecorder: @preconcurrency CLLocationManagerDelegate {
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         // A transient failure (no fix yet) is normal and self-heals; we never tear down on it. A hard
         // denial arrives via the auth callback instead. Swallow so a GPS hiccup can't crash a workout.
+    }
+}
+
+// MARK: - Per-mile / per-kilometre splits
+//
+// Splits need time-at-distance. A saved run stores the untimed polyline (positions) in `RouteStore` plus the
+// parallel per-point capture times in `TrackTimeStore`; zip them back together and this cuts the run into
+// unit splits (a mile or a km each), interpolating each boundary's crossing time and averaging the window's
+// HR into it. Pure + deterministic (no CoreLocation, no persistence), so the math is unit-testable. (Lives in
+// this file rather than its own because the project lists sources explicitly and isn't regenerated here.)
+
+/// One per-unit split of a GPS run: the distance covered, the time it took, and the mean HR across it.
+/// "Per-unit" = one mile (imperial) or one kilometre (metric); the final split may be a PARTIAL unit (the
+/// leftover distance at the end of the run). Pace is derived from `distanceM` + `elapsedSec` (kept raw so a
+/// partial last split normalises to an honest full-unit pace rather than reading artificially fast).
+struct RunSplit: Equatable {
+    /// 1-based split number (mile/km 1, 2, 3 …).
+    let index: Int
+    /// Distance of THIS split in metres — the full unit for a complete split, less for the final partial.
+    let distanceM: Double
+    /// Seconds spent covering this split (the boundary-crossing time is interpolated within the segment that
+    /// straddles it, so a split is never quantised to whole GPS fixes).
+    let elapsedSec: Double
+    /// Mean HR (bpm) over the split's time window, or nil when no HR samples fell inside it.
+    let avgHr: Int?
+
+    /// Seconds per kilometre for this split — normalises a partial final split to a full-unit pace — or nil
+    /// when the split has no distance. Feed to `UnitFormatter.paceFromSecPerKm` to render "/mi" or "/km".
+    var paceSecPerKm: Double? {
+        distanceM > 0 ? elapsedSec / (distanceM / 1000.0) : nil
+    }
+}
+
+/// Per-mile / per-kilometre split computation for a finished GPS run. Walk the timestamped track
+/// accumulating Haversine distance, cut a split each time cumulative distance crosses a unit boundary
+/// (interpolating the crossing TIME within the straddling segment), and average the HR samples whose
+/// timestamps fall inside each split's window. A trailing partial unit becomes the last split.
+enum RunSplits {
+
+    /// Compute splits for `unitMeters` (1609.344 mi / 1000 km).
+    /// - Parameters:
+    ///   - track: accepted route points paired with capture time in UNIX SECONDS, in order.
+    ///   - hr: HR samples spanning (at least) the run window; each is averaged into the split its ts lands in.
+    ///   - unitMeters: split length in metres.
+    static func compute(track: [(t: Double, pt: RouteMath.LatLng)],
+                        hr: [HRSample],
+                        unitMeters: Double) -> [RunSplit] {
+        guard track.count >= 2, unitMeters > 0 else { return [] }
+        let hrSorted = hr.sorted { $0.ts < $1.ts }
+
+        var splits: [RunSplit] = []
+        var cumDist = 0.0            // cumulative distance at the END of the last-processed segment
+        var boundary = unitMeters    // next unit boundary to cut at
+        var splitStartTime = track[0].t
+        var splitStartDist = 0.0
+
+        for i in 1..<track.count {
+            let segStartDist = cumDist
+            let segLen = RouteMath.haversineMeters(track[i - 1].pt, track[i].pt)
+            let segEndDist = segStartDist + segLen
+            let segStartTime = track[i - 1].t
+            let segEndTime = track[i].t
+
+            // One long segment can straddle several unit boundaries; cut a split at each.
+            while segEndDist >= boundary && segEndDist > segStartDist {
+                let frac = (boundary - segStartDist) / (segEndDist - segStartDist)
+                let crossTime = segStartTime + frac * (segEndTime - segStartTime)
+                splits.append(RunSplit(
+                    index: splits.count + 1,
+                    distanceM: boundary - splitStartDist,        // == unitMeters
+                    elapsedSec: max(0, crossTime - splitStartTime),
+                    avgHr: meanHR(hrSorted, from: splitStartTime, to: crossTime)))
+                splitStartTime = crossTime
+                splitStartDist = boundary
+                boundary += unitMeters
+            }
+            cumDist = segEndDist
+        }
+
+        // Trailing partial unit (a run rarely ends exactly on a boundary). Ignore a sub-metre rounding tail.
+        if cumDist - splitStartDist > 1.0 {
+            let endTime = track[track.count - 1].t
+            splits.append(RunSplit(
+                index: splits.count + 1,
+                distanceM: cumDist - splitStartDist,
+                elapsedSec: max(0, endTime - splitStartTime),
+                avgHr: meanHR(hrSorted, from: splitStartTime, to: endTime)))
+        }
+        return splits
+    }
+
+    /// Mean bpm of samples with `from <= ts <= to`, rounded; nil when none fall in the window. `sorted` must
+    /// be ascending by ts (so the scan can stop at the upper bound).
+    private static func meanHR(_ sorted: [HRSample], from: Double, to: Double) -> Int? {
+        guard to >= from else { return nil }
+        let lo = Int(from.rounded()), hi = Int(to.rounded())
+        var sum = 0, n = 0
+        for s in sorted {
+            if s.ts < lo { continue }
+            if s.ts > hi { break }
+            sum += s.bpm; n += 1
+        }
+        return n > 0 ? Int((Double(sum) / Double(n)).rounded()) : nil
     }
 }

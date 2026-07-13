@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import WhoopProtocol
 @testable import Strand
 
 /// Pins the Apple GPS workout recorder's pure pieces (#524): distance accumulation, the precision-5
@@ -231,5 +232,75 @@ final class GpsRouteMathTests: XCTestCase {
         }
         XCTAssertNil(RouteStore.load(startTs: 1_700_000_500, sport: "Walking", from: defaults))
         XCTAssertTrue(RouteStore.loadMap(from: defaults).isEmpty)
+    }
+
+    // MARK: - TrackTimeStore (per-point times round-trip)
+
+    func testTrackTimeStoreRoundTripAndCap() {
+        let defaults = freshDefaults()
+        XCTAssertNil(TrackTimeStore.load(startTs: 1_700_000_000, sport: "Running", from: defaults))
+        TrackTimeStore.store([100, 110, 125], startTs: 1_700_000_000, sport: "Running", into: defaults)
+        XCTAssertEqual(TrackTimeStore.load(startTs: 1_700_000_000, sport: "Running", from: defaults), [100, 110, 125])
+        // Fewer than two points is not storable (no timing to split on).
+        TrackTimeStore.store([1], startTs: 42, sport: "Running", into: defaults)
+        XCTAssertNil(TrackTimeStore.load(startTs: 42, sport: "Running", from: defaults))
+        // Removal leaves no orphan.
+        TrackTimeStore.remove(startTs: 1_700_000_000, sport: "Running", from: defaults)
+        XCTAssertNil(TrackTimeStore.load(startTs: 1_700_000_000, sport: "Running", from: defaults))
+    }
+
+    // MARK: - RunSplits (per-mile/km split math)
+
+    /// A straight eastward track along the equator — each 0.001° lon step is ~111 m — at constant pace.
+    /// Splits must partition the whole track: every full split is exactly one unit, the leftover is the
+    /// final partial, the split distances sum back to the total, and the elapsed times sum to the run's.
+    func testSplitsPartitionTrackByUnit() {
+        let pts = (0..<20).map { RouteMath.LatLng(0.0, Double($0) * 0.001) }
+        let times = (0..<20).map { Double($0 * 10) }                       // 10 s/leg → constant pace
+        let track = zip(times, pts).map { (t: $0, pt: $1) }
+        let total = RouteMath.totalMeters(pts)
+        let unit = 1000.0
+        let splits = RunSplits.compute(track: track, hr: [], unitMeters: unit)
+
+        let fullCount = Int(total / unit)                                  // ~2 for a ~2.1 km track
+        XCTAssertEqual(splits.filter { $0.distanceM >= unit - 0.5 }.count, fullCount)
+        for s in splits.prefix(fullCount) { XCTAssertEqual(s.distanceM, unit, accuracy: 0.5) }
+        XCTAssertEqual(splits.map(\.distanceM).reduce(0, +), total, accuracy: 1.0)
+        XCTAssertEqual(splits.map(\.elapsedSec).reduce(0, +), times.last! - times.first!, accuracy: 0.01)
+        XCTAssertNil(splits.first?.avgHr)                                  // no HR supplied
+    }
+
+    /// HR is averaged into the split whose time window it falls in: a run that runs harder in its second
+    /// half must show a higher avg HR on the later split than the earlier one.
+    func testSplitAvgHrFollowsTimeWindow() {
+        let pts = (0..<20).map { RouteMath.LatLng(0.0, Double($0) * 0.001) }
+        let times = (0..<20).map { Double($0 * 10) }                       // 0…190 s
+        let track = zip(times, pts).map { (t: $0, pt: $1) }
+        // 140 bpm for the first ~half of the run, 160 bpm for the second.
+        let hr = stride(from: 0, through: 190, by: 5).map { HRSample(ts: $0, bpm: $0 < 95 ? 140 : 160) }
+        let splits = RunSplits.compute(track: track, hr: hr, unitMeters: 1000.0)
+
+        XCTAssertGreaterThanOrEqual(splits.count, 2)
+        XCTAssertNotNil(splits.first?.avgHr)
+        XCTAssertNotNil(splits.last?.avgHr)
+        XCTAssertLessThan(splits.first!.avgHr!, splits.last!.avgHr!)
+    }
+
+    func testSplitsEmptyForDegenerateTrack() {
+        XCTAssertTrue(RunSplits.compute(track: [], hr: [], unitMeters: 1000).isEmpty)
+        let one = [(t: 0.0, pt: RouteMath.LatLng(0, 0))]
+        XCTAssertTrue(RunSplits.compute(track: one, hr: [], unitMeters: 1000).isEmpty)
+    }
+
+    /// A single long segment that straddles several unit boundaries must still cut a split at each one
+    /// (the inner while-loop), not just the first.
+    func testSplitsCutMultipleBoundariesInOneSegment() {
+        // Two points ~3.3 km apart (0.03° lon at the equator) in one 300 s leg.
+        let track = [(t: 0.0, pt: RouteMath.LatLng(0.0, 0.0)),
+                     (t: 300.0, pt: RouteMath.LatLng(0.0, 0.03))]
+        let splits = RunSplits.compute(track: track, hr: [], unitMeters: 1000.0)
+        // ~3.3 km → 3 full 1-km splits + a partial.
+        XCTAssertEqual(splits.filter { $0.distanceM >= 999.5 }.count, 3)
+        XCTAssertEqual(splits.map(\.distanceM).reduce(0, +), RouteMath.totalMeters([track[0].pt, track[1].pt]), accuracy: 1.0)
     }
 }

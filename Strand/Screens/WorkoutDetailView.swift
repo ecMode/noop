@@ -52,6 +52,10 @@ struct WorkoutDetailView: View {
     /// row's natural key. nil = no route was recorded (honest — the map only shows when points exist).
     @State private var route: [RouteMath.LatLng] = []
 
+    /// Per-mile / per-km splits, computed from the stored route polyline + its parallel capture times
+    /// (`TrackTimeStore`) with HR averaged in. Empty when the run predates split timing or isn't a GPS run.
+    @State private var splits: [RunSplit] = []
+
     var body: some View {
         ScreenScaffold(title: "\(WorkoutSource.displaySport(row.sport))",
                        subtitle: "\(dateLabel(row.startTs))",
@@ -68,6 +72,7 @@ struct WorkoutDetailView: View {
             headerCard
             statStrip
             routeCard
+            splitsCard
             hrCurveCard
             zonesCard
             if let strain = row.strain {
@@ -95,6 +100,19 @@ struct WorkoutDetailView: View {
             return pts.count >= 2 ? pts : []
         }()
 
+        // Per-mile/km splits: rebuild a timestamped track from the stored polyline + its parallel capture
+        // times, then cut splits for the current unit and average HR into each. Only runs recorded with
+        // timing have times stored, so older runs yield no splits (honest — the card stays hidden). `zip`
+        // truncates to the shorter of the two arrays, so a length mismatch degrades safely.
+        var computedSplits: [RunSplit] = []
+        if routePoints.count >= 2,
+           let times = TrackTimeStore.load(startTs: row.startTs, sport: row.sport), times.count >= 2 {
+            let hr = await repo.hrSamples(from: row.startTs, to: row.endTs)
+            let timed = zip(times, routePoints).map { (t: Double($0), pt: $1) }
+            let unitMeters = unitSystem == .imperial ? 1609.344 : 1000.0
+            computedSplits = RunSplits.compute(track: timed, hr: hr, unitMeters: unitMeters)
+        }
+
         // HR curve over the exact session window — a finer bucket than the 24h chart so a short run
         // still reads as a curve, not a handful of points.
         let buckets = await repo.workoutHrBuckets(from: row.startTs, to: row.endTs)
@@ -118,6 +136,7 @@ struct WorkoutDetailView: View {
 
         await MainActor.run {
             self.route = routePoints
+            self.splits = computedSplits
             self.hrPoints = points
             self.zoneMinutes = minutes
             self.zonesFromImport = fromImport
@@ -225,6 +244,68 @@ struct WorkoutDetailView: View {
                 .lineLimit(1).minimumScaleFactor(0.7)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: - Splits
+
+    /// Per-mile / per-km splits table: one row per full unit (split pace + avg HR for that unit), plus a
+    /// final PARTIAL row for the leftover distance. Hidden entirely when there are no splits (an older run
+    /// with no stored timing, or a non-GPS session), so it never shows an empty frame.
+    @ViewBuilder private var splitsCard: some View {
+        if !splits.isEmpty {
+            let unitMeters = unitSystem == .imperial ? 1609.344 : 1000.0
+            let unitCol = unitSystem == .imperial ? String(localized: "MILE") : String(localized: "KM")
+            NoopCard(tint: StrandPalette.effortColor) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(unitSystem == .imperial ? "MILE SPLITS" : "KILOMETRE SPLITS")
+                        .strandOverline()
+                    HStack(spacing: 8) {
+                        Text(unitCol).frame(width: 52, alignment: .leading)
+                        Text(String(localized: "PACE")).frame(maxWidth: .infinity, alignment: .trailing)
+                        Text(String(localized: "AVG HR")).frame(width: 72, alignment: .trailing)
+                    }
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    ForEach(splits, id: \.index) { s in
+                        splitRow(s, unitMeters: unitMeters)
+                    }
+                }
+            }
+        }
+    }
+
+    private func splitRow(_ s: RunSplit, unitMeters: Double) -> some View {
+        // A final leftover shorter than a full unit is shown as its fractional distance (e.g. "0.4") in the
+        // tertiary tone; a full split shows its index (1, 2, 3 …).
+        let isPartial = s.distanceM < unitMeters - 1
+        let left = isPartial ? String(format: "%.1f", s.distanceM / unitMeters) : "\(s.index)"
+        return HStack(spacing: 8) {
+            Text(left)
+                .font(StrandFont.bodyNumber)
+                .foregroundStyle(isPartial ? StrandPalette.textTertiary : StrandPalette.textPrimary)
+                .frame(width: 52, alignment: .leading)
+            Text(s.paceSecPerKm.map { splitPace($0) } ?? "–")
+                .font(StrandFont.bodyNumber)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            Text(s.avgHr.map { "\($0)" } ?? "–")
+                .font(StrandFont.bodyNumber)
+                .foregroundStyle(s.avgHr != nil ? StrandPalette.metricRose : StrandPalette.textTertiary)
+                .frame(width: 72, alignment: .trailing)
+        }
+        .padding(.vertical, 3)
+        .overlay(alignment: .bottom) {
+            if s.index != splits.last?.index {
+                Rectangle().fill(StrandPalette.hairline).frame(height: 1)
+            }
+        }
+    }
+
+    /// Split pace as "m:ss" in the user's unit (no "/mi" suffix — the column header carries the unit).
+    private func splitPace(_ secPerKm: Double) -> String {
+        let secPerUnit = unitSystem == .imperial ? secPerKm / UnitFormatter.milesPerKilometer : secPerKm
+        let t = Int(secPerUnit.rounded())
+        return "\(t / 60):\(String(format: "%02d", t % 60))"
     }
 
     /// Avg pace from the row's GPS distance + duration, in the user's unit system: "m:ss /km" (metric) or

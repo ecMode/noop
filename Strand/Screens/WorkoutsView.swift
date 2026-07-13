@@ -334,8 +334,10 @@ struct WorkoutsView: View {
 
     private func delete(_ row: WorkoutRow) {
         // #524: also drop any on-device GPS route stored under this session's natural key, so deleting a
-        // workout doesn't leave its route orphaned in the RouteStore side-store.
+        // workout doesn't leave its route orphaned in the RouteStore side-store — and the parallel per-point
+        // times (used for splits) in the TrackTimeStore.
         RouteStore.remove(startTs: row.startTs, sport: row.sport)
+        TrackTimeStore.remove(startTs: row.startTs, sport: row.sport)
         Task { await repo.deleteWorkout(row); await reload() }
     }
 
