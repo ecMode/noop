@@ -49,13 +49,20 @@ struct LiveWorkoutView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
-                let cards: [AnyView] = [
-                    AnyView(header),
-                    AnyView(heroHeartRate),
-                    AnyView(effortGauge),
-                    AnyView(zoneRail),
-                    AnyView(statsGrid),
-                ]
+                // The DISTANCE/PACE card joins right under the HR hero for a GPS sport (run/ride/walk/hike)
+                // so the total distance a runner most wants is glanceable. `gpsRecorder.isRecording` is set at
+                // workout start (before this screen appears) and only cleared at end, so reading it here
+                // non-reactively is safe — the live *values* come from LiveDistanceRow's own @ObservedObject,
+                // not this body. A plain HR workout (yoga/strength) never arms the recorder, so the array
+                // stays exactly as before.
+                let cards: [AnyView] = {
+                    var c: [AnyView] = [AnyView(header), AnyView(heroHeartRate)]
+                    if model.gpsRecorder.isRecording {
+                        c.append(AnyView(LiveDistanceRow(recorder: model.gpsRecorder)))
+                    }
+                    c.append(contentsOf: [AnyView(effortGauge), AnyView(zoneRail), AnyView(statsGrid)])
+                    return c
+                }()
                 ForEach(Array(cards.enumerated()), id: \.offset) { index, card in
                     card.staggeredAppear(index: index)
                 }
@@ -250,6 +257,59 @@ struct LiveWorkoutView: View {
         case 4: return String(localized: "Threshold")
         case 5: return String(localized: "Maximum")
         default: return ""
+        }
+    }
+}
+
+// MARK: - Live GPS distance / pace (run / ride / walk / hike)
+
+/// DISTANCE + current-PACE readout for a GPS workout, shown directly under the HR hero so the number a
+/// runner most wants mid-run — total distance so far — is glanceable. Owns its OWN `@ObservedObject` on the
+/// shared `GpsWorkoutRecorder`, so an incoming GPS fix (~1 Hz) re-renders only these two tiles, not the HR
+/// hero / effort gauge / zone rail above (the same scroll-stutter isolation `SensorRowIfPresent` uses; the
+/// parent never observes the recorder). Only mounted while the recorder is armed (a distance sport), so a
+/// plain HR workout never shows it. Distance is honest metres from the recorder (0 until the first two
+/// fixes); pace shows the live current pace, falling back to the whole-run average, and "—" when pace is
+/// still undefined (stopped / no fix) rather than a fabricated 0:00. Units follow the metric/imperial
+/// preference, same as the rest of the app.
+private struct LiveDistanceRow: View {
+    @ObservedObject var recorder: GpsWorkoutRecorder
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .metric }
+
+    var body: some View {
+        HStack(spacing: NoopMetrics.gap) {
+            stat(String(localized: "DISTANCE"),
+                 // Always the big unit (miles imperial / km metric), one decimal — a live run readout holds
+                 // ONE unit ("0.4 mi") instead of the shared meters formatter dropping to "230 yd" under 0.1
+                 // mi. Scoped here; the Workouts list/detail keep the yards/metres formatter.
+                 UnitFormatter.distanceFromKilometers(recorder.distanceM / 1000.0, system: unitSystem),
+                 tint: StrandPalette.effortColor)
+            stat(String(localized: "PACE"), paceText, tint: StrandPalette.effortColor)
+        }
+    }
+
+    /// Live current pace, falling back to the run's average; "—" while pace is undefined (the recorder
+    /// leaves both nil until a moving window with real distance exists — never a fabricated 0:00).
+    private var paceText: String {
+        guard let secPerKm = recorder.currentPaceSecPerKm ?? recorder.paceSecPerKm else { return "—" }
+        return UnitFormatter.paceFromSecPerKm(secPerKm, system: unitSystem)
+    }
+
+    /// Same metric tile as `LiveWorkoutView.stat`, duplicated so the leaf is self-contained (mirrors
+    /// `SensorRowIfPresent`).
+    private func stat(_ title: String, _ value: String, tint: Color = StrandPalette.textPrimary) -> some View {
+        NoopCard(padding: 14, tint: tint) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                Text(value)
+                    .font(StrandFont.number(26))
+                    .foregroundStyle(tint)
+                    .lineLimit(1).minimumScaleFactor(0.6)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

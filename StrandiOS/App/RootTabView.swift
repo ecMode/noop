@@ -87,10 +87,18 @@ struct RootTabView: View {
                     }
             )
 
-            FloatingTabBar(selection: $selectedTab, onReselect: { _ in
-                // Re-tapping the active tab refreshes that page's data (2026-07-02).
-                Task { await repo.refresh() }
-            })
+            // The minimized-workout bar docks directly above the tab bar so an active workout is one tap
+            // from ANY tab once its full screen is swiped down (the iOS mini-player idiom). spacing 0 + the
+            // bar's own bottom padding means an inactive workout adds zero height, so the tab bar sits
+            // exactly where it did before. A covering sheet (the live screen itself, a quick action) is over
+            // this shell, so the bar only reads when the workout is genuinely minimized.
+            VStack(spacing: 0) {
+                MinimizedWorkoutBar()
+                FloatingTabBar(selection: $selectedTab, onReselect: { _ in
+                    // Re-tapping the active tab refreshes that page's data (2026-07-02).
+                    Task { await repo.refresh() }
+                })
+            }
         }
         .task {
             await repo.refresh()
@@ -612,6 +620,86 @@ private struct FloatingTabBar: View {
         .accessibilityAddTraits(active ? [.isButton, .isSelected] : .isButton)
     }
 
+}
+
+// MARK: - Minimized workout bar
+
+/// A persistent, tappable "minimized workout" bar docked just above the tab bar. It appears on EVERY tab
+/// whenever a workout is active; swipe the full in-exercise screen down and this is what it collapses to
+/// (the iOS mini-player idiom). A tap routes through `router.openActiveWorkout()` — the exact one-shot the
+/// Today indicator card uses — so the shell re-presents the live screen from wherever you are. The live
+/// in-exercise screen (and any quick-action sheet) sits OVER the shell, so this only reads when the workout
+/// is genuinely minimized, never double-shown. Owns its OWN `@EnvironmentObject model`, so the ~1 Hz live
+/// churn (elapsed clock + bpm) re-renders just this bar and never the tab shell around it. Renders nothing
+/// (zero height) when no workout is active, so the tab bar sits exactly where it did before.
+private struct MinimizedWorkoutBar: View {
+    @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var router: NavRouter
+
+    var body: some View {
+        // A Group that is empty when no workout is active behaves as EmptyView for layout (no phantom height
+        // in the enclosing spacing-0 VStack); the transition slides the dock in/out on workout start/end.
+        Group {
+            if let w = model.activeWorkout {
+                bar(w).transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24), value: model.activeWorkout != nil)
+    }
+
+    private func bar(_ w: AppModel.ActiveWorkout) -> some View {
+        Button {
+            StrandHaptic.selection.play()
+            router.openActiveWorkout()
+        } label: {
+            HStack(spacing: 10) {
+                // "Recording" dot in the same rose the Today indicator + live console use.
+                Circle()
+                    .fill(StrandPalette.metricRose)
+                    .frame(width: 9, height: 9)
+                Text(w.sport)
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .lineLimit(1)
+                // Live elapsed clock in its OWN TimelineView so the per-second tick doesn't re-lay-out the row.
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(ActiveWorkoutIndicatorModel.elapsed(since: w.start, now: context.date))
+                        .font(StrandFont.bodyNumber)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                }
+                // Live HR when the strap is feeding it — the signature at-a-glance number for a workout.
+                if let bpm = model.bpm {
+                    Text("· \(bpm) bpm")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.metricRose)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+            .padding(.vertical, 10)
+            .padding(.horizontal, 16)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        // Same frosted-glass island treatment as the FloatingTabBar so the dock reads as one family.
+        .liquidGlass(in: Capsule())
+        .background(.white.opacity(0.06), in: Capsule())
+        .overlay(
+            Capsule().strokeBorder(
+                LinearGradient(colors: [.white.opacity(0.22), .white.opacity(0.04)],
+                               startPoint: .top, endPoint: .bottom),
+                lineWidth: 0.75)
+        )
+        .shadow(color: .black.opacity(0.22), radius: 18, x: 0, y: 8)
+        .padding(.horizontal, 22)
+        .padding(.bottom, 8)   // the gap above the tab bar; VStack spacing is 0 so inactive = zero height
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text("Workout in progress, \(w.sport)"))
+        .accessibilityHint(Text("Double tap to return to the workout"))
+    }
 }
 
 // MARK: - Liquid Glass (iOS 26) with a Material fallback
