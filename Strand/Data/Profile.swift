@@ -13,7 +13,9 @@ final class ProfileStore: ObservableObject {
     /// Optional waist circumference (cm); 0 = not set. Only used to ALSO show an estimated VO₂max
     /// alongside Fitness Age — the Fitness Age itself does not need it (the body term cancels).
     @Published var waistCm: Double { didSet { d.set(waistCm, forKey: K.waist) } }
-    /// 0 = auto-estimate from age.
+    /// 0 = auto-estimate from age (Tanaka). Defaults to 200 — the owner's real observed max HR
+    /// (verified from historical data), which the age formula under-predicts by ~17 bpm. Set in
+    /// Settings to override; a user-set value persists via didSet and wins over this default.
     @Published var hrMaxOverride: Int { didSet { d.set(hrMaxOverride, forKey: K.hrMax) } }
     /// Step-calibration divisor (#139/#132): counter ticks per real step for the @57 motion
     /// counter. 1.0 = raw pass-through (default — no behavior change). Clamped 0.5–30.0
@@ -70,7 +72,7 @@ final class ProfileStore: ObservableObject {
         weightKg = d.object(forKey: K.weight) as? Double ?? 75
         heightCm = d.object(forKey: K.height) as? Double ?? 178
         waistCm = d.object(forKey: K.waist) as? Double ?? 0
-        hrMaxOverride = d.object(forKey: K.hrMax) as? Int ?? 0
+        hrMaxOverride = d.object(forKey: K.hrMax) as? Int ?? 200
         stepTicksPerStep = min(max(d.object(forKey: K.stepScale) as? Double ?? 1.0, 0.5), 30.0)
         stepsCalibrationCoefficient = d.object(forKey: K.stepsCoeff) as? Double ?? 0
         stepsCalibrationSampleDays = d.object(forKey: K.stepsSampleDays) as? Int ?? 0
