@@ -581,6 +581,12 @@ final class AppModel: ObservableObject {
         emitWorkoutsTrace(WorkoutsTrace.sessionLine(
             event: "start", sportKey: WorkoutSource.traceSportKey(resolved), hrSamples: 0))
         buzz(loops: 1)
+        // Spoken "workout started" cue, gated on the SAME audio-alerts setting as the zone / mile-split
+        // announcements so all spoken workout audio shares one toggle. `WorkoutVoice.announce` activates
+        // the audio session itself, so it's safe to speak at the very first instant of the session.
+        if behavior.workoutAudioAlerts {
+            workoutVoice.announce(String(localized: "Workout started."))
+        }
     }
 
     /// Emit one Workouts & GPS test-mode line tagged `.workouts` iff the mode is on. The cheap
@@ -669,18 +675,24 @@ final class AppModel: ObservableObject {
             gpsRecorder.stop()
             route = gpsRecorder.capturedRoute()
         }
+        let end = Date()
+        let durationSec = end.timeIntervalSince(w.start)
         let samples = w.samples
-        // Save when there's an HR window OR a real GPS route , a GPS-only walk (HR not streaming) is
-        // still a workout (parity with Android's `samples.size < 2 && track.size < 2` discard gate).
-        guard samples.count >= 2 || route != nil else {
+        // Save when there's an HR window OR a real GPS route — a GPS-only walk (HR not streaming) is still a
+        // workout (parity with Android's `samples.size < 2 && track.size < 2` discard gate) — AND the session
+        // ran at least `minManualWorkoutSec`. The duration floor catches a mistaken start→end: a mis-tap held
+        // a few seconds can still land 2 HR samples or 2 GPS fixes, and without this it would bank a junk
+        // sub-minute "workout". Below the floor (or with no data at all) the session is discarded so it never
+        // reaches the Workouts list, with a single confirming buzz distinct from the save's double-buzz.
+        guard (samples.count >= 2 || route != nil), durationSec >= AppModel.minManualWorkoutSec else {
             // Workouts & GPS test mode: record WHY a session vanished (too short / no route), tagged `.workouts`.
             emitWorkoutsTrace(WorkoutsTrace.sessionLine(
                 event: "discarded", sportKey: WorkoutSource.traceSportKey(w.sport),
                 hrSamples: samples.count, gpsPoints: route == nil ? 0 : nil))
             lastWorkout = nil
+            buzz(loops: 1)
             return
         }
-        let end = Date()
         let avg = samples.isEmpty ? nil
             : Int((Double(samples.map(\.bpm).reduce(0, +)) / Double(samples.count)).rounded())
         let peak = samples.map(\.bpm).max()
@@ -1391,6 +1403,13 @@ final class AppModel: ObservableObject {
 
     /// Meters in one mile — splits are announced per mile (US units), per the user's preference.
     private static let metersPerMile = 1609.344
+
+    /// Minimum duration (seconds) for a MANUAL workout to be saved. A start→end shorter than this is treated
+    /// as a mis-tap and discarded (even if a couple of HR samples or GPS fixes landed), so an accidental tap
+    /// never banks a junk sub-minute "workout". A genuine marked effort runs at least this long; 60s is short
+    /// enough not to drop a real quick session yet long enough to catch obvious mistakes. Referenced by
+    /// `endWorkout`'s discard gate.
+    static let minManualWorkoutSec: TimeInterval = 60
 
     /// Per-mile spoken split during a GPS workout (behavior.workoutAudioAlerts). On crossing each whole
     /// mile it announces the mile number, the last mile's pace, the overall average pace, and current HR.

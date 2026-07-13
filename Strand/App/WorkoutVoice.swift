@@ -29,6 +29,9 @@ final class WorkoutVoice: NSObject, AVSpeechSynthesizerDelegate {
 #endif
         let utterance = AVSpeechUtterance(string: text)
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        // Speak at 0.9 (of the device media volume) rather than full — a touch softer so the cue sits over
+        // the ducked music without feeling like it's shouting over it. Independent of the `.duckOthers` dip.
+        utterance.volume = 0.9
         synth.speak(utterance)
     }
 
