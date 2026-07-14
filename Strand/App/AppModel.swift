@@ -716,6 +716,7 @@ final class AppModel: ObservableObject {
             distanceM: route?.distanceM, zonesJSON: nil, notes: nil)
         // Persist the route polyline under the row's natural key so WorkoutDetailView can draw it. On
         // device only; mirrors the moments / sleepMarks UserDefaults persistence. (#524)
+        var vo2Run: Double? = nil
         if let route {
             RouteStore.store(route, startTs: startTs, sport: w.sport)
             // Persist the per-point capture times PARALLEL to the polyline (same natural key) so the detail
@@ -723,6 +724,12 @@ final class AppModel: ObservableObject {
             // runs from here on carry timing (older runs stored none, so they show no splits — honest).
             let times = gpsRecorder.capturedTrackTimed().map { Int($0.tMs / 1000) }
             TrackTimeStore.store(times, startTs: startTs, sport: w.sport)
+            // Submaximal, run-derived VO₂max from this run's steady km segments (nil unless the run was long
+            // enough — ≥3 valid segments — and steady). Stored below so the Health card can show it (carried
+            // forward) and trend it. Far more individual than the non-exercise Nes estimate for a runner.
+            vo2Run = Self.runVO2Max(timedTrack: gpsRecorder.capturedTrackTimed(),
+                                    altitudes: gpsRecorder.capturedTrackAltitudes(), hr: samples,
+                                    restingHR: zoneRestingHR, maxHR: Double(profile.hrMax))
         }
         lastWorkout = row
         // Strava auto-upload (opt-in, bring-your-own-app): hand the finished run to the uploader, which
@@ -745,9 +752,63 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             if let store = await self.repo.storeHandle() {
                 _ = try? await store.upsertWorkouts([row], deviceId: self.deviceId)
+                // Run-derived VO₂max: store under the computed "-noop" id (Layer-2 of the merged "my-whoop"
+                // read, same as vo2max_est / fitness_age) so the Health card + Explore trend pick it up.
+                if let v = vo2Run {
+                    _ = try? await store.upsertMetricSeries(
+                        [MetricPoint(day: Repository.logicalDayKey(w.start), key: "vo2max_run", value: v)],
+                        deviceId: self.deviceId + "-noop")
+                }
                 await self.repo.refresh()
             }
         }
+    }
+
+    /// Run-derived VO₂max (ml/kg/min) from a GPS run's steady KM segments, or nil when the run is too short
+    /// or too easy to yield ≥3 valid submaximal segments. Submaximal (Firstbeat-style, no max effort): each
+    /// km split's pace → O₂ cost (ACSM), its avg HR → %HRR, inverted via %HRR≈%VO₂R, median across segments.
+    /// Segments align to the same timed track the splits use; short tail segments (<400 m) are dropped.
+    private static func runVO2Max(timedTrack: [(tMs: Int64, lat: Double, lon: Double)],
+                                  altitudes: [Double], hr: [HRSample],
+                                  restingHR: Double, maxHR: Double, unitMeters: Double = 1000) -> Double? {
+        guard maxHR > restingHR, restingHR > 0, timedTrack.count >= 2 else { return nil }
+        // Barometric altitude is only used when it aligns 1:1 with the track (else flat-terrain fallback).
+        let hasAlt = altitudes.count == timedTrack.count
+        let hrSorted = hr.sorted { $0.ts < $1.ts }
+        func meanHR(_ from: Double, _ to: Double) -> Double? {
+            guard to >= from else { return nil }
+            var sum = 0, n = 0
+            for s in hrSorted { if Double(s.ts) < from { continue }; if Double(s.ts) > to { break }; sum += s.bpm; n += 1 }
+            return n > 0 ? Double(sum) / Double(n) : nil
+        }
+        // Walk the fine track, integrating a TIME-WEIGHTED grade-adjusted O₂ cost over each ~unit segment,
+        // then average HR across that segment's time window. Cutting on cumulative distance keeps segments a
+        // steady length; the per-pair grade (Δaltitude / horizontal-distance) is what the flat-only v1 missed.
+        var segments: [RunVO2MaxEstimator.Segment] = []
+        var segDist = 0.0, segCostTime = 0.0, segTime = 0.0
+        var segStartT = Double(timedTrack[0].tMs) / 1000.0
+        func closeSegment(endT: Double, minDist: Double) {
+            guard segDist >= minDist, segTime > 0, let hrAvg = meanHR(segStartT, endT) else { return }
+            segments.append(RunVO2MaxEstimator.Segment(vo2Cost: segCostTime / segTime, avgHR: hrAvg))
+        }
+        for i in 1..<timedTrack.count {
+            let a = timedTrack[i - 1], b = timedTrack[i]
+            let dt = (Double(b.tMs) - Double(a.tMs)) / 1000.0
+            guard dt > 0 else { continue }
+            let dist = RouteMath.haversineMeters(RouteMath.LatLng(a.lat, a.lon), RouteMath.LatLng(b.lat, b.lon))
+            let speed = dist / dt * 60.0
+            let grade = (hasAlt && dist > 0.5) ? (altitudes[i] - altitudes[i - 1]) / dist : 0
+            segCostTime += RunVO2MaxEstimator.acsmVO2Cost(speedMetersPerMin: speed, gradeFraction: grade) * dt
+            segTime += dt
+            segDist += dist
+            if segDist >= unitMeters {
+                closeSegment(endT: Double(b.tMs) / 1000.0, minDist: unitMeters * 0.5)
+                segDist = 0; segCostTime = 0; segTime = 0; segStartT = Double(b.tMs) / 1000.0
+            }
+        }
+        closeSegment(endT: Double(timedTrack[timedTrack.count - 1].tMs) / 1000.0, minDist: 400)  // trailing partial
+        return RunVO2MaxEstimator.estimate(segments: segments, restingHR: restingHR,
+                                           maxHR: maxHR, minSegments: 3)?.vo2max
     }
 
     /// Append the current smoothed `bpm` to the active workout and recompute its running strain. Called

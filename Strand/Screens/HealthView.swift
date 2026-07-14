@@ -651,8 +651,12 @@ private struct FitnessAgeSection: View {
 
     /// Latest weekly Fitness Age (years) read from the "fitness_age" metricSeries, nil until loaded/computed.
     @State private var fitnessAge: Double?
-    /// Latest estimated VO₂max (ml/kg/min) from "vo2max_est" — only present once a waist is set.
+    /// Run-derived VO₂max (ml/kg/min) from "vo2max_run" — the recent-run median, carried forward when you
+    /// haven't run lately. nil until your first qualifying run (a ~20–30 min GPS run). This replaced the
+    /// non-exercise Nes estimate on the card (that model still powers the Fitness Age, where its terms cancel).
     @State private var vo2max: Double?
+    /// Recent run-derived VO₂max values for the card's trend sparkline (oldest→newest).
+    @State private var vo2Series: [Double] = []
     @State private var loaded = false
 
     /// Reveal the readiness checklist (the "ⓘ How accurate is this?" disclosure under a shown value).
@@ -789,9 +793,17 @@ private struct FitnessAgeSection: View {
                             Text(String(format: "%.0f", vo2))
                                 .font(StrandFont.number(30))
                                 .foregroundStyle(StrandPalette.metricCyan)
-                            Text("ml/kg/min")
+                            Text("from runs")
                                 .font(StrandFont.footnote)
                                 .foregroundStyle(StrandPalette.textTertiary)
+                            // Trend of your recent run-derived estimates (flat across an idle stretch since
+                            // the headline carries forward). Only drawn once there are ≥2 qualifying runs.
+                            if vo2Series.count >= 2 {
+                                Sparkline(values: vo2Series,
+                                          gradient: Gradient(colors: [StrandPalette.metricCyan.opacity(0.5),
+                                                                      StrandPalette.metricCyan]))
+                                    .frame(width: 72, height: 20)
+                            }
                         }
                     }
                     Image(systemName: "chevron.right")
@@ -852,10 +864,27 @@ private struct FitnessAgeSection: View {
     /// freshest point — the weekly value is keyed to the week's Saturday and refines through the week.
     private func load() async {
         let faPts = await repo.exploreSeries(key: "fitness_age", source: "my-whoop")
-        let vo2Pts = await repo.exploreSeries(key: "vo2max_est", source: "my-whoop")
+        // Run-derived VO₂max: the median of qualifying runs in the last ~4 weeks (de-noises a single hilly /
+        // drifting run), carried forward to the last known value when there've been no recent runs.
+        let vo2Pts = await repo.exploreSeries(key: "vo2max_run", source: "my-whoop")
         fitnessAge = faPts.last?.value
-        vo2max = vo2Pts.last?.value
+        vo2max = Self.recentRunVO2(vo2Pts)
+        vo2Series = vo2Pts.suffix(24).map(\.value)
         loaded = true
+    }
+
+    /// Headline run-derived VO₂max: median of the last ~28 days of qualifying runs; if none in that window,
+    /// carry forward the most recent value (so the number holds — and the trend reads flat — across an idle
+    /// stretch) rather than dropping to nothing.
+    static func recentRunVO2(_ pts: [(day: String, value: Double)]) -> Double? {
+        guard !pts.isEmpty else { return nil }
+        let cutoff = Repository.dayString(Date().addingTimeInterval(-28 * 86_400))
+        let recent = pts.filter { $0.day >= cutoff }.map(\.value).sorted()
+        if !recent.isEmpty {
+            let n = recent.count
+            return n % 2 == 1 ? recent[n / 2] : (recent[n / 2 - 1] + recent[n / 2]) / 2
+        }
+        return pts.last?.value
     }
 }
 
