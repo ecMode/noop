@@ -58,6 +58,8 @@
 	<string>NOOP writes the metrics it computes from your strap back into Apple Health, on-device and only when you allow it.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>NOOP records your route during an outdoor workout to show distance, pace, and a map, and keeps recording while the screen is off. The route stays on your device. Nothing leaves it.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>NOOP uses the iPhone barometric altimeter during an outdoor workout to measure elevation and grade, which sharpens pace and your VO2max estimate. It stays on your device.</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
 	<key>UIBackgroundModes</key>

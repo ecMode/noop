@@ -2,6 +2,9 @@ import Foundation
 import CoreLocation
 import StrandAnalytics   // WorkoutsTrace + TestCentre: the GPS-fix line for the Workouts test mode
 import WhoopProtocol     // HRSample — averaged into per-mile/km splits (RunSplits below)
+#if os(iOS)
+import CoreMotion       // CMAltimeter — barometric relative altitude for grade / elevation (iOS only)
+#endif
 
 // MARK: - GPS workout recording on Apple (#524)
 //
@@ -373,7 +376,18 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
     /// throws timestamps away; we keep them here so an export (TCX → Strava) can carry real per-point
     /// times instead of interpolating them.
     private var trackTimes: [Int64] = []
+    /// Barometric relative altitude (metres, from the altimeter session start) sampled at each accepted
+    /// point, appended in lockstep with `track`. Feeds grade for the run-derived VO₂max and elevation gain.
+    /// Stays empty when the barometer is unavailable or motion permission is denied (macOS; or refused) —
+    /// callers then fall back to flat-terrain (honest: no fabricated elevation).
+    private var trackAltitudes: [Double] = []
+    /// Most recent relative altitude from the altimeter stream, sampled into `trackAltitudes` on each fix.
+    private var latestRelAltitude: Double = 0
     private var startMs: Int64 = 0
+#if os(iOS)
+    private let altimeter = CMAltimeter()
+    private var altimeterRunning = false
+#endif
 
     /// Workouts & GPS test mode (Test Centre): the tagged sink for the `.workouts` GPS-fix lines, wired by
     /// AppModel to `live.append(log:domain:)`. Default nil (inert). We ALWAYS check `TestCentre.active(.workouts)`
@@ -406,6 +420,8 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
     func start(startMs: Int64) {
         track.removeAll()
         trackTimes.removeAll()
+        trackAltitudes.removeAll()
+        latestRelAltitude = 0
         filter = TrackFilter()
         self.startMs = startMs
         distanceM = 0
@@ -414,6 +430,11 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
         pointCount = 0
         rawFixCount = 0
         isRecording = true
+#if os(iOS)
+        // The barometer has its OWN (motion) permission, independent of location — start it regardless so a
+        // route-only run still gets grade/elevation. Fails safe: unavailable/denied → no samples, flat terrain.
+        startAltimeter()
+#endif
 
         switch manager.authorizationStatus {
         case .notDetermined:
@@ -434,6 +455,9 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
     @discardableResult
     func stop() -> [RouteMath.LatLng] {
         manager.stopUpdatingLocation()
+#if os(iOS)
+        stopAltimeter()
+#endif
         isRecording = false
         let final = track
         return final
@@ -454,6 +478,11 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
         zip(trackTimes, track).map { (tMs: $0, lat: $1.lat, lon: $1.lon) }
     }
 
+    /// Barometric relative altitude (metres, from the altimeter session start) for each accepted point,
+    /// aligned 1:1 with `capturedTrackTimed()`. Empty when no altimeter samples landed (barometer
+    /// unavailable / motion permission denied) — callers then treat the run as flat terrain.
+    func capturedTrackAltitudes() -> [Double] { trackAltitudes }
+
     // MARK: Updates
 
     fileprivate func beginUpdates() {
@@ -462,6 +491,27 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
         guard CLLocationManager.locationServicesEnabled() else { return }
         manager.startUpdatingLocation()
     }
+
+#if os(iOS)
+    /// Start the barometric altimeter stream (relative altitude, metres). Idempotent; no-op when the
+    /// barometer isn't available. First use prompts for Motion permission; if denied, no samples arrive and
+    /// `latestRelAltitude` stays 0, so grade/elevation simply read flat — never a crash, never fabricated.
+    private func startAltimeter() {
+        guard CMAltimeter.isRelativeAltitudeAvailable(), !altimeterRunning else { return }
+        altimeterRunning = true
+        altimeter.startRelativeAltitudeUpdates(to: .main) { [weak self] data, _ in
+            guard let self, let data else { return }
+            self.latestRelAltitude = data.relativeAltitude.doubleValue   // metres, relative to session start
+        }
+    }
+
+    /// Stop the altimeter stream so no battery is spent after the run. Idempotent.
+    private func stopAltimeter() {
+        guard altimeterRunning else { return }
+        altimeter.stopRelativeAltitudeUpdates()
+        altimeterRunning = false
+    }
+#endif
 
     /// Fold a batch of (already bound-checked at the source) fixes into the route, updating live
     /// distance/pace. No-op when not recording.
@@ -473,6 +523,7 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
             if let pt = filter.accept(fix) {
                 track.append(pt)
                 trackTimes.append(fix.tMs)
+                trackAltitudes.append(latestRelAltitude)   // lockstep barometric altitude at this fix
                 changed = true
             }
         }
