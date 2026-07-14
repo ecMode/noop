@@ -153,6 +153,12 @@ final class AppModel: ObservableObject {
     private var lastZoneAnnounceAt: Date = .distantPast
     /// Minimum gap between spoken zone-change announcements.
     private static let zoneAnnounceCooldown: TimeInterval = 20
+    /// When we last spoke an on-demand double-tap pace/HR readout.
+    private var lastRunStatsAnnounceAt: Date = .distantPast
+    /// Minimum gap between double-tap pace/HR readouts. Longer than the 1.2s tap debounce so a fumbled
+    /// or repeated tap in a short window doesn't stack duplicate spoken readouts; short enough that a
+    /// deliberate re-check ~ten seconds later still speaks.
+    private static let runStatsAnnounceCooldown: TimeInterval = 8
     private var lastAnnouncedMile: Int = 0
     private var lastMileMarkerAt: Date = .distantPast
     // L3 stress-onset detector state: a rolling R-R buffer + the replay-safe detector state (persisted
@@ -562,6 +568,7 @@ final class AppModel: ObservableObject {
         // mile is timed from the workout start.
         lastSpokenZone = -1
         lastZoneAnnounceAt = .distantPast
+        lastRunStatsAnnounceAt = .distantPast
         lastAnnouncedMile = 0
         lastMileMarkerAt = started
         // #524: arm GPS route recording for a distance-type sport (run / ride / walk / hike), mirroring
@@ -1321,8 +1328,38 @@ final class AppModel: ObservableObject {
         let now = Date()
         guard now.timeIntervalSince(lastDoubleTapAt) > 1.2 else { return }   // debounce repeats
         lastDoubleTapAt = now
+        // During a live outdoor run, a double-tap is an on-demand pace/HR readout — you shouldn't have
+        // to mark a moment (and get its buzz) just to hear where you're at. Falls through to the
+        // configured action when no run is recording or workout audio is off.
+        if announceRunStatsIfRecording() { return }
         live.append(log: "Double-tap → \(behavior.doubleTapAction.label)")
         runMacAction(behavior.doubleTapAction, shortcut: behavior.doubleTapShortcut)
+    }
+
+    /// On-demand spoken pace + heart rate for a live outdoor distance run (double-tap). Returns true if
+    /// it handled the tap — an outdoor workout is recording and workout audio is on — so the caller
+    /// skips the configured double-tap action. Gated on the same `workoutAudioAlerts` master switch as
+    /// the per-mile splits, so one toggle governs whether the app speaks mid-workout. Speaks the live
+    /// instantaneous pace (`currentPaceSecPerKm`), converted to the per-mile units the splits use.
+    /// Bond-free; a queued/missed utterance is harmless by design.
+    private func announceRunStatsIfRecording() -> Bool {
+        guard behavior.workoutAudioAlerts, activeWorkoutIsGps, activeWorkout != nil,
+              gpsRecorder.isRecording else { return false }
+        // Cooldown so repeat/fumbled taps in a short window don't stack duplicate readouts. Still return
+        // true (the gesture is "handled" mid-run) so a swallowed re-tap never falls through to the
+        // configured action — it just stays silent until the cooldown elapses.
+        guard Date().timeIntervalSince(lastRunStatsAnnounceAt) >= Self.runStatsAnnounceCooldown else { return true }
+        lastRunStatsAnnounceAt = Date()
+        var line: String
+        if let paceKm = gpsRecorder.currentPaceSecPerKm {
+            line = "Pace \(Self.spokenPace(paceKm * (AppModel.metersPerMile / 1000))) per mile."
+        } else {
+            line = "No pace yet."   // GPS hasn't produced two fixes / runner is standing still
+        }
+        if let hr = bpm { line += " Heart rate \(hr)." }
+        workoutVoice.announce(line)
+        live.append(log: "Double-tap → run stats")
+        return true
     }
 
     /// Run a configured Mac action. In-app actions (buzz/moment) stay on-device; lock + shortcuts
