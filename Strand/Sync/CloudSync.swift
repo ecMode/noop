@@ -43,6 +43,14 @@ final class CloudSync {
     /// store's change sink to enqueue outbound pushes, ensures the record zone exists, and kicks the
     /// one-time bulk upload of existing workouts.
     func startIfEnabled(repo: Repository) {
+        // CKContainer(identifier:) HARD-TRAPS (SIGTRAP) when the process has no icloud-services
+        // entitlement, which a unit-test host (built CODE_SIGNING_ALLOWED=NO) never has — so any test
+        // that constructs a full AppModel would crash here. Skip CloudKit entirely under XCTest; signed
+        // production builds carry the entitlement and are unaffected. (Exposed by upstream's new
+        // AppModel-based tests after the v9.0.0 merge; the CloudKit path itself is unchanged.)
+        guard NSClassFromString("XCTestCase") == nil else {
+            NSLog("CloudSync: running under XCTest; not starting."); return
+        }
         guard Self.isEnabled else { NSLog("CloudSync: disabled; not starting."); return }
         guard engine == nil else { return }
         guard let id = containerIdentifier else {
