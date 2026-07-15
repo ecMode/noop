@@ -12,7 +12,13 @@ import ZIPFoundation
 /// located **by filename**, case-insensitively, anywhere in the tree.
 public struct WhoopExportImporter {
 
-    public init() {}
+    /// Aggregate ceiling on the bytes held in RAM across ALL retained CSVs from one import. The per-entry
+    /// cap (`maxEntryBytes`) bounds a single file, but NOT the sum of the retained set — this backstops a
+    /// crafted export from accumulating unbounded `Data` in the result dict. A real Whoop bundle is a few
+    /// MB, so 1 GB never trips in practice. Injectable so tests can exercise the budget with tiny inputs.
+    let maxTotalBytes: Int
+
+    public init(maxTotalBytes: Int = 1 << 30) { self.maxTotalBytes = maxTotalBytes }
 
     // MARK: - Strain → Effort rescale (Charge/Effort/Rest redesign, 2026-06-12)
 
@@ -38,6 +44,26 @@ public struct WhoopExportImporter {
     public static func whoopDayStrainFromEffort(_ effort: Double?) -> Double? {
         guard let effort else { return nil }
         return effort / dayStrainToEffortScale
+    }
+
+    /// WHOOP CSVs carry "Sleep efficiency %" on a 0–100 scale; NOOP's `efficiency` columns store the
+    /// 0–1 fraction the native pipeline writes (`AnalyticsEngine`: actual-sleep ÷ in-bed). Convert at
+    /// the WRITE boundary (WhoopImporter → store), NOT at parse time, so the verbatim parsed value
+    /// (`sleepEfficiencyPct`) and the CSV round-trip contract are preserved — the same shape as the
+    /// Day Strain ⇄ Effort pair above. Keep byte-identical to the Android importer (WhoopCsvImporter.kt).
+    public static func fractionFromImportedEfficiencyPct(_ pct: Double?) -> Double? {
+        guard let pct else { return nil }
+        return pct / 100.0
+    }
+
+    /// Inverse: the stored 0–1 fraction back onto the CSV's 0–100 "Sleep efficiency %" column, so an
+    /// exported CSV is WHOOP-compatible and a NOOP export → NOOP import round-trip is lossless to
+    /// 4 decimal places of a percent (1e-6 of the fraction). The rounding matters: `num()` prints
+    /// shortest-round-trip Doubles, and a raw `fraction * 100` carries FP dust (0.923 × 100 =
+    /// 92.30000000000001) straight into the CSV cell.
+    public static func whoopEfficiencyPctFromFraction(_ fraction: Double?) -> Double? {
+        guard let fraction else { return nil }
+        return (fraction * 100.0 * 10_000).rounded() / 10_000
     }
 
     // Recognised CSV filenames (lowercased).
@@ -150,6 +176,7 @@ public struct WhoopExportImporter {
     private func loadFromFolder(_ folder: URL) throws -> [String: Data] {
         let fm = FileManager.default
         var result: [String: Data] = [:]
+        var total = 0
 
         guard let enumerator = fm.enumerator(
             at: folder,
@@ -167,7 +194,9 @@ public struct WhoopExportImporter {
             guard let data = try? Data(contentsOf: fileURL) else { continue }
             // Route by English name, localized filename alias, then header content (issue #3).
             if let key = Self.canonicalKey(base: base, data: data), result[key] == nil {
+                if total + data.count > maxTotalBytes { break }   // aggregate RAM ceiling across retained CSVs
                 result[key] = data
+                total += data.count
             }
         }
         return result
@@ -186,6 +215,7 @@ public struct WhoopExportImporter {
         }
 
         var result: [String: Data] = [:]
+        var total = 0
 
         for entry in archive {
             guard entry.type == .file else { continue }
@@ -211,7 +241,9 @@ public struct WhoopExportImporter {
             guard !buffer.isEmpty else { continue }
             // Route by English name, localized filename alias, then header content (issue #3).
             if let key = Self.canonicalKey(base: base, data: buffer), result[key] == nil {
+                if total + buffer.count > maxTotalBytes { break }   // aggregate RAM ceiling across retained CSVs
                 result[key] = buffer
+                total += buffer.count
             }
         }
         return result

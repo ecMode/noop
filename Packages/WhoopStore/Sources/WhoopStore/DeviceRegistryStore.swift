@@ -80,6 +80,21 @@ public struct DeviceRegistryStore: Sendable {
         "hrSample", "rrInterval", "spo2Sample", "skinTempSample", "respSample", "gravitySample",
         "stepSample", "ppgHrSample", "event", "battery", "dailyMetric", "sleepSession",
         "journal", "workout", "appleDaily", "metricSeries", "dayOwnership",
+        // Added: device-keyed tables introduced by later migrations that the list previously missed, so a
+        // "delete all of this device's data" left raw captures (rawBatch), user-entered lab/blood markers
+        // (labMarker), banked band sleep-state (sleepStateSample) and live coaching sessions
+        // (liveSession) behind — a privacy defect for a delete-means-gone app. `DeviceRegistryStoreTests`
+        // asserts this list covers every deviceId-keyed table in Database.swift so future migrations
+        // can't reintroduce the gap.
+        "rawBatch", "labMarker", "sleepStateSample", "liveSession",
+        // v25-oura-raw: the opt-in Oura cloud-import raw archive is deviceId-keyed too, so "delete this
+        // device's data" must clear it — else an imported Oura source's payloads would survive deletion.
+        "ouraRaw",
+        // v27-ppg-waveform (issue #156 follow-up): the durable raw v26 optical PPG waveform is
+        // deviceId-keyed exactly like every other per-second stream above — must be cleared too, or a
+        // "delete all of this device's data" leaves the raw waveform behind (the same privacy defect
+        // this list exists to close).
+        "ppgWaveformSample",
     ]
 
     /// Permanently delete every recorded sample/derived row belonging to one device, across all

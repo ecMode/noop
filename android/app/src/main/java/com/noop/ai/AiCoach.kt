@@ -122,6 +122,8 @@ class AiCoach(private val repo: WhoopRepository) {
                 callOpenAiCompatible(provider, provider.endpoint, model, key, grounded, systemPrompt)
             AiProvider.ANTHROPIC ->
                 callAnthropic(provider, model, key!!, grounded, systemPrompt)
+            AiProvider.GEMINI ->
+                callGemini(provider, model, key!!, grounded, systemPrompt)
             AiProvider.CUSTOM ->
                 callOpenAiCompatible(provider, customChatUrl(customBaseUrl), model, key, grounded, systemPrompt)
         }
@@ -181,6 +183,7 @@ class AiCoach(private val repo: WhoopRepository) {
                 builder.addHeader("x-api-key", key!!)
                 builder.addHeader("anthropic-version", "2023-06-01")
             }
+            AiProvider.GEMINI -> builder.addHeader("x-goog-api-key", key!!)
             AiProvider.CUSTOM -> if (!key.isNullOrBlank()) builder.addHeader("Authorization", "Bearer $key")
         }
 
@@ -188,7 +191,10 @@ class AiCoach(private val repo: WhoopRepository) {
             val (code, text) = execute(builder.build())
             if (code !in 200..299) return@runCatching emptyList<String>()
 
-            // OpenAI-shaped providers (incl. Custom) return {"data": [ { "id": "..." }, ... ]}.
+            // Gemini is shaped differently ({"models":[{"name":"models/…"}]}), so it has its own pure
+            // parse; every other provider is OpenAI-shaped ({"data":[{"id":"…"}]}).
+            if (provider == AiProvider.GEMINI) return@runCatching parseGeminiModels(text)
+
             val data = JSONObject(text).optJSONArray("data") ?: return@runCatching emptyList<String>()
             val ids = ArrayList<String>(data.length())
             for (i in 0 until data.length()) {
@@ -198,6 +204,8 @@ class AiCoach(private val repo: WhoopRepository) {
                     AiProvider.OPENAI -> id.startsWith("gpt") || id.startsWith("o")
                     // Anthropic + a local server name models freely → keep all.
                     AiProvider.ANTHROPIC, AiProvider.CUSTOM -> true
+                    // GEMINI returned early above.
+                    AiProvider.GEMINI -> true
                 }
                 if (keep) ids.add(id)
             }
@@ -409,7 +417,7 @@ class AiCoach(private val repo: WhoopRepository) {
 
         // Local servers (notably Ollama) stop with finish_reason "length" at the context-window edge
         // and give NO error, keep the partial text and append the actionable notice so it isn't silent.
-        val truncated = firstChoice?.optString("finish_reason")?.lowercase() == "length"
+        val truncated = firstChoice.optString("finish_reason").lowercase() == "length"
         return if (truncated) content + TRUNCATION_NOTE else content
     }
 
@@ -452,50 +460,6 @@ class AiCoach(private val repo: WhoopRepository) {
         }
     }
 
-    /**
-     * True when [host] is on the device's own machine or its private LAN, so plain http:// to it
-     * never crosses the public internet: loopback (localhost / 127.0.0.0/8 / ::1), RFC1918
-     * (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), link-local (169.254.0.0/16 / fe80::/10), the
-     * emulator host alias 10.0.2.2, and any *.local mDNS name. Anything else is treated as public.
-     */
-    private fun isPrivateLanOrLoopback(host: String): Boolean {
-        val raw = host.trim()
-        val h = raw.trim('[', ']').lowercase()  // strip IPv6 brackets if present
-        if (h.isEmpty()) return false
-
-        // Is this an IPv6 LITERAL, not a DNS hostname? A URI gives a bracketed host for an IPv6
-        // literal ("[::1]"), and an IPv6 literal always contains a colon while a DNS host (the host
-        // component excludes the :port) never does. We must only apply the fc/fd/fe80 ULA/link-local
-        // classification to a real literal, otherwise a PUBLIC name like "fclient.evil.com" or
-        // "fdn.example.com" starts with "fc"/"fd" and would be wrongly allowed plain-HTTP cleartext.
-        val isIpv6Literal = raw.startsWith("[") || h.contains(':')
-        if (isIpv6Literal) {
-            if (h == "::1") return true                                   // loopback
-            // fc00::/7 unique-local, fe80::/10 link-local, literal-only.
-            if (h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80:")) return true
-            return false                                                  // any other IPv6 literal = public
-        }
-
-        if (h == "localhost" || h.endsWith(".localhost")) return true
-        // mDNS / Bonjour LAN names: require a real label before ".local" (so the bare ".local" /
-        // "local" can't slip through), and only for an actual hostname (handled above for literals).
-        if (h.endsWith(".local") && h.length > ".local".length) return true
-
-        // IPv4 dotted-quad: validate and classify by RFC1918 / loopback / link-local.
-        val parts = h.split(".")
-        if (parts.size != 4) return false
-        val octets = parts.map { it.toIntOrNull() ?: -1 }
-        if (octets.any { it < 0 || it > 255 }) return false
-        val (a, b) = octets[0] to octets[1]
-        return when {
-            a == 127 -> true                              // 127.0.0.0/8 loopback
-            a == 10 -> true                               // 10.0.0.0/8
-            a == 172 && b in 16..31 -> true               // 172.16.0.0/12
-            a == 192 && b == 168 -> true                  // 192.168.0.0/16
-            a == 169 && b == 254 -> true                  // 169.254.0.0/16 link-local
-            else -> false
-        }
-    }
 
     // ---------------------------------------------------------------------------------------
     // Anthropic, POST /v1/messages
@@ -541,6 +505,65 @@ class AiCoach(private val repo: WhoopRepository) {
 
         if (content.isNullOrEmpty()) throw Exception("The provider returned an empty reply. Please try again.")
         return content
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Google Gemini, POST /v1beta/models/<model>:generateContent
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Native Google Gemini call — byte-for-byte twin of Swift `GeminiClient.send`. Gemini has no
+     * "system" role inside the turn list: the system prompt is a top-level `system_instruction`, and
+     * each turn carries `role` ("user"/"model") + one text `part`. Auth is the `x-goog-api-key` header.
+     */
+    private fun callGemini(
+        provider: AiProvider,
+        model: String,
+        key: String,
+        history: List<ChatMsg>,
+        systemPrompt: String,
+    ): String {
+        val contents = JSONArray()
+        for (m in history) {
+            contents.put(
+                JSONObject()
+                    // Gemini names the assistant turn "model"; everything else is "user".
+                    .put("role", if (m.role == "assistant") "model" else "user")
+                    .put("parts", JSONArray().put(JSONObject().put("text", m.text))),
+            )
+        }
+
+        val body = JSONObject()
+            .put("system_instruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemPrompt))))
+            .put("contents", contents)
+            // Gemini 2.5 counts THINKING tokens against maxOutputTokens; the 900 cap the other providers
+            // use starves a thinking model into an empty reply (finishReason MAX_TOKENS, no text parts).
+            // 4096 leaves room for both — the system prompt keeps the visible reply short. (Same as Swift.)
+            .put("generationConfig", JSONObject().put("temperature", 0.6).put("maxOutputTokens", 4096))
+            .toString()
+
+        // Built from a literal string (NOT a path-appending API) so the ":" in ":generateContent" stays
+        // literal — a percent-encoded %3A is rejected by the API. Mirrors the Swift URL(string:) note.
+        val request = Request.Builder()
+            .url("${provider.endpoint}/$model:generateContent")
+            .addHeader("x-goog-api-key", key)
+            .addHeader("content-type", "application/json")
+            .post(body.toRequestBody(JSON))
+            .build()
+
+        val (code, text) = execute(request)
+        if (code !in 200..299) throw httpError(provider, code, text)
+
+        // A reply can span several parts (thinking models emit more than one); join them.
+        val parts = parse(text)
+            .optJSONArray("candidates")?.optJSONObject(0)
+            ?.optJSONObject("content")?.optJSONArray("parts")
+        val reply = buildString {
+            if (parts != null) for (i in 0 until parts.length()) append(parts.optJSONObject(i)?.optString("text").orEmpty())
+        }.trim()
+
+        if (reply.isEmpty()) throw Exception("The provider returned an empty reply. Please try again.")
+        return reply
     }
 
     // ---------------------------------------------------------------------------------------
@@ -627,6 +650,71 @@ class AiCoach(private val repo: WhoopRepository) {
 
     companion object {
         private val JSON = "application/json; charset=utf-8".toMediaType()
+
+        /**
+         * Pure: unwrap Gemini's `{"models":[{"name":"models/…"}]}` into chat-capable ids. Strips the
+         * `models/` prefix, keeps `gemini*` only (drops embedding / AQA models). Byte-for-byte twin of
+         * the Swift `GeminiClient.parseModels`, so both platforms surface the same fetched catalogue.
+         * Pure + `internal` so it is unit-testable without a network or a Context. No network.
+         */
+        internal fun parseGeminiModels(text: String): List<String> {
+            val list = runCatching { JSONObject(text).optJSONArray("models") }.getOrNull() ?: return emptyList()
+            val ids = ArrayList<String>(list.length())
+            for (i in 0 until list.length()) {
+                val name = list.optJSONObject(i)?.optString("name")?.trim().orEmpty()
+                if (name.isEmpty()) continue
+                val id = if (name.startsWith("models/")) name.removePrefix("models/") else name
+                if (id.startsWith("gemini") && !id.contains("embedding") && !id.contains("aqa")) ids.add(id)
+            }
+            return ids.distinct()
+        }
+
+        /**
+         * True when [host] is on the device's own machine or its private LAN, so plain http:// to it
+         * never crosses the public internet: loopback (localhost / 127.0.0.0/8 / ::1), RFC1918
+         * (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), link-local (169.254.0.0/16 / fe80::/10), the
+         * emulator host alias 10.0.2.2, and any *.local mDNS name. Anything else is treated as public.
+         * Pure; `internal` so it's unit-testable (#321) — the byte-parity reference for Swift
+         * `AIProvider.isPrivateLANOrLoopback`. Called unqualified by the instance `guardCustomUrl`.
+         */
+        internal fun isPrivateLanOrLoopback(host: String): Boolean {
+            val raw = host.trim()
+            val h = raw.trim('[', ']').lowercase()  // strip IPv6 brackets if present
+            if (h.isEmpty()) return false
+
+            // Is this an IPv6 LITERAL, not a DNS hostname? A URI gives a bracketed host for an IPv6
+            // literal ("[::1]"), and an IPv6 literal always contains a colon while a DNS host (the host
+            // component excludes the :port) never does. We must only apply the fc/fd/fe80 ULA/link-local
+            // classification to a real literal, otherwise a PUBLIC name like "fclient.evil.com" or
+            // "fdn.example.com" starts with "fc"/"fd" and would be wrongly allowed plain-HTTP cleartext.
+            val isIpv6Literal = raw.startsWith("[") || h.contains(':')
+            if (isIpv6Literal) {
+                if (h == "::1") return true                                   // loopback
+                // fc00::/7 unique-local, fe80::/10 link-local, literal-only.
+                if (h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80:")) return true
+                return false                                                  // any other IPv6 literal = public
+            }
+
+            if (h == "localhost" || h.endsWith(".localhost")) return true
+            // mDNS / Bonjour LAN names: require a real label before ".local" (so the bare ".local" /
+            // "local" can't slip through), and only for an actual hostname (handled above for literals).
+            if (h.endsWith(".local") && h.length > ".local".length) return true
+
+            // IPv4 dotted-quad: validate and classify by RFC1918 / loopback / link-local.
+            val parts = h.split(".")
+            if (parts.size != 4) return false
+            val octets = parts.map { it.toIntOrNull() ?: -1 }
+            if (octets.any { it < 0 || it > 255 }) return false
+            val (a, b) = octets[0] to octets[1]
+            return when {
+                a == 127 -> true                              // 127.0.0.0/8 loopback
+                a == 10 -> true                               // 10.0.0.0/8
+                a == 172 && b in 16..31 -> true               // 172.16.0.0/12
+                a == 192 && b == 168 -> true                  // 192.168.0.0/16
+                a == 169 && b == 254 -> true                  // 169.254.0.0/16 link-local
+                else -> false
+            }
+        }
 
         /**
          * Max chat turns sent on a single request, beyond the context-bearing first user turn. Caps

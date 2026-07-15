@@ -50,15 +50,59 @@ enum PuffinExperiment {
 
     static var continuousHrvOvernightOnlyEnabled: Bool { UserDefaults.standard.bool(forKey: continuousHrvOvernightOnlyKey) }
 
-    /// Opt-in "Experimental sleep staging (V2)": re-stage each detected night with `SleepStagerV2` — a
-    /// transparent cardiorespiratory recipe (reimplemented from contributor PR #600) that recovers deep/REM
-    /// better than the shipped V1 stager on its author's n=1 validation. Pure analysis switch: it changes
-    /// ONLY which staging engine runs over an already-detected sleep window; sleep DETECTION, scoring and the
-    /// default V1 path are all untouched. Default OFF. Read at the staging call site (Repository) to pick
-    /// V1 vs V2. Mirrors the Android `PuffinExperiment.KEY_EXPERIMENTAL_SLEEP_V2`.
+    // MARK: - Power saving (#477), parity with Android NoopPrefs
+
+    /// "Power saving" master: battery-adaptive strap-sync cadence. Default off. */
+    static let powerSavingKey = "noopPowerSaving"
+    static var powerSavingEnabled: Bool { UserDefaults.standard.bool(forKey: powerSavingKey) }
+
+    /// Battery-% threshold for power saving (10–30). Default 20 (0 in the store means "unset" → 20).
+    static let powerSavingBatteryPctKey = "noopPowerSavingBatteryPct"
+    static var powerSavingBatteryPct: Int {
+        let v = UserDefaults.standard.integer(forKey: powerSavingBatteryPctKey)
+        return v == 0 ? 20 : v
+    }
+
+    /// "Pause HRV capture under Low Power Mode" — a sub-option of power saving, default ON when the master
+    /// is on. Stored inverted (`…Disabled`) so the default-true reads correctly from a zero-value store.
+    static let pauseHrvDisabledKey = "noopPowerSavingPauseHrvDisabled"
+    static var pauseHrvOnPowerSaveEnabled: Bool { !UserDefaults.standard.bool(forKey: pauseHrvDisabledKey) }
+
+    /// "Experimental sleep staging (V2)": re-stage each detected night with `SleepStagerV2` — a transparent
+    /// cardiorespiratory recipe (reimplemented from contributor PR #600) — instead of the older V1 stager.
+    /// Pure analysis switch: it changes ONLY which staging engine runs over an already-detected sleep window;
+    /// sleep DETECTION, scoring and the V1 path are all untouched. Model-agnostic (WHOOP 4 and 5). **Default
+    /// ON**: V2 was promoted to the default staging engine after a 44-subject cross-subject benchmark (AAUWSS
+    /// + Walch sleep-accel, leave-one-subject-out) showed V2 strictly dominates V1 (kappa 0.35 vs 0.03, deep
+    /// recall 55 % vs 1 %) — the multi-subject validation this recipe originally lacked. V1 remains available.
+    /// Read at the staging call site (Repository). Mirrors the Android `PuffinExperiment.KEY_EXPERIMENTAL_SLEEP_V2`.
     static let experimentalSleepV2Key = "noopExperimentalSleepV2"
 
-    static var experimentalSleepV2Enabled: Bool { UserDefaults.standard.bool(forKey: experimentalSleepV2Key) }
+    /// Default ON when the key is unset (mirrors the Android `getBoolean(KEY, true)`): a `bool(forKey:)` alone
+    /// reads a missing key as false, so an absent preference must resolve to the promoted V2 default explicitly.
+    static var experimentalSleepV2Enabled: Bool {
+        UserDefaults.standard.object(forKey: experimentalSleepV2Key) == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: experimentalSleepV2Key)
+    }
+
+    /// Opt-in "HR-from-PPG sub-lag interpolation" (default off): the v26 optical-PPG gap-fill HR estimator
+    /// (`PpgHr`) refines its integer autocorrelation lag with a parabolic (Variant A) interpolation of the
+    /// ACF peak, removing the ~±8 bpm lag-quantization near a high HR. Pure opt-in research variant: default
+    /// OFF is byte-identical to the integer-lag estimate, and it only ever fills seconds the strap never
+    /// reported an HR for (it NEVER overrides a WHOOP-stored HR). The pure `PpgHr` package cannot read prefs,
+    /// so the app-layer call site (the Backfiller / archive replay) reads this flag and threads it into the
+    /// estimator. Mirrors the Android `PuffinExperiment.KEY_PPG_HR_SUBLAG_INTERP`.
+    static let ppgHrSubLagInterpKey = "noopPpgHrSubLagInterp"
+
+    static var ppgHrSubLagInterpEnabled: Bool { UserDefaults.standard.bool(forKey: ppgHrSubLagInterpKey) }
+
+    /// Opt-in experimental "HRV readiness (Plews/Altini)" tier readout (default off): a read-only Test Centre
+    /// readout of the SWC log-HRV tier (`HRVReadiness`). It changes NOTHING downstream — the Charge ring stays
+    /// byte-identical whether on or off; it only surfaces the tier + baseline band in the Experimental
+    /// algorithms card. Rough / early (n=1, not yet validated against varying real data). Read directly by the
+    /// Test Centre view via @AppStorage on this key. Mirrors the Android `PuffinExperiment.KEY_HRV_READINESS`.
+    static let hrvReadinessKey = "noopHrvReadiness"
 
     /// Whether to stage sleep with V2 for the CURRENT strap, folding in the per-model DEFAULT. V2 is now
     /// the DEFAULT on WHOOP 5/MG: that family carries NO raw respiration ADC, and V1 stages a no-resp
@@ -81,4 +125,21 @@ enum PuffinExperiment {
     static let autoDetectWorkoutsKey = "noopAutoDetectWorkouts"
 
     static var autoDetectWorkoutsEnabled: Bool { UserDefaults.standard.bool(forKey: autoDetectWorkoutsKey) }
+
+    /// Opt-in "Motion-aware wake refinement" (default OFF, #364 "Proposal 2" follow-up): a post-pass
+    /// (`WakeMotionRefinement`) over the already-staged hypnogram that reclassifies a scored WAKE segment
+    /// to `light` when its per-minute step-tick cadence shows no locomotion AND its per-minute gravity
+    /// posture stays stable outside a minority of isolated "turn-over" burst minutes (which are kept as
+    /// wake). Targets the HR-led wake call misreading a hot-but-still/atonic stretch as an awakening — a
+    /// real anonymized night scored 194 min wake from single-minute turn-over bursts with zero walking
+    /// cadence between them. Self-gates on the OBSERVED gravity + step-sample density (never on strap
+    /// family/model, per #345): a WHOOP 4.0 night (sparse gravity, no step stream at all) fails the gate
+    /// and is left untouched every time; a WHOOP 5.0/MG night, which streams both densely, is the expected
+    /// beneficiary. Pure analysis switch — it only ever SHRINKS an already-scored wake segment, never
+    /// invents wake time; detection and the V1/V2 staging engines are untouched either way. Read at the
+    /// staging call sites (`Repository.restageFromRaw`, `IntelligenceEngine`, threaded through
+    /// `AnalyticsEngine.analyzeDay`). Mirrors the Android `PuffinExperiment.KEY_MOTION_AWARE_WAKE`.
+    static let motionAwareWakeKey = "noopMotionAwareWake"
+
+    static var motionAwareWakeEnabled: Bool { UserDefaults.standard.bool(forKey: motionAwareWakeKey) }
 }

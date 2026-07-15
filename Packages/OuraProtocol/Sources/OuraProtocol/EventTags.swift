@@ -26,7 +26,8 @@ public enum OuraEventTag: UInt8, Sendable, CaseIterable, Codable {
 
     // --- HR / IBI (Tier A) ---
     case ibiAmplitude     = 0x60   // ibi_and_amplitude_event (bit-packed), OURA_PROTOCOL.md s6.1
-    case greenIbiAmp      = 0x71   // green_ibi_and_amp_event, OURA_PROTOCOL.md s6.2
+    case greenIbiAmp      = 0x71   // green_ibi_and_amp_event, OURA_PROTOCOL.md s6.2 — Tier B (#287): §6.2
+                                   // layout (5 deltas+6 amps) != 0x60; unverified, gated. See `tier` below.
     case spo2IbiAmplitude = 0x6E   // spo2_ibi_and_amplitude_event (REVERSE byte order), OURA_PROTOCOL.md s6.3
     case greenIbiQuality  = 0x80   // green_ibi_quality_event (bit-packed across bytes), OURA_PROTOCOL.md s6.4
     case ibi              = 0x44   // ibi event (Tier-A IBI tag per the brief), OURA_PROTOCOL.md s6 / s0
@@ -53,13 +54,17 @@ public enum OuraEventTag: UInt8, Sendable, CaseIterable, Codable {
 
     // --- Sleep summaries (Tier B, UNVERIFIED) ---
     case sleepSummary1    = 0x49   // sleep_summary_1, OURA_PROTOCOL.md s6.12 (UNVERIFIED)
-    case sleepSummaryB    = 0x4B   // sleep summary variant, OURA_PROTOCOL.md s6.12 (UNVERIFIED)
     case sleepSummaryC    = 0x4C   // sleep summary variant, OURA_PROTOCOL.md s6.12 (UNVERIFIED)
     case sleepSummaryD    = 0x4F   // sleep summary variant, OURA_PROTOCOL.md s6.12 (UNVERIFIED)
     case sleepSummaryE    = 0x57   // sleep summary variant, OURA_PROTOCOL.md s6.12 (UNVERIFIED)
     case sleepSummaryF    = 0x58   // sleep summary variant, OURA_PROTOCOL.md s6.12 (UNVERIFIED)
 
     // --- Sleep phase codes (Tier A: 2-bit phase codes are byte-for-byte verified) ---
+    // 0x4B/0x4E/0x5A are the three aliases the ring emits for the SAME hypnogram layout — a header byte
+    // then 2-bit phase codes, 4 per byte MSB-first (open_oura `0x4b | 0x4e | 0x5a => decode_sleep_phases`,
+    // events.rs). 0x4B was previously misfiled as a Tier-B "sleep summary"; it is the same validated
+    // phase stream as the other two. Per OURA_PROTOCOL.md s6.12.
+    case sleepPhaseB      = 0x4B   // sleep_phase_details alias (was sleepSummaryB), OURA_PROTOCOL.md s6.12
     case sleepPhase       = 0x4E   // sleep_phase_details (2-bit codes), OURA_PROTOCOL.md s6.12
     case sleepPhaseAlt    = 0x5A   // sleep_phase_details alias, OURA_PROTOCOL.md s6.12
 
@@ -79,9 +84,16 @@ public enum OuraEventTag: UInt8, Sendable, CaseIterable, Codable {
     /// behind an explicit allowTierB flag. Per OURA_PROTOCOL.md s7.3 and the brief's TIER DISCIPLINE.
     public var tier: TrustTier {
         switch self {
-        case .sleepSummary1, .sleepSummaryB, .sleepSummaryC, .sleepSummaryD, .sleepSummaryE,
+        case .sleepSummary1, .sleepSummaryC, .sleepSummaryD, .sleepSummaryE,
              .sleepSummaryF, .activityInfo, .activitySummary1, .activitySummary2,
-             .realSteps1, .realSteps2, .spo2Smoothed:
+             .realSteps1, .realSteps2, .spo2Smoothed,
+             // #287: 0x71 green_ibi_and_amp is NOT corpus-verified — there is no captured 0x71 fixture,
+             // and OURA_PROTOCOL.md §6.2 documents a DIFFERENT layout (5 IBI deltas + 6 amplitudes,
+             // shift [2:0]) than the 0x60 decoder it was wired to (6 absolute IBIs, 4-bit shift). Decoding
+             // it with the 0x60 layout fabricates a 6th phantom R-R and reads deltas as absolute intervals,
+             // silently corrupting reconstructed HRV. Demote to Tier B so it is gated out of live emission
+             // until a real 0x71 capture lets us write + verify a dedicated decoder. (tierA == corpus-verified.)
+             .greenIbiAmp:
             return .tierB
         default:
             return .tierA
@@ -112,11 +124,11 @@ public enum OuraEventTag: UInt8, Sendable, CaseIterable, Codable {
         case .motion: return "MOTION"
         case .motionPeriod: return "MOTION_PERIOD"
         case .sleepSummary1: return "SLEEP_SUMMARY_1"
-        case .sleepSummaryB: return "SLEEP_SUMMARY_4B"
         case .sleepSummaryC: return "SLEEP_SUMMARY_4C"
         case .sleepSummaryD: return "SLEEP_SUMMARY_4F"
         case .sleepSummaryE: return "SLEEP_SUMMARY_57"
         case .sleepSummaryF: return "SLEEP_SUMMARY_58"
+        case .sleepPhaseB: return "SLEEP_PHASE_4B"
         case .sleepPhase: return "SLEEP_PHASE"
         case .sleepPhaseAlt: return "SLEEP_PHASE_ALT"
         case .activityInfo: return "ACTIVITY_INFO"

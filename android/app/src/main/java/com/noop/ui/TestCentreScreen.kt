@@ -14,6 +14,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Switch
@@ -35,8 +36,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.BuildConfig
 import com.noop.analytics.Baselines
+import com.noop.analytics.HRVReadiness
+import com.noop.analytics.ReadinessTier
 import com.noop.ble.PuffinExperiment
 import com.noop.ble.WhoopModel
+import com.noop.data.DailyMetric
 import com.noop.testcentre.CaptureAccumulator
 import com.noop.testcentre.CaptureKind
 import com.noop.testcentre.DisplayPerformanceMonitor
@@ -50,6 +54,7 @@ import com.noop.testcentre.TestModeRegistry
 import com.noop.testcentre.TestReportFlow
 import com.noop.testcentre.TestReportLink
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 /**
  * Settings -> Test Centre (spec section 7), the Android twin of TestCentreView. Four sections: domain
@@ -163,8 +168,8 @@ fun TestCentreScreen(vm: AppViewModel) {
             },
         )
 
-        // --- Section 4: Advanced / experimental ---
-        AdvancedCard(vm, is5MG)
+        // --- Section 4: Experimental algorithms ---
+        ExperimentalAlgorithmsCard(vm)
     }
 
     pendingReport?.let { p ->
@@ -314,7 +319,10 @@ private fun TestModeRow(
 @Composable
 private fun DiagnosticToolsCard(vm: AppViewModel) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var showRecalibrate by remember { mutableStateOf(false) }
+    // "Debug logging" moved here from Settings: dev-only, mirrors the strap log to logcat over adb.
+    var debugLogging by remember { mutableStateOf(NoopPrefs.debugLogging(context)) }
     SettingsSectionTC(
         icon = Icons.Filled.Info,
         title = "Diagnostic tools",
@@ -327,7 +335,7 @@ private fun DiagnosticToolsCard(vm: AppViewModel) {
                 leadingIcon = Icons.Filled.Upload,
                 kind = NoopButtonKind.Secondary,
                 fullWidth = true,
-                onClick = { LogExport.shareStrapLog(context, vm.ble.exportLogText()) },
+                onClick = { scope.launch { LogExport.shareStrapLog(context, vm.ble.exportLogText()) } },
             )
             // Recalibrate Charge baseline, the same Baselines.recalibrateRecoveryBaselines call.
             NoopButton(
@@ -337,14 +345,27 @@ private fun DiagnosticToolsCard(vm: AppViewModel) {
                 fullWidth = true,
                 onClick = { showRecalibrate = true },
             )
-            // Environment dump: the strap log already carries the AndroidDiagnostics header (spec 3.4).
-            NoopButton(
-                text = "Copy environment dump",
-                leadingIcon = Icons.Filled.Info,
-                kind = NoopButtonKind.Secondary,
-                fullWidth = true,
-                onClick = { LogExport.shareStrapLog(context, vm.ble.exportLogText()) },
-            )
+            // Debug logging (moved here from Settings): mirror the strap log to logcat for adb
+            // development. Dev-only, off by default; the in-app log and "Share strap log" above work either way.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Debug logging", style = NoopType.subhead, color = Palette.textPrimary)
+                    Text(
+                        "Also write the strap log to the system log (logcat) for development over adb. Off by default.",
+                        style = NoopType.footnote,
+                        color = Palette.textTertiary,
+                    )
+                }
+                Switch(
+                    checked = debugLogging,
+                    onCheckedChange = { debugLogging = it; vm.setDebugLogging(it) },
+                    colors = settingsSwitchColors(),
+                )
+            }
         }
     }
     if (showRecalibrate) {
@@ -435,47 +456,121 @@ private fun ExportCard(vm: AppViewModel, onReport: () -> Unit) {
     }
 }
 
+/**
+ * Test Centre → Experimental algorithms. The single home for OPT-IN, off-by-default, non-clinical research
+ * variants that swap which model computes a metric (never detection, never a stored WHOOP value). Each toggle
+ * writes the SAME [PuffinExperiment] key its Swift twin reads, so the platforms stay in lockstep. Hosts the
+ * HR-from-PPG sub-lag interpolation variant and the read-only HRV-readiness (Plews/Altini) tier readout.
+ * Twin of the Swift TestCentreView experimentalAlgorithmsCard.
+ */
 @Composable
-private fun AdvancedCard(vm: AppViewModel, is5MG: Boolean) {
+private fun ExperimentalAlgorithmsCard(vm: AppViewModel) {
     val context = LocalContext.current
     val puffin = remember { PuffinExperiment.from(context) }
-    var v2 by remember { mutableStateOf(puffin.experimentalSleepV2) }
-    // Re-hosted Continuous-HRV toggle, bound to the SAME NoopPrefs key (noop.continuousHrv) the Settings
-    // card uses, so flipping it here or there is one and the same setting (mirrors the iOS Test Centre).
-    var continuousHrv by remember { mutableStateOf(NoopPrefs.continuousHrv(context)) }
-    var probes by remember { mutableStateOf(puffin.isEnabled) }
-    var deepData by remember { mutableStateOf(puffin.isDeepDataEnabled) }
-    var broadcast by remember { mutableStateOf(puffin.broadcastHr) }
-    var capture by remember { mutableStateOf(puffin.isCaptureEnabled) }
+    var ppgHrSubLag by remember { mutableStateOf(puffin.ppgHrSubLagInterp) }
+    var hrvReadiness by remember { mutableStateOf(puffin.hrvReadiness) }
+    // The SAME nightly HRV series the recovery UI reads (repo-merged DailyMetric.avgHrv, oldest-first), fed
+    // into the pure HRVReadiness engine ONLY to render the toggle's own reading inline below — the default
+    // Charge ring / analyzeDay path is never touched, and this feeds no downstream gate.
+    val recentDays by vm.recentDays.collectAsStateWithLifecycle()
     SettingsSectionTC(
-        icon = Icons.Filled.Info,
-        title = "Advanced",
-        blurb = "Experimental probes, off by default. The fuller WHOOP 5/MG controls and the raw-sensor CSV export still live in Settings under Diagnostics.",
+        icon = Icons.Filled.Science,
+        title = "Experimental algorithms",
+        blurb = "Research-grade alternatives / precision tweaks. Opt-in, off by default, non-clinical.",
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            ToggleRowTC("Experimental sleep staging (V2)", v2) {
-                v2 = it; puffin.experimentalSleepV2 = it
-            }
-            // Same write path as Settings: vm.setContinuousHrv persists noop.continuousHrv and re-applies
-            // keep-stream-for-data, so the live capture follows the toggle from either screen.
-            ToggleRowTC("Continuous HRV capture", continuousHrv) {
-                continuousHrv = it; vm.setContinuousHrv(it)
-            }
-            if (is5MG) {
-                ToggleRowTC("Try WHOOP 5/MG protocol probes", probes) {
-                    probes = it; puffin.isEnabled = it
-                }
-                ToggleRowTC("Unlock WHOOP 5/MG deep data (R22)", deepData) {
-                    deepData = it; puffin.isDeepDataEnabled = it
-                }
-                ToggleRowTC("Broadcast heart rate (Garmin/ANT)", broadcast) {
-                    broadcast = it; puffin.broadcastHr = it; vm.ble.setBroadcastHr(it)
-                }
-                ToggleRowTC("Record puffin frames to a file", capture) {
-                    capture = it; puffin.isCaptureEnabled = it
-                }
-            }
+        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            ToggleRowTC(
+                title = "HR-from-PPG sub-lag interpolation (v26 gap-fill)",
+                description = "When NOOP reconstructs heart rate from the WHOOP 5/MG v26 optical waveform (the " +
+                    "seconds the strap stored no HR), refine the autocorrelation peak with a parabolic sub-lag " +
+                    "fit so the estimate is not quantized to roughly 16 bpm steps near a high HR. It only fills " +
+                    "seconds the strap never reported; it never overrides a stored HR. 5/MG only, off by default.",
+                checked = ppgHrSubLag,
+                onCheckedChange = { ppgHrSubLag = it; puffin.ppgHrSubLagInterp = it },
+            )
+            ToggleRowTC(
+                title = "HRV readiness (Plews/Altini)",
+                description = "A read-only Plews/Altini smallest-worthwhile-change reading of your nightly HRV: " +
+                    "it shows whether your 7-night HRV baseline sits above, inside, or below your personal " +
+                    "normal band. It changes nothing else - the Charge ring is identical whether this is on or " +
+                    "off. This is rough / early testing, not yet validated against varying real data (n=1).",
+                checked = hrvReadiness,
+                onCheckedChange = { hrvReadiness = it; puffin.hrvReadiness = it },
+            )
+            // The toggle's OWN effect, shown in place: when on, the live Plews/Altini reading. Nothing renders
+            // when off, so the flag off is zero behaviour change and feeds no downstream gate.
+            if (hrvReadiness) HrvReadinessReadoutTC(recentDays)
         }
+    }
+}
+
+/**
+ * Inline, opt-in HRV-readiness readout. Renders directly under the "HRV readiness (Plews/Altini)" toggle when
+ * the flag is on, so the toggle's own effect is visible in place. Reads the SAME repo-merged nightly
+ * [DailyMetric.avgHrv] series (oldest-first) the recovery UI has and runs it through the pure [HRVReadiness]
+ * engine — it never touches the default Charge ring or analyzeDay. Below [HRVReadiness.MIN_NIGHTS] valid
+ * nights it shows the honest calibrating count instead of a fabricated tier. Twin of the Swift
+ * `hrvReadinessReadout`.
+ */
+@Composable
+private fun HrvReadinessReadoutTC(days: List<DailyMetric>) {
+    // Memoize the pure evaluate + valid-night count against the day-list identity so it only recomputes when
+    // the series actually changes (not on every recomposition).
+    val (result, validCount) = remember(days) {
+        val cfg = Baselines.hrvCfg
+        val series = days.map { it.avgHrv }
+        val valid = series.count { v -> v != null && v >= cfg.minVal && v <= cfg.maxVal }
+        HRVReadiness.evaluate(series) to valid
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        if (result != null) {
+            val (word, color) = when (result.tier) {
+                ReadinessTier.PRIMED -> "primed" to Palette.statusPositive
+                ReadinessTier.NORMAL -> "normal" to Palette.textPrimary
+                ReadinessTier.SUPPRESSED -> "suppressed" to Palette.statusWarning
+            }
+            Text("HRV readiness (experimental): $word", style = NoopType.subhead, color = color)
+            val base = result.baseline7Ms.roundToInt()
+            val lo = result.normalLowMs.roundToInt()
+            val hi = result.normalHighMs.roundToInt()
+            val watch = if (result.overreachingWatch) ", overreaching watch" else ""
+            Text(
+                "7-night baseline $base ms, normal $lo to $hi ms$watch",
+                style = NoopType.footnote, color = Palette.textTertiary,
+            )
+        } else {
+            Text("HRV readiness (experimental)", style = NoopType.subhead, color = Palette.textTertiary)
+            Text(
+                "Calibrating ($validCount/${HRVReadiness.MIN_NIGHTS} nights)",
+                style = NoopType.footnote, color = Palette.textTertiary,
+            )
+        }
+    }
+}
+
+/** A titled toggle + caption row for the Experimental algorithms card (same NoopType/Palette tokens + switch
+ *  colours as the other Test Centre rows). Local to Test Centre so it never reaches into SettingsScreen. */
+@Composable
+private fun ToggleRowTC(
+    title: String,
+    description: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Text(title, style = NoopType.subhead, color = Palette.textPrimary, modifier = Modifier.weight(1f))
+            Switch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                colors = settingsSwitchColors(),
+            )
+        }
+        Text(description, style = NoopType.footnote, color = Palette.textTertiary)
     }
 }
 
@@ -556,18 +651,6 @@ private fun SettingsSectionTC(
             Text(blurb, style = NoopType.subhead, color = Palette.textSecondary)
             content()
         }
-    }
-}
-
-@Composable
-private fun ToggleRowTC(title: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        Text(title, style = NoopType.subhead, color = Palette.textPrimary, modifier = Modifier.weight(1f))
-        Switch(checked = checked, onCheckedChange = onCheckedChange, colors = settingsSwitchColors())
     }
 }
 

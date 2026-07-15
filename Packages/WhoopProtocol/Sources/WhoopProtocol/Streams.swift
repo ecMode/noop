@@ -73,25 +73,34 @@ public struct SkinTempSample: Equatable, Codable {
 ///   The reporter's doff/don capture gives a steady worn resting value of raw ~826 (worn steady
 ///   ~830–865; a no-contact floor ~510–520 at removal, then banking stops). Under `/100` that worn
 ///   value reads ~8.3 °C — impossible for a wrist streaming a resting HR (~52 bpm). We anchor the
-///   worn value at a defensible nocturnal wrist skin temperature (33.0 °C ↔ raw 826) and carry a
-///   PROVISIONAL slope until a second calibration point exists. Because the downstream use is a
+///   worn value at a defensible nocturnal wrist skin temperature (33.0 °C ↔ the worn anchor raw) and
+///   carry a PROVISIONAL slope until a second calibration point exists. Because the downstream use is a
 ///   deviation from the user's OWN nightly baseline (`skinTempDevC`), the offset is what must be right
 ///   to clear the absolute 28–42 °C worn gate + 20–42 °C baseline clamp; a slope error only rescales
 ///   the deviation and stays directionally correct. All 4.0 values APPROXIMATE.
+///
+///   PER-DEVICE ANCHOR (#938 second capture): `anchorRaw` is the raw that maps to 33.0 °C. It defaults to
+///   the global `Whoop4SkinTemp.anchorRaw` (826, first reporter's strap) so every existing caller is
+///   byte-identical, but the register OFFSET is per-device — a second real 4.0 strap shows the SAME floor
+///   (~509) and saturation (2047) yet a worn band of ~1100–1600 (nightly mean raw ~1290), which the global
+///   826 anchor maps to 47–72 °C (all samples fail the worn gate). The analytics caller therefore learns
+///   `anchorRaw` from the device's OWN worn median (`Whoop4SkinTemp.deviceAnchorRaw`) so the worn band lands
+///   in range; the constant offset cancels in the deviation-from-own-baseline the app consumes.
 ///
 ///   TODO(#938): replace the provisional slope with the exact two-point anchor once a second worn
 ///   point at a markedly different ambient (the reporter offered a colder + a warmer room) pins the
 ///   ADC→°C transfer — including whether it is linear at all. Until then this is a defensible
 ///   worn-range mapping, NOT a claimed-accurate absolute thermometer.
-public func skinTempCelsius(raw: Int, family: DeviceFamily) -> Double {
+public func skinTempCelsius(raw: Int, family: DeviceFamily,
+                            anchorRaw: Double = Whoop4SkinTemp.anchorRaw) -> Double {
     switch family {
     case .whoop5:
         return Double(raw) / 100.0
     case .whoop4:
-        // Anchor: worn resting raw 826 → 33.0 °C. Provisional slope 0.05 °C per raw unit (a ~35-unit
-        // worn-steady spread ≈ ~1.75 °C of nocturnal variation, within the plausible band). See TODO above.
+        // Anchor: worn resting raw `anchorRaw` (per-device, default 826) → 33.0 °C. Provisional slope 0.05 °C
+        // per raw unit (a ~35-unit worn-steady spread ≈ ~1.75 °C of nocturnal variation). See TODO above.
         return Whoop4SkinTemp.anchorCelsius
-            + (Double(raw) - Whoop4SkinTemp.anchorRaw) * Whoop4SkinTemp.provisionalSlopeCPerRaw
+            + (Double(raw) - anchorRaw) * Whoop4SkinTemp.provisionalSlopeCPerRaw
     }
 }
 
@@ -99,12 +108,48 @@ public func skinTempCelsius(raw: Int, family: DeviceFamily) -> Double {
 /// live in ONE place and the two-point-calibration TODO has an obvious home. Kept in lockstep with the
 /// Android `Whoop4SkinTemp`.
 public enum Whoop4SkinTemp {
-    /// Worn resting raw register value the anchor pins (reporter's steady worn baseline, ~826).
+    /// Worn resting raw register value the GLOBAL anchor pins (first reporter's steady worn baseline, ~826).
+    /// Used as the fallback anchor when a device has too few in-band samples to learn its own (#938).
     public static let anchorRaw: Double = 826.0
     /// Physiological nocturnal wrist skin temperature the anchor raw maps to (°C).
     public static let anchorCelsius: Double = 33.0
     /// PROVISIONAL °C-per-raw-unit slope. TODO(#938): replace with the two-point anchor slope.
     public static let provisionalSlopeCPerRaw: Double = 0.05
+
+    // ── Per-device worn anchor (#938, second capture) ─────────────────────────────────────────────────
+    // The @72 skin-temp field is a raw ADC whose register OFFSET is per-device: two real 4.0 straps show the
+    // IDENTICAL no-contact floor (~509) and 11-bit saturation ceiling (2047), but DIFFERENT worn bands — the
+    // first strap ~760–865 (anchored anchorRaw=826), a second ~1100–1600 (nightly mean raw ~1290). Under the
+    // single global anchor the second strap maps to 47–72 °C, so 100% of its samples fail the 28–42 °C worn
+    // gate: kept=0, no nightly mean, no baseline, no skin-temp/illness signal. The floor and ceiling agree
+    // across devices; only the worn offset differs → the anchor must be learned per device from that device's
+    // own worn band. Safe because downstream use is deviation-from-own-baseline (skinTempDevC) and the skin
+    // baseline is re-folded from the same scan window's nightly means every run, so a constant per-run offset
+    // cancels in the deviation.
+
+    /// Lower raw bound of the plausible WORN band. Clear of the no-contact floor (~509–520 observed on two
+    /// devices); banking stops at removal, so floor-and-below values are doff transients, never worn skin —
+    /// excluding them keeps the learned anchor (a median of worn raws) from being dragged down. (#938)
+    public static let wornMinRaw: Int = 550
+    /// Upper raw bound of the plausible WORN band. Clear of the 11-bit register saturation (2047 observed
+    /// pegged during device charging/fault) — a pegged raw is not a worn reading, so it must not enter the
+    /// anchor median or the nightly mean. (#938)
+    public static let wornMaxRaw: Int = 2040
+    /// Minimum in-band samples before a per-device anchor is trusted. Below this, callers fall back to the
+    /// global reporter anchor (`anchorRaw`=826) so sparse-data behavior is byte-identical to today — a
+    /// handful of stray worn raws must not define a device's whole ADC offset. (#938)
+    public static let minAnchorSamples: Int = 100
+
+    /// Per-device worn anchor: median of the in-band raws across the caller's scan window, or nil when fewer
+    /// than `minAnchorSamples` in-band samples exist (caller falls back to `anchorRaw`). Median (not mean) so
+    /// doff/don transients and tails can't drag the anchor. (#938)
+    public static func deviceAnchorRaw(_ raws: [Int]) -> Double? {
+        let inBand = raws.filter { $0 >= wornMinRaw && $0 <= wornMaxRaw }.sorted()
+        if inBand.count < minAnchorSamples { return nil }
+        let n = inBand.count
+        return n % 2 == 1 ? Double(inBand[n / 2])
+            : Double(inBand[n / 2 - 1] + inBand[n / 2]) / 2.0
+    }
 }
 
 public struct RespSample: Equatable, Codable {
@@ -157,6 +202,20 @@ public struct SleepStateSample: Equatable, Codable {
     public init(ts: Int, state: Int) { self.ts = ts; self.state = state }
 }
 
+/// The WHOOP 5.0 v26 optical PPG buffer's RAW waveform, one record per second (issue #156 follow-up).
+/// `PpgHr.derivePpgHr` already turns these into a per-second HR estimate (`ppgHr`), but until now the
+/// 24 Hz samples themselves were discarded the moment that estimate was taken — HistoricalStreams
+/// collected them into a transient `ppgRecords` buffer purely to feed the estimator, and nothing else
+/// ever saw them. Persisted here (and, in WhoopStore, its own table) so a future re-analysis — a better
+/// HR estimator, HRV-from-PPG, a waveform viewer — can run over the ORIGINAL samples, not just the
+/// derived bpm. `samples` are raw AC-coupled ADC counts, no invented scale (see
+/// `decodeWhoop5HistoricalV26`); a truncated frame can yield fewer than 24.
+public struct PpgWaveformSample: Equatable, Codable, Sendable {
+    public let ts: Int          // wall-clock unix seconds (one record per second)
+    public let samples: [Int]   // raw i16 ADC counts @24 Hz, verbatim from `ppg_waveform` (usually 24)
+    public init(ts: Int, samples: [Int]) { self.ts = ts; self.samples = samples }
+}
+
 public struct Streams: Equatable, Codable {
     public var hr: [HRSample]
     public var rr: [RRInterval]
@@ -172,6 +231,10 @@ public struct Streams: Equatable, Codable {
     /// PPG-derived per-second HR from the WHOOP 5.0 v26 optical buffer (issue #156). Kept separate from
     /// `hr` (the measured stream) so consumers can COALESCE without conflating the two sources.
     public var ppgHr: [PpgHrSample]
+    /// The RAW v26 optical PPG waveform itself (issue #156 follow-up), one record per second — the
+    /// samples `ppgHr` is derived FROM. Kept separate so a consumer that only wants the HR estimate
+    /// never pays for the 24x-larger raw stream, and so the two can be persisted/pruned independently.
+    public var ppgWaveform: [PpgWaveformSample]
     public var events: [WhoopEvent]
     public var battery: [BatterySample]
     /// #547 diagnostic: how many historical records `extractHistoricalStreams` DROPPED this chunk for an
@@ -179,15 +242,27 @@ public struct Streams: Equatable, Codable {
     /// and NOT round-tripped through Codable (excluded from `CodingKeys`) — it is a transient observability
     /// count the Backfiller surfaces to the strap log. Defaults to 0 so it never affects golden fixtures.
     public var droppedImplausible: Int = 0
+    /// #324 diagnostic: the OLDEST / NEWEST own-timestamp (unix seconds, the strap's OWN dated value) among
+    /// records DROPPED this chunk for an implausible ts. Lets the Backfiller log the epoch SPAN of a bad-clock
+    /// strap's poisoned range - so a future-dated strap shows "2028-06-24 -> 2029-07" and we can tell a
+    /// WHOLE-range-future strap (safe to fast-forward-discard) from one mixed with real data. Transient (not
+    /// in CodingKeys), nil when nothing dropped. Defaults keep golden fixtures byte-identical.
+    public var droppedImplausibleOldestTs: Int? = nil
+    public var droppedImplausibleNewestTs: Int? = nil
+    /// #324 diagnostic: strap RTC-STATE events (RTC_LOST / BOOT / SET_RTC) DROPPED for an implausible own-ts.
+    /// The #547 gate discards them like any bad-ts record, but these are the GROUND TRUTH that the clock reset
+    /// - so we capture (kind, rawTs) for the strap log before dropping. Transient, empty by default, not encoded.
+    public var droppedRtcEvents: [DroppedRtcEvent] = []
     public init(hr: [HRSample] = [], rr: [RRInterval] = [],
                 spo2: [SpO2Sample] = [], skinTemp: [SkinTempSample] = [],
                 resp: [RespSample] = [], gravity: [GravitySample] = [],
                 steps: [StepSample] = [], sleepState: [SleepStateSample] = [],
-                ppgHr: [PpgHrSample] = [],
+                ppgHr: [PpgHrSample] = [], ppgWaveform: [PpgWaveformSample] = [],
                 events: [WhoopEvent] = [], battery: [BatterySample] = []) {
         self.hr = hr; self.rr = rr
         self.spo2 = spo2; self.skinTemp = skinTemp; self.resp = resp; self.gravity = gravity
         self.steps = steps; self.sleepState = sleepState; self.ppgHr = ppgHr
+        self.ppgWaveform = ppgWaveform
         self.events = events; self.battery = battery
     }
 
@@ -197,13 +272,14 @@ public struct Streams: Equatable, Codable {
     public var isEmpty: Bool {
         hr.isEmpty && rr.isEmpty && spo2.isEmpty && skinTemp.isEmpty && resp.isEmpty
             && gravity.isEmpty && steps.isEmpty && sleepState.isEmpty && ppgHr.isEmpty
-            && events.isEmpty && battery.isEmpty
+            && ppgWaveform.isEmpty && events.isEmpty && battery.isEmpty
     }
 
     private enum CodingKeys: String, CodingKey {
         case hr, rr, spo2, skinTemp = "skin_temp", resp, gravity, steps
         case sleepState = "sleep_state"
         case ppgHr = "ppg_hr"
+        case ppgWaveform = "ppg_waveform"
         case events, battery
     }
 
@@ -220,12 +296,28 @@ public struct Streams: Equatable, Codable {
         steps = try c.decodeIfPresent([StepSample].self, forKey: .steps) ?? []
         sleepState = try c.decodeIfPresent([SleepStateSample].self, forKey: .sleepState) ?? []
         ppgHr = try c.decodeIfPresent([PpgHrSample].self, forKey: .ppgHr) ?? []
+        ppgWaveform = try c.decodeIfPresent([PpgWaveformSample].self, forKey: .ppgWaveform) ?? []
         events = try c.decodeIfPresent([WhoopEvent].self, forKey: .events) ?? []
         battery = try c.decodeIfPresent([BatterySample].self, forKey: .battery) ?? []
     }
 }
 
 extension Streams { public static let empty = Streams() }
+
+/// #324 diagnostic record: a strap RTC-STATE event (RTC_LOST / BOOT / SET_RTC) that the #547 plausibility
+/// gate dropped for an implausible own-timestamp. `rawTs` is the event's OWN dated value (unix seconds) - on
+/// a future-dated strap this is the bad epoch the RTC jumped to, the single most useful signal for #324.
+public struct DroppedRtcEvent: Equatable, Codable, Sendable {
+    public let kind: String
+    public let rawTs: Int
+    public init(kind: String, rawTs: Int) { self.kind = kind; self.rawTs = rawTs }
+
+    /// The RTC-state event kinds worth capturing when dropped. Kinds are formatted "NAME(n)" (e.g.
+    /// "RTC_LOST(13)"), matched by prefix - "BOOT" covers both BOOT and BOOT_REPORT.
+    public static func isRtcStateKind(_ kind: String) -> Bool {
+        kind.hasPrefix("RTC_LOST") || kind.hasPrefix("SET_RTC") || kind.hasPrefix("BOOT")
+    }
+}
 
 /// Map a device-epoch timestamp to wall-clock unix seconds via a pure linear offset.
 /// Assumes strap clock and wall clock tick at the same rate (no skew/drift). Port of _to_wall.

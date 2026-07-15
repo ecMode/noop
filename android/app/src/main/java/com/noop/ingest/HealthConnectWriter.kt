@@ -3,7 +3,6 @@ package com.noop.ingest
 import android.content.Context
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.permission.HealthPermission
-import androidx.health.connect.client.records.ActiveCaloriesBurnedRecord
 import androidx.health.connect.client.records.DistanceRecord
 import androidx.health.connect.client.records.ExerciseSessionRecord
 import androidx.health.connect.client.records.HeartRateRecord
@@ -13,9 +12,7 @@ import androidx.health.connect.client.records.Record
 import androidx.health.connect.client.records.RespiratoryRateRecord
 import androidx.health.connect.client.records.RestingHeartRateRecord
 import androidx.health.connect.client.records.SleepSessionRecord
-import androidx.health.connect.client.records.StepsRecord
 import androidx.health.connect.client.records.metadata.Metadata
-import androidx.health.connect.client.units.Energy
 import androidx.health.connect.client.units.Length
 import androidx.health.connect.client.units.Percentage
 import com.noop.data.WhoopRepository
@@ -51,9 +48,6 @@ object HealthConnectWriter {
         HeartRateVariabilityRmssdRecord::class,
         OxygenSaturationRecord::class,
         RespiratoryRateRecord::class,
-        // #528: also share back the strap's raw-derived series + daily totals.
-        ActiveCaloriesBurnedRecord::class,
-        StepsRecord::class,
         HeartRateRecord::class,
         SleepSessionRecord::class,
     )
@@ -66,8 +60,12 @@ object HealthConnectWriter {
      * Write the last [WINDOW_DAYS] of computed metrics. Returns the number of records written,
      * 0 when HC is unavailable / nothing computed yet. Assumes [PERMISSIONS] are granted (HC
      * throws SecurityException otherwise — callers wrap in runCatching).
+     *
+     * [deviceId] must be the registry's ACTIVE strap id (SPINE / #814): a wizard-paired strap banks
+     * rows under `whoop-<address>`, so a hardcoded legacy "my-whoop" id reads empty tables and
+     * exports nothing.
      */
-    suspend fun write(context: Context, repo: WhoopRepository, deviceId: String = "my-whoop"): Int {
+    suspend fun write(context: Context, repo: WhoopRepository, deviceId: String): Int {
         if (HealthConnectClient.getSdkStatus(context) != HealthConnectClient.SDK_AVAILABLE) return 0
         val client = HealthConnectClient.getOrCreate(context)
 
@@ -114,49 +112,17 @@ object HealthConnectWriter {
             }
         }
 
-        // #528 — Active Energy + Steps: one interval record per day, riding the same 60-day window.
-        // Kept in a SEPARATE list + insert from the vitals above so a revoked steps/energy WRITE
-        // permission can't fail the (already-reliable) vitals insert: HC insertRecords is
-        // all-or-nothing per call.
-        val aggRecords = ArrayList<Record>()
-        val aggs = HealthExportPlan.dailyAggregates(
-            days.map { HealthExportPlan.DayInput(it.day, it.steps, it.activeKcalEst) },
-        ) { day ->
-            val date = runCatching { LocalDate.parse(day) }.getOrNull() ?: return@dailyAggregates null
-            val s = date.atStartOfDay(zone).toEpochSecond()
-            val e = date.plusDays(1).atStartOfDay(zone).toEpochSecond()
-            s to e
-        }
-        for (a in aggs) {
-            val start = Instant.ofEpochSecond(a.startEpochSec)
-            val end = Instant.ofEpochSecond(a.endEpochSec)
-            // Per-endpoint offsets: a day spanning a DST transition has different start/end offsets.
-            val offStart = zone.rules.getOffset(start)
-            val offEnd = zone.rules.getOffset(end)
-            a.activeKcal?.let {
-                aggRecords.add(ActiveCaloriesBurnedRecord(
-                    startTime = start, startZoneOffset = offStart, endTime = end, endZoneOffset = offEnd,
-                    energy = Energy.kilocalories(it),
-                    metadata = meta("energy", a.day, version),
-                ))
-            }
-            a.steps?.let {
-                aggRecords.add(StepsRecord(
-                    startTime = start, startZoneOffset = offStart, endTime = end, endZoneOffset = offEnd,
-                    count = it,
-                    metadata = meta("steps", a.day, version),
-                ))
-            }
-        }
+        // NOTE: steps + active-calories are deliberately NOT written back (was #528). NOOP's strap
+        // step/kcal figures are estimates, and the phone pedometer / a watch already feed Health
+        // Connect the authoritative values — writing ours too would double-count in the OS's daily
+        // totals. iOS (#249) excludes them for the same reason; this keeps the two platforms aligned.
+        // The unique strap signals (vitals, HR, sleep, workouts) are still written below.
 
         // Each export concern inserts independently (own runCatching) so a failure in one — e.g. a
         // revoked per-type WRITE permission — can't suppress the others.
         var total = 0
         if (records.isNotEmpty()) {
             total += runCatching { client.insertRecords(records); records.size }.getOrDefault(0)
-        }
-        if (aggRecords.isNotEmpty()) {
-            total += runCatching { client.insertRecords(aggRecords); aggRecords.size }.getOrDefault(0)
         }
         total += runCatching { writeHeartRate(client, context, repo, deviceId, version) }.getOrDefault(0)
         total += runCatching { writeSleep(client, repo, deviceId) }.getOrDefault(0)
@@ -228,14 +194,19 @@ object HealthConnectWriter {
      * split yet — only the validated asleep-vs-awake distinction is shared so we don't over-claim the
      * stager's precision). Uses the MERGED view (imported wins, on-device-computed gap-fills) so a
      * strap-only user's locally-computed nights (stored under the "-noop" computed id) are included.
-     * The clientRecordId keys off the immutable detected startTs so a re-write upserts in place.
+     * #364 — fragments are grouped into BRIDGED NIGHTS (the same #561 bridge the daily totals score
+     * with), so a night split by a brief mid-night wake exports as ONE record whose gap is an AWAKE
+     * stage; the clientRecordId keys off the group's earliest fragment's immutable detected startTs,
+     * and the absorbed fragments' old per-fragment records are DELETED (HC upserts by id but never
+     * removes an id we stop writing).
      */
     private suspend fun writeSleep(client: HealthConnectClient, repo: WhoopRepository, deviceId: String): Int {
         val now = System.currentTimeMillis() / 1000
         val floor = now - WINDOW_DAYS * 86_400
         val sessions = repo.sleepSessionsMerged(deviceId, from = floor, to = now)
-            .map { HealthExportPlan.SleepInput(it.startTs, it.endTs, it.stagesJSON) }
-        val plans = HealthExportPlan.sleepSessions(sessions, now)
+            .map { HealthExportPlan.SleepInput(it.startTs, it.effectiveStartTs, it.endTs, it.stagesJSON) }
+        val offsetSec = (java.util.TimeZone.getDefault().getOffset(now * 1000) / 1000).toLong()
+        val plans = HealthExportPlan.sleepSessions(sessions, now, offsetSec)
         if (plans.isEmpty()) return 0
 
         val zone = ZoneId.systemDefault()
@@ -256,6 +227,15 @@ object HealthConnectWriter {
                 },
                 metadata = Metadata(clientRecordId = p.clientId, clientRecordVersion = p.endSec),
             )
+        }
+        // Clear absorbed fragments' old records BEFORE the merged upsert, so a night previously
+        // exported as two entries never lingers as one merged + one stale fragment. (#364)
+        val absorbed = plans.flatMap { it.absorbedClientIds }
+        if (absorbed.isNotEmpty()) {
+            runCatching {
+                client.deleteRecords(SleepSessionRecord::class,
+                    recordIdsList = emptyList(), clientRecordIdsList = absorbed)
+            }
         }
         return insertChunked(client, records)
     }

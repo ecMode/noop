@@ -62,6 +62,46 @@ class ReportCompletenessParityTest {
         assertEquals(ReportCompleteness.Status.MISSING, s[TestDomain.CONNECTION])
     }
 
+    @Test fun sleepIsPresentFromComputedProvenanceLineWithoutGateRun() {
+        // #127: `gate run=` only re-emits when the sleep-stager gate re-runs under the SLEEP trace sink; a
+        // night scored on the backfill/post-sync pass (or already scored, so analyzeRecent(force=false)
+        // skips the gate) won't re-fire it. The always-on per-day provenance line still proves sleep was
+        // computed, so a valid capture must NOT read INCOMPLETE just because the deeper trace didn't re-run.
+        val report = buildString {
+            appendLine("dayOwner day=2026-07-09 readId=my-whoop writeActiveId=my-whoop hrRows=27001 provenance=measured")
+            appendLine("sleep day=2026-07-09 totalSleepMin=426 matched=1 source=computed")
+            // NOTE: no `gate run=` in this capture — exactly the #127 report.
+        }
+        val s = ReportCompleteness.statuses(report, active = setOf(TestDomain.SLEEP))
+        assertEquals(ReportCompleteness.Status.PRESENT, s[TestDomain.SLEEP])
+        val section = ReportCompleteness.captureCheckSection(report, active = setOf(TestDomain.SLEEP))
+        assertTrue("a computed-sleep capture must read complete, not INCOMPLETE",
+            section.endsWith("complete: all active traces present"))
+        // #386 mislabel: the parenthetical must name the token that MATCHED (the evidence line), never
+        // the absent killer trace — `present (gate run=)` over an evidence-only match sent a maintainer
+        // hunting for gate lines the report never contained.
+        assertTrue("an evidence-only match must be labelled `via <evidence>`",
+            section.contains("sleep: present (via sleep day=)"))
+    }
+
+    @Test fun matchedTokenPrefersTheKillerTraceOverTheEvidenceLine() {
+        // When BOTH are present the deeper killer trace is the one named — `via` is reserved for the
+        // rescue path, so its appearance always means "the killer trace is genuinely absent".
+        val both = "[sleep] gate run=1 KEPT\nsleep day=2026-07-09 totalSleepMin=426 matched=1 source=computed"
+        assertEquals("gate run=", ReportCompleteness.matchedToken(both, TestDomain.SLEEP))
+        val evidenceOnly = "sleep day=2026-07-09 totalSleepMin=426 matched=1 source=computed"
+        assertEquals("sleep day=", ReportCompleteness.matchedToken(evidenceOnly, TestDomain.SLEEP))
+        assertEquals(null, ReportCompleteness.matchedToken("nothing sleepy here", TestDomain.SLEEP))
+    }
+
+    @Test fun sleepStillMissingWhenNoSleepDiagnosticAtAll() {
+        // The guard still fires when the capture carries NO sleep evidence of any kind (neither the gate
+        // trace nor a per-day provenance line) — a genuinely thin report.
+        val report = "dayOwner day=2026-07-09 readId=x writeActiveId=x hrRows=0 provenance=none"
+        val s = ReportCompleteness.statuses(report, active = setOf(TestDomain.SLEEP))
+        assertEquals(ReportCompleteness.Status.MISSING, s[TestDomain.SLEEP])
+    }
+
     @Test fun captureCheckSectionExactText_complete() {
         val report = "x dayOwner day=D y\nz [sleep] gate run=1 KEPT gate=accepted w"
         val section = ReportCompleteness.captureCheckSection(report, active = setOf(TestDomain.SLEEP))
@@ -83,8 +123,8 @@ class ReportCompletenessParityTest {
         assertEquals(
             "=== Capture check ===\n" +
                 "universal: present (dayOwner day=)\n" +
-                "sleep: MISSING (gate run=)\n" +
-                "connection: MISSING (clockDrift )\n" +
+                "sleep: MISSING (expected gate run=)\n" +
+                "connection: MISSING (expected clockDrift )\n" +
                 "INCOMPLETE: missing sleep, connection",
             section,
         )
@@ -96,7 +136,7 @@ class ReportCompletenessParityTest {
         val section = ReportCompleteness.captureCheckSection("nothing here", active = emptySet())
         assertEquals(
             "=== Capture check ===\n" +
-                "universal: MISSING (dayOwner day=)\n" +
+                "universal: MISSING (expected dayOwner day=)\n" +
                 "complete: all active traces present",
             section,
         )

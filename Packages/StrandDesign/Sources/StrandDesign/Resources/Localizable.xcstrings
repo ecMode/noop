@@ -3,16 +3,40 @@
   "strings": {
     "%lld days ago": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "vor %lld Tagen"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "%lld days ago"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "há %lld dias"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld дн. назад"
           }
         }
       }
     },
     "%lld hours": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld Stunden"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -31,6 +55,18 @@
             "value": "%lld ore"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "%lld horas"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld часов"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -47,56 +83,152 @@
     },
     "%lld minutes": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld Minuten"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "%lld minutes"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "%lld minutos"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld минут"
           }
         }
       }
     },
     "%lld points, mean %@, range %@ to %@": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld Punkte, Mittelwert %@, Bereich %@ bis %@"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "%lld points, mean %@, range %@ to %@"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "%lld pontos, média %@, intervalo de %@ a %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld точек, среднее %@, диапазон от %@ до %@"
           }
         }
       }
     },
     "%lld readings": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld Messwerte"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "%lld readings"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "%lld leituras"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld измерений"
           }
         }
       }
     },
     "%lld workouts": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld Workouts"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "%lld workouts"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "%lld treinos"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld тренировок"
           }
         }
       }
     },
     "%lldd ago": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "vor %lld T"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "%lldd ago"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "há %lldd"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lldд назад"
           }
         }
       }
     },
     "%lldh ago": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "vor %lld Std."
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -115,6 +247,18 @@
             "value": "%lldh fa"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "há %lldh"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lldч назад"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -131,16 +275,40 @@
     },
     "%lldm ago": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "vor %lld Min."
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "%lldm ago"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "há %lldm"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lldм назад"
           }
         }
       }
     },
     "1 hour": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 Stunde"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -159,6 +327,18 @@
             "value": "1 ora"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "1 hora"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 час"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -175,30 +355,84 @@
     },
     "1 minute": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 Minute"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "1 minute"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "1 minuto"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 минута"
           }
         }
       }
     },
     "1 workout": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 Workout"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "1 workout"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "1 treino"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 тренировка"
           }
         }
       }
     },
     "ALL-OUT": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MAXIMAL"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "ALL-OUT"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "MÁXIMO"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "НА ПРЕДЕЛЕ"
           }
         }
       }
@@ -235,6 +469,12 @@
             "value": "Sveglio"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Acordado"
+          }
+        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -257,30 +497,84 @@
     },
     "Classic": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Klassisch"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "Classic"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Clássico"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Классический"
           }
         }
       }
     },
     "DEPLETED": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ERSCHÖPFT"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "DEPLETED"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ESGOTADO"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "РАЗРЯЖЕН"
           }
         }
       }
     },
     "Dark": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dunkel"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "Dark"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Escuro"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Тёмная"
           }
         }
       }
@@ -317,6 +611,12 @@
             "value": "Profondo"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Profundo"
+          }
+        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -339,6 +639,12 @@
     },
     "Default": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Standard"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -357,6 +663,18 @@
             "value": "Predefinito"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Predefinição"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "По умолчанию"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -373,6 +691,12 @@
     },
     "HIGH": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HOCH"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -391,6 +715,18 @@
             "value": "ALTO"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "ALTO"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ВЫСОКИЙ"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -407,16 +743,40 @@
     },
     "LIGHT": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "LEICHT"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "LIGHT"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "LEVE"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ЛЁГКИЙ"
           }
         }
       }
     },
     "LOW": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "NIEDRIG"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -433,6 +793,18 @@
           "stringUnit": {
             "state": "translated",
             "value": "BASSO"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "BAIXO"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "НИЗКИЙ"
           }
         },
         "zh-Hans": {
@@ -481,6 +853,12 @@
             "value": "Leggero"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Leve"
+          }
+        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -503,10 +881,28 @@
     },
     "MODERATE": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MODERAT"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "MODERATE"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "MODERADO"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "УМЕРЕННЫЙ"
           }
         }
       }
@@ -543,6 +939,12 @@
             "value": "Nessun dato"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Sem dados"
+          }
+        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -565,16 +967,40 @@
     },
     "No heart-rate data": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keine Herzfrequenzdaten"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "No heart-rate data"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Sem dados de frequência cardíaca"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Нет данных о пульсе"
           }
         }
       }
     },
     "PEAK": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SPITZE"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -593,6 +1019,18 @@
             "value": "PICCO"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "PICO"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ПИК"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -609,70 +1047,196 @@
     },
     "PRIMED": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "BEREIT"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "PRIMED"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "PREPARADO"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ЗАРЯЖЕН"
           }
         }
       }
     },
     "Recovery calendar, %lld days, average %lld, low %lld, high %lld": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erholungskalender, %lld Tage, Durchschnitt %lld, niedrigster Wert %lld, höchster Wert %lld"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "Recovery calendar, %lld days, average %lld, low %lld, high %lld"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Calendário de recuperação, %lld dias, média %lld, mín %lld, máx %lld"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Календарь восстановления, %lld дней, среднее %lld, минимум %lld, максимум %lld"
           }
         }
       }
     },
     "Recovery calendar, no data": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erholungskalender, keine Daten"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "Recovery calendar, no data"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Calendário de recuperação, sem dados"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Календарь восстановления, нет данных"
           }
         }
       }
     },
     "STRENUOUS": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ANSTRENGEND"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "STRENUOUS"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "EXTENUANTE"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ИНТЕНСИВНЫЙ"
           }
         }
       }
     },
     "Sleep stages, %@": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schlafphasen, %@"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "Sleep stages, %@"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Fases do sono, %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Стадии сна, %@"
           }
         }
       }
     },
     "Sleep stages, no data": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schlafphasen, keine Daten"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "Sleep stages, no data"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Fases do sono, sem dados"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Стадии сна, нет данных"
           }
         }
       }
     },
     "System": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "System"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "System"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Sistema"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Системная"
           }
         }
       }
@@ -709,6 +1273,12 @@
             "value": "Oggi"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Hoje"
+          }
+        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -731,16 +1301,40 @@
     },
     "Trend, %lld points, latest %@, low %@, high %@": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Trend, %lld Punkte, zuletzt %@, niedrigster Wert %@, höchster Wert %@"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "Trend, %lld points, latest %@, low %@, high %@"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Tendência, %lld pontos, mais recente %@, mín %@, máx %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Тренд, %lld точек, последнее %@, минимум %@, максимум %@"
           }
         }
       }
     },
     "Yesterday": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gestern"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -759,6 +1353,18 @@
             "value": "Ieri"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Ontem"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Вчера"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -775,26 +1381,68 @@
     },
     "asleep %@": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ geschlafen"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "asleep %@"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "a dormir %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "во сне %@"
           }
         }
       }
     },
     "average %@ bpm": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "durchschnittlich %@ bpm"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "average %@ bpm"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "média %@ bpm"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "среднее %@ уд/мин"
           }
         }
       }
     },
     "just now": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "gerade eben"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -813,6 +1461,18 @@
             "value": "proprio ora"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "agora mesmo"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "только что"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -829,10 +1489,28 @@
     },
     "range %@ to %@": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bereich %@ bis %@"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "range %@ to %@"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "intervalo de %@ a %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "диапазон от %@ до %@"
           }
         }
       }

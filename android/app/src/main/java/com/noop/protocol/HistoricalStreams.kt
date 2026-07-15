@@ -5,6 +5,7 @@ import com.noop.data.EventEntry
 import com.noop.data.GravityRow
 import com.noop.data.HrRow
 import com.noop.data.PpgHrRow
+import com.noop.data.PpgWaveformRow
 import com.noop.data.RespRow
 import com.noop.data.RrRow
 import com.noop.data.SkinTempRow
@@ -337,6 +338,19 @@ private fun decodeWhoop5Historical(frame: ByteArray): Map<String, Any?>? {
     }
     // @82 a single raw byte adjacent to the flag byte; carried raw, meaning not pinned.
     frame.histU8(82)?.let { out["aux_byte_82"] = it }
+    // ── The @82–119 "optical/tail" span, reverse-engineered over 18,602 real v18 records (a third strap's
+    // overnight R22 stream) + cross-checked on two fixture devices: it is ~85% ZERO PADDING (83–103,
+    // 110–112, 117–119 constant 0x00; @104 a constant 0x01 marker). Only @106 (u16), @108/@109 (a paired
+    // channel) and the @113 float carry data, and none is physiologically ground-truth-named (no
+    // SpO2/respiratory reference), so each is carried RAW. Mirror of Swift decodeWhoop5Historical.
+    // @106 an analog u16 optical/ADC baseline: wanders overnight, reads 0 only off-wrist; raw, not pinned.
+    frame.histU16(106)?.let { out["optical_baseline_106"] = it }
+    // @108/@109 a tightly-coupled PAIR (equal ~24% of records, within ±2 ~80%). Both rise monotonically
+    // with HR/motion and read 128 as a per-CHANNEL invalid sentinel — seen off-wrist AND on worn records
+    // that still carry a valid HR. Amplitude/quality-like; carried raw, NOT named SpO2/perfusion without
+    // on-device ground truth.
+    frame.histU8(108)?.let { out["optical_amp_a"] = it }
+    frame.histU8(109)?.let { out["optical_amp_b"] = it }
     // @113 a float32 (observed range ~ -5.3..0, 0 = unset); purpose unknown, carried raw. EMPIRICAL.
     frame.histF32(113)?.let { if (it.isFinite()) out["unknown_f32_113"] = it }
     // PROVENANCE / lossless-tail note (A10): this decoder maps only the fields above; bytes past @113
@@ -495,10 +509,21 @@ fun extractHistoricalStreams(
     // (unchanged). Kept in lockstep with the Swift extractHistoricalStreams session args.
     sessionOldestUnix: Long? = null,
     sessionNewestUnix: Long? = null,
+    // Opt-in "HR-from-PPG sub-lag interpolation" (Test Centre → Experimental algorithms, default false):
+    // threaded straight into the v26 PPG-HR estimator below. The pure protocol package can't read prefs, so
+    // the app-layer caller (Backfiller / archive replay / capture import) reads PuffinExperiment.ppgHrSubLagInterp
+    // and passes it. Default false = byte-identical to today. Mirrors the Swift extractHistoricalStreams arg.
+    ppgHrSubLagInterp: Boolean = false,
 ): StreamBatch {
     // Count of records dropped by the #547 plausibility gate this batch, surfaced on the returned
     // StreamBatch so the Backfiller can log "bad strap clock" once per session via its existing seam.
     var droppedImplausible = 0
+    // #324: oldest/newest own-timestamp among the dropped records (the poisoned-range epoch span), and the
+    // dropped RTC-state events (RTC_LOST / BOOT / SET_RTC) — the ground truth that the clock reset. Declared
+    // before correctedWall so the local function can capture them (Kotlin: no forward reference to locals).
+    var droppedOldest: Long? = null
+    var droppedNewest: Long? = null
+    val droppedRtcEvents = ArrayList<DroppedRtcEvent>()
 
     // The plausible-timestamp window for this batch (#547): the absolute floor [MIN_PLAUSIBLE_UNIX,
     // wallNow + FUTURE_MARGIN] PLUS, when the strap's GET_DATA_RANGE markers are known AND well-formed
@@ -552,6 +577,10 @@ fun extractHistoricalStreams(
         }
         if (!plausible(candidate)) {
             droppedImplausible++
+            // #324: track the epoch SPAN of the dropped (bad-clock) records — the strap's OWN dated value,
+            // so the Backfiller can log whether the whole poisoned range is future-dated or mixed.
+            droppedOldest = minOf(droppedOldest ?: candidate, candidate)
+            droppedNewest = maxOf(droppedNewest ?: candidate, candidate)
             return null
         }
         return candidate
@@ -569,6 +598,10 @@ fun extractHistoricalStreams(
     val battery = ArrayList<BatteryRow>()
     // v26 PPG samples accumulate across the chunk, then get turned into HR after the loop (#156).
     val ppgSamples = ArrayList<PpgHr.Sample>()
+    // The RAW v26 waveform kept PER RECORD (one row per strap-second) for durable storage (#156
+    // follow-up) — the same (ts, samples) the estimator above consumes, but grouped per second so it
+    // persists as its own `ppgWaveformSample` stream rather than being flattened into the HR buffer.
+    val ppgWaveform = ArrayList<PpgWaveformRow>()
 
     for (frame in rawFrames) {
         // Packet type byte: WHOOP 5/MG's longer puffin envelope puts it at frame[8]; WHOOP 4 at frame[4].
@@ -591,6 +624,10 @@ fun extractHistoricalStreams(
                         val baseTs = correctedWall(rec.unix.toLong() and 0xFFFFFFFFL)
                         if (baseTs != null) {
                             for (v in rec.samples) ppgSamples.add(PpgHr.Sample(ts = baseTs, value = v))
+                            // Persist the raw waveform itself too (#156 follow-up), keyed on the record's
+                            // corrected wall-second. Guard on non-empty so a truncated frame that decoded
+                            // zero samples never banks an empty row (mirrors the Swift `!samples.isEmpty`).
+                            if (rec.samples.isNotEmpty()) ppgWaveform.add(PpgWaveformRow(baseTs, rec.samples))
                         }
                     }
                 }
@@ -664,10 +701,18 @@ fun extractHistoricalStreams(
                 // suppressed, so the offload extractor MUST handle these.
                 val parsed = Framing.parseFrame(frame, family)
                 if (!parsed.ok || parsed.crcOk == false) continue
-                // #547: correctedWall now nullable — an EVENT with an implausible event_timestamp is
-                // skipped via `?: continue` so a bad-clock wrist/charge/battery event can't enter the DB.
-                val ts = (parsed.parsed.intOrNull("event_timestamp")?.toLong())?.let { correctedWall(it) } ?: continue
+                val rawTs = parsed.parsed.intOrNull("event_timestamp")?.toLong() ?: continue
                 val kind = (parsed.parsed["event"] as? String) ?: ""
+                // #547: correctedWall now nullable — an EVENT with an implausible event_timestamp is
+                // skipped so a bad-clock wrist/charge/battery event can't enter the DB.
+                val ts = correctedWall(rawTs)
+                if (ts == null) {
+                    // #324: the #547 gate just dropped this event for an implausible ts. If it's an RTC-STATE
+                    // event (RTC_LOST / BOOT / SET_RTC), that IS the ground truth that the clock reset —
+                    // capture (kind, rawTs) for the strap log before discarding.
+                    if (DroppedRtcEvent.isRtcStateKind(kind)) droppedRtcEvents.add(DroppedRtcEvent(kind, rawTs))
+                    continue
+                }
                 if (kind.startsWith("BATTERY_LEVEL")) appendHistBattery(battery, ts, parsed.parsed)
                 val payload = LinkedHashMap(parsed.parsed)
                 payload.remove("event")
@@ -688,14 +733,19 @@ fun extractHistoricalStreams(
 
     // Derive HR from the accumulated v26 PPG waveform (8 s / 24 Hz autocorrelation, conf>=0.3). Empty
     // unless the strap sent v26 records; falls back gracefully (no rows) on noise (#156).
-    val ppgHr = PpgHr.estimate(ppgSamples).map { PpgHrRow(ts = it.ts, bpm = it.bpm, conf = it.conf) }
+    val ppgHr = PpgHr.estimate(ppgSamples, subLagInterp = ppgHrSubLagInterp)
+        .map { PpgHrRow(ts = it.ts, bpm = it.bpm, conf = it.conf) }
 
     return StreamBatch(
         hr = hr, rr = rr, events = events, battery = battery,
         spo2 = spo2, skinTemp = skinTemp, resp = resp, gravity = gravity, steps = steps,
         sleepState = sleepState,
         ppgHr = ppgHr,
+        ppgWaveform = ppgWaveform,
         droppedImplausibleTs = droppedImplausible,
+        droppedImplausibleOldestTs = droppedOldest,   // #324 poisoned-range epoch span (diag only)
+        droppedImplausibleNewestTs = droppedNewest,
+        droppedRtcEvents = droppedRtcEvents,
     )
 }
 

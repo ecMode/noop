@@ -8,10 +8,12 @@ import androidx.room.Index
  * Room entities mirroring the verified GRDB schema in
  * Packages/WhoopStore/Sources/WhoopStore/Database.swift (+ MetricsCache.swift).
  *
- * Natural keys are preserved EXACTLY so insert dedupe (OnConflictStrategy.IGNORE)
- * behaves identically to the Swift `ON CONFLICT(...) DO NOTHING` upserts:
+ * Natural keys mirror the Swift `ON CONFLICT(...) DO NOTHING` upserts so insert dedupe behaves identically,
+ * with ONE deliberate exception noted inline:
  *   - hrSample        PK (deviceId, ts)
- *   - rrInterval      PK (deviceId, ts, rrMs)
+ *   - rrInterval      PK (deviceId, ts, rrMs, seq)  // v18: `seq` tiebreaks EQUAL same-second beats.
+ *                                                   // Diverges from Swift (still deviceId, ts, rrMs) — see
+ *                                                   // the RrInterval doc + PR; Swift needs the same fix.
  *   - event           PK (deviceId, ts, kind)
  *   - battery         PK (deviceId, ts)
  *   - spo2Sample      PK (deviceId, ts)
@@ -82,12 +84,26 @@ data class HrWindowStats(
     val max: Int?,
 )
 
-/** R-R interval. Swift `rrInterval` (v1). PK (deviceId, ts, rrMs), multiple R-R per ts. */
-@Entity(tableName = "rrInterval", primaryKeys = ["deviceId", "ts", "rrMs"])
+/**
+ * R-R interval. Swift `rrInterval` (v1); PK widened in Room v18 to (deviceId, ts, rrMs, **seq**), adding
+ * `seq` as a tiebreaker for two EQUAL R-R intervals that fall in the same 1-second `ts` bucket. Keying by
+ * value alone (deviceId, ts, rrMs) + `ON CONFLICT DO NOTHING` silently dropped the second of two equal
+ * successive beats in a second, removing a zero-difference pair and biasing RMSSD/HRV **high** — the bias
+ * matters most at rest/sleep, exactly when HRV is scored. `seq` counts equal (ts, rrMs) beats (0, 1, …) so
+ * both survive. DISTINCT intervals keep their own (ts, rrMs) slot exactly as before, so no distinct beat is
+ * ever dropped — including across separate insert batches or the live/historical merge (rrMs stays in the
+ * key). Re-syncing identical records reproduces the same (ts, rrMs, seq), so the insert stays idempotent.
+ *
+ * PARITY NOTE: this intentionally diverges from the Swift `rrInterval` key, which is still
+ * (deviceId, ts, rrMs); the identical value-key drop exists in `WhoopStore` (Database.swift / StreamStore /
+ * Reads) and should get the same widening in a follow-up. See the PR description.
+ */
+@Entity(tableName = "rrInterval", primaryKeys = ["deviceId", "ts", "rrMs", "seq"])
 data class RrInterval(
     val deviceId: String,
     val ts: Long,
     val rrMs: Int,
+    val seq: Int = 0,
     val synced: Int = 0,
 )
 
@@ -230,6 +246,12 @@ data class DailyMetric(
     // by AnalyticsEngine (Keytel active + Harris–Benedict BMR). Null when the day has no scored HR
     // window. NOT cloud/clinical parity, a heart-rate estimate. (#78)
     val activeKcalEst: Double? = null,
+    // WHOOP 4.0 raw SpO2 PPG ADC means over detected sleep (v17 columns, #93). The RAW red/IR optical
+    // channels banked on the v24 historical layout (spo2_red@68 / spo2_ir@70), NOT a calibrated
+    // blood-oxygen % — that needs WHOOP's proprietary curve. Both nullable and on-device only
+    // (imports/cloud never carry them), so old rows + non-4.0 nights stay null.
+    val spo2Red: Int? = null,           // mean raw red PPG ADC during detected sleep
+    val spo2Ir: Int? = null,            // mean raw IR PPG ADC during detected sleep
 )
 
 /**
@@ -455,6 +477,42 @@ data class AppleDaily(
     val walkingHr: Int? = null,
     val weightKg: Double? = null,
 )
+
+/**
+ * The RAW WHOOP 5.0 v26 optical PPG waveform, one record per second (v27 / MIGRATION_18_19, issue #156
+ * follow-up). Swift `ppgWaveformSample` (WhoopStore Database.swift `v27-ppg-waveform` migration). The
+ * strap's 24 Hz buffer was fully decoded but only ever used to derive [PpgHrSample]; the samples
+ * themselves were discarded right after. Persisted here so a future re-analysis (a better HR estimator,
+ * HRV-from-PPG, a waveform viewer) can run over the ORIGINAL samples, not just the derived bpm.
+ *
+ * The 24 raw i16 ADC samples are packed into a compact BLOB (2 bytes/sample, little-endian i16, see
+ * [StreamPersistence.packPpgSamples]/[StreamPersistence.unpackPpgSamples]) instead of 24 scalar rows,
+ * keeping a v26-heavy night to roughly the same order of magnitude as ONE extra per-second stream. The
+ * BLOB format is byte-identical to the Swift GRDB `WhoopStore.packPpgSamples` so a `.noopbak` round-trips.
+ * PK (deviceId, ts) mirrors every other per-second stream; a truncated frame can decode fewer than 24
+ * samples. Fields are declared in the SAME order as the GRDB schema (deviceId, ts, samples) so the
+ * migration's CREATE TABLE column order matches Room's generated shape.
+ */
+@Entity(tableName = "ppgWaveformSample", primaryKeys = ["deviceId", "ts"])
+data class PpgWaveformSampleEntity(
+    val deviceId: String,
+    val ts: Long,
+    val samples: ByteArray,
+) {
+    // ByteArray needs structural equals/hashCode (the generated identity ones break round-trip asserts).
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is PpgWaveformSampleEntity) return false
+        return deviceId == other.deviceId && ts == other.ts && samples.contentEquals(other.samples)
+    }
+
+    override fun hashCode(): Int {
+        var result = deviceId.hashCode()
+        result = 31 * result + ts.hashCode()
+        result = 31 * result + samples.contentHashCode()
+        return result
+    }
+}
 
 /**
  * One Live Session (silent guardian) record (v22 / MIGRATION_15_16). Natural key (deviceId, startTs).

@@ -35,6 +35,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.BatteryStd
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Brightness6
 import androidx.compose.material.icons.filled.Campaign
@@ -45,13 +46,14 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Straighten
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material.icons.filled.Vibration
@@ -64,12 +66,15 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -82,6 +87,7 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -89,10 +95,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.BuildConfig
 import com.noop.analytics.Baselines
 import com.noop.analytics.Zones
+import com.noop.R
 import com.noop.ble.PuffinExperiment
 import com.noop.ble.WhoopModel
 import com.noop.data.DataBackup
@@ -137,9 +147,39 @@ import kotlin.math.roundToInt
  */
 class ProfileStore(private val prefs: SharedPreferences) {
 
-    var age: Int
-        get() = prefs.getInt(KEY_AGE, 30).coerceIn(AGE_MIN, AGE_MAX)
-        set(v) = prefs.edit().putInt(KEY_AGE, v.coerceIn(AGE_MIN, AGE_MAX)).apply()
+    /**
+     * Current age in whole years (#146), DERIVED from [dateOfBirthMillis] so it advances on its own
+     * instead of going stale until the user bumps a number. Read-only; change age via [setAge] (the
+     * +/- stepper) or [dateOfBirthMillis] directly. Every existing reader (Fitness Age / Vitality /
+     * Tanaka) keeps reading `profile.age` unchanged.
+     */
+    val age: Int
+        get() = yearsFromDob(dateOfBirthMillis).coerceIn(AGE_MIN, AGE_MAX)
+
+    /**
+     * Date of birth as epoch millis — the canonical source of truth for [age] (#146). The getter
+     * lazily migrates a pre-#146 stored age (or a restored legacy `age`, see [applyBackup]) into an
+     * anchored DOB the first time it's read, then persists it so the derivation is stable. The setter
+     * mirrors the derived Int age under the legacy [KEY_AGE] so the `.noopbak` backup whitelist keeps
+     * exporting an age with no change to the cross-platform contract.
+     */
+    var dateOfBirthMillis: Long
+        get() {
+            if (prefs.contains(KEY_DOB)) return prefs.getLong(KEY_DOB, 0L)
+            val legacyAge = (if (prefs.contains(KEY_AGE)) prefs.getInt(KEY_AGE, 30) else 30)
+                .coerceIn(AGE_MIN, AGE_MAX)
+            val dob = dobForAge(legacyAge)
+            prefs.edit().putLong(KEY_DOB, dob).putInt(KEY_AGE, legacyAge).apply()
+            return dob
+        }
+        set(v) = prefs.edit()
+            .putLong(KEY_DOB, v)
+            .putInt(KEY_AGE, yearsFromDob(v).coerceIn(AGE_MIN, AGE_MAX))
+            .apply()
+
+    /** Set age by anchoring a date of birth `years` before today (the +/- stepper and backup restore
+     *  both go through here, so age always flows from a DOB). Clamped to [AGE_MIN]..[AGE_MAX]. */
+    fun setAge(years: Int) { dateOfBirthMillis = dobForAge(years.coerceIn(AGE_MIN, AGE_MAX)) }
 
     /** "male" | "female" | "nonbinary" — matches the macOS tag values. */
     var sex: String
@@ -230,7 +270,10 @@ class ProfileStore(private val prefs: SharedPreferences) {
     /** The user-SET profile fields, keyed canonically, for the backup exporter. */
     fun backupSnapshot(): Map<String, Any> {
         val out = LinkedHashMap<String, Any>()
-        if (prefs.contains(KEY_AGE)) out["profile.age"] = age
+        // #146: age is now derived from a DOB; export the current derived Int under the legacy
+        // `profile.age` key (the whitelist carries an Int, not a Date). A never-touched profile
+        // (neither key set) still stays out of the snapshot.
+        if (prefs.contains(KEY_DOB) || prefs.contains(KEY_AGE)) out["profile.age"] = age
         if (prefs.contains(KEY_SEX)) out["profile.sex"] = sex
         if (prefs.contains(KEY_WEIGHT)) out["profile.weightKg"] = weightKg
         if (prefs.contains(KEY_HEIGHT)) out["profile.heightCm"] = heightCm
@@ -245,7 +288,10 @@ class ProfileStore(private val prefs: SharedPreferences) {
      * through the property setters, so the usual range clamps apply.
      */
     fun applyBackup(values: Map<String, Any>) {
-        (values["profile.age"] as? Number)?.let { age = it.toInt() }
+        // #146: a restore carries only an Int age. Route it through setAge so the restored age
+        // re-anchors this device's DOB (clearing any stale local DOB) and then advances on its own —
+        // the deterministic twin of the Apple side clearing `profile.dateOfBirth` on apply.
+        (values["profile.age"] as? Number)?.let { setAge(it.toInt()) }
         (values["profile.sex"] as? String)?.let { sex = it }
         (values["profile.weightKg"] as? Number)?.let { weightKg = it.toDouble() }
         (values["profile.heightCm"] as? Number)?.let { heightCm = it.toDouble() }
@@ -255,6 +301,10 @@ class ProfileStore(private val prefs: SharedPreferences) {
 
     companion object {
         private const val PREFS = "noop_profile"
+        /** Date of birth as epoch millis — the #146 source of truth for [age]. */
+        private const val KEY_DOB = "date_of_birth"
+        /** Pre-#146 age key, now kept mirrored from the DOB so the `.noopbak` whitelist (Int age)
+         *  keeps round-tripping unchanged. */
         private const val KEY_AGE = "age"
         private const val KEY_SEX = "sex"
         private const val KEY_WEIGHT = "weight_kg"
@@ -292,6 +342,24 @@ class ProfileStore(private val prefs: SharedPreferences) {
             else -> 1.0
         }
 
+        // ── #146 age <-> date-of-birth ──────────────────────────────────────────────────────────
+        /** Whole years between the DOB and today (floor — a birthday not yet reached doesn't count).
+         *  Uses the device's default zone so the rollover matches the user's local calendar. Mirrors
+         *  the Apple `ProfileStore.years(from:to:)`. */
+        fun yearsFromDob(dobMillis: Long): Int {
+            val zone = java.time.ZoneId.systemDefault()
+            val dob = java.time.Instant.ofEpochMilli(dobMillis).atZone(zone).toLocalDate()
+            return java.time.temporal.ChronoUnit.YEARS.between(dob, java.time.LocalDate.now(zone)).toInt()
+        }
+
+        /** A date of birth `age` whole years before today (anchored to today's month/day, so the
+         *  derived age is exactly `age`). Mirrors the Apple `ProfileStore.dateOfBirth(forAge:)`. */
+        fun dobForAge(age: Int): Long {
+            val zone = java.time.ZoneId.systemDefault()
+            return java.time.LocalDate.now(zone).minusYears(age.toLong())
+                .atStartOfDay(zone).toInstant().toEpochMilli()
+        }
+
         /**
          * One increment/decrement of the calibration divisor, snapped to the increment grid and
          * clamped to [STEP_SCALE_MIN]..[STEP_SCALE_MAX]. Decrement uses the increment for the
@@ -312,7 +380,11 @@ class ProfileStore(private val prefs: SharedPreferences) {
 // MARK: - Screen
 
 @Composable
-fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
+fun SettingsScreen(
+    vm: AppViewModel,
+    onOpenTestCentre: () -> Unit = {},
+    onOpenBackupSync: () -> Unit = {},
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val live by vm.live.collectAsStateWithLifecycle()
@@ -374,9 +446,12 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
     var puffinCapture by remember { mutableStateOf(puffinExperiment.isCaptureEnabled) }
     var deepData by remember { mutableStateOf(puffinExperiment.isDeepDataEnabled) }
     var broadcastHr by remember { mutableStateOf(puffinExperiment.broadcastHr) }
-    // Opt-in "Experimental sleep staging (V2)" (off by default). Model-agnostic, so it lives outside the
-    // 5/MG-only card — it works on WHOOP 4 and 5. Re-stages detected nights with SleepStagerV2; V1 default.
+    // "Sleep staging (V2)" — V2 is the DEFAULT for every strap (WHOOP 4 and 5/MG); turn it OFF to fall back
+    // to V1. Model-agnostic, so it lives outside the 5/MG-only card. 4.0 is unvalidated either way (#319/#347).
     var experimentalSleepV2 by remember { mutableStateOf(puffinExperiment.experimentalSleepV2) }
+    // "Motion-aware wake refinement" (#364 follow-up) — OFF by default. Self-gates on observed gravity +
+    // step density, so it is a no-op on a sparse (e.g. WHOOP 4.0) night regardless of this switch.
+    var motionAwareWake by remember { mutableStateOf(puffinExperiment.motionAwareWake) }
 
     // Whether to surface the WHOOP 5/MG-only probes (puffin / R22 / broadcast-HR / frame-capture). Gated
     // so a confident 4.0 owner never sees 5/MG controls that can't touch their strap (#22). The model
@@ -404,8 +479,10 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
     // instead of 24/7. Default OFF so existing users keep the always-on behaviour. Local mirror.
     var continuousHrvOvernight by remember { mutableStateOf(NoopPrefs.continuousHrvOvernight(context)) }
 
-    // "Debug logging" — mirror the strap log to logcat (adb). Default OFF so normal users don't.
-    var debugLogging by remember { mutableStateOf(NoopPrefs.debugLogging(context)) }
+    // #477 Power saving: battery-adaptive strap-sync cadence + optional HRV-capture pause. Local mirrors.
+    var powerSaving by remember { mutableStateOf(NoopPrefs.powerSaving(context)) }
+    var powerSavingBatteryPct by remember { mutableStateOf(NoopPrefs.powerSavingBatteryPct(context)) }
+    var pauseHrvOnPowerSave by remember { mutableStateOf(NoopPrefs.pauseHrvOnPowerSave(context)) }
 
     // --- v5 Health & wellness toggle group. All SharedPreferences-backed (not reactive), so each Switch
     // drives a local mirror that writes straight through to the same keys the v5 engine readers use.
@@ -429,13 +506,6 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
     // BETA feature flag, default ON (`live_sessions_beta`, see LiveSessionPrefs); off hides the entry.
     var liveSessionsBeta by remember { mutableStateOf(LiveSessionPrefs.enabled(context)) }
 
-    // Scheduled debug export (#510) — the daily auto-export toggle + time-of-day. The settings object is
-    // its own SharedPreferences store; SharedPreferences isn't reactive, so the Switch + TimeChip mirror
-    // into local state and write straight through, then (re)schedule via DebugExportScheduler.
-    val debugExportSettings = remember { DebugExportSettings.from(context) }
-    var debugExportEnabled by remember { mutableStateOf(debugExportSettings.enabled) }
-    var debugExportMinutes by remember { mutableStateOf(debugExportSettings.timeMinutes) }
-
     // Imperial/Metric display preference (D#103). Display-only — stored data stays SI. The system drives
     // the profile fields below (imperial entry) too, so it's local state the whole screen reads.
     // `temperatureRaw` is "" (match the system) or a TemperatureUnit raw value. SharedPreferences isn't
@@ -457,9 +527,21 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
     var themeMode by remember { mutableStateOf(AppearancePrefs.mode) }
     // Chart colours (Titanium / Classic) — re-colours gauges + charts; ChartStylePrefs mirrors it live.
     var chartStyle by remember { mutableStateOf(ChartStylePrefs.style) }
+    // Trend charts (Line / Bar) — flips the Trends tab between the gradient line and value-ramp bars.
+    // Display-only; SharedPreferences isn't reactive, so mirror into local state and persist on select.
+    var trendChartStyle by remember { mutableStateOf(UnitPrefs.trendChartStyle(context)) }
+    // HRV window (#141) — whole-night vs deep-sleep (WHOOP-style). NOT display-only: it changes the computed
+    // avgHrv, so a switch clears the analyze watermark to force a re-score + re-baseline on the next pass.
+    var hrvWindow by remember { mutableStateOf(UnitPrefs.hrvWindow(context)) }
     // Day-cycle background (#698) — the time-of-day scene behind Today. Default ON. SharedPreferences
     // isn't reactive, so the Switch mirrors into local state; TodayScreen reads the same pref on entry.
     var showDayCycleBackground by remember { mutableStateOf(NoopPrefs.showDayCycleBackground(context)) }
+    // "Sky behind cards" (opt-in, default OFF) — extend the day-cycle sky behind the whole Today scroll so
+    // Card transparency reveals it under every card. Mirrors into local state; TodayScreen reads on entry.
+    var skyBehindCards by remember { mutableStateOf(NoopPrefs.skyBehindCards(context)) }
+    // Card-surface opacity (0f = clear, 1f = solid), for the "Card transparency" slider. Live-previews via
+    // CardAppearance; saved on release.
+    var cardOpacity by remember { mutableStateOf(NoopPrefs.cardOpacityPercent(context) / 100f) }
 
     // SAF launchers — CreateDocument for export, OpenDocument for import.
     val exportLauncher = rememberLauncherForActivityResult(
@@ -493,7 +575,9 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
         if (uri == null) { backupBusy = false; return@rememberLauncherForActivityResult }
         scope.launch {
             val result = withContext(Dispatchers.IO) {
-                runCatching { WhoopCsvExporter.exportZip(context, uri, vm.repo) }
+                // #458: thread the registry's ACTIVE strap id — the exporter's old "my-whoop" default
+                // exported an empty zip on live-BLE installs (the engine banks under "<strapId>-noop").
+                runCatching { WhoopCsvExporter.exportZip(context, uri, vm.repo, vm.activeStrapId) }
             }
             backupBusy = false
             result.fold(
@@ -558,7 +642,10 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
         // scroll-heavy list with NO hero gauge, so the liquid finish here is just the sky + liquidPress on
         // the tappable rows. Gated on the same day-cycle background pref Today reads, so turning that off
         // returns Settings to the plain dark canvas too.
-        topBackground = if (showDayCycleBackground) { { LiquidScreenSky() } } else null,
+        topBackground = if (showDayCycleBackground) { { LiquidScreenSky(fillHeight = skyBehindCards) } } else null,
+        // Sky-behind-cards fills the viewport so the transparent cards reveal the sky the whole way
+        // down (Today / Trends / Sleep / metric-detail parity - same two prefs, same two behaviours).
+        fullBleedBackground = showDayCycleBackground && skyBehindCards,
     ) {
         // Read the revision counter so every profile write recomposes this subtree
         // (SharedPreferences is not observable; `mutate` bumps `rev` after each write).
@@ -620,11 +707,11 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                     StepperField(
                         value = profile.age.toString(),
                         accessibility = "Age, ${profile.age} years",
-                        // Bound to 13..100 to match iOS — and, since v4, age feeds the Fitness Age + Vitality
-                        // engines which gate on age > 0, an unbounded stepper let an Android user drive age to
-                        // 0/negative and silently switch both cards off with no explanation (code review).
-                        onMinus = { mutate { profile.age = (profile.age - 1).coerceIn(13, 100) } },
-                        onPlus = { mutate { profile.age = (profile.age + 1).coerceIn(13, 100) } },
+                        // #146: age is derived from a stored date of birth, so it advances on its own. The
+                        // stepper re-anchors the DOB via setAge (which clamps to 13..100 — age feeds the
+                        // Fitness Age + Vitality engines that gate on age > 0, so it must never go 0/negative).
+                        onMinus = { mutate { profile.setAge(profile.age - 1) } },
+                        onPlus = { mutate { profile.setAge(profile.age + 1) } },
                     )
                 }
                 RowDivider()
@@ -896,6 +983,8 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                     },
                 )
             }
+            RowDivider()   // #79 parity: the hairline every other section has between FormRows (Android rows
+                           // were already 16dp-spaced, unlike iOS where they touched — this matches both)
             FormRow(label = "Chart colours") {
                 // Titanium = brand gold/amber/blue ramps; Classic = throwback red→green readiness scale
                 // (cool→hot zones, green→red stress). Re-colours every gauge/chart, in both schemes.
@@ -906,6 +995,20 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                     onSelect = { style ->
                         chartStyle = style
                         ChartStylePrefs.set(context, style)
+                    },
+                )
+            }
+            RowDivider()
+            // Trend chart style (line vs bar). Display-only: flips the Trends tab's charts between the
+            // gradient line and value-ramp bars. The plotted data is identical either way.
+            FormRow(label = "Trend charts") {
+                SegmentedPillControl(
+                    items = listOf(TrendChartStyle.LINE, TrendChartStyle.BAR),
+                    selection = trendChartStyle,
+                    label = { if (it == TrendChartStyle.BAR) "Bars" else "Line" },
+                    onSelect = { style ->
+                        trendChartStyle = style
+                        UnitPrefs.setTrendChartStyle(context, style)
                     },
                 )
             }
@@ -942,6 +1045,87 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                         uncheckedThumbColor = Palette.textSecondary,
                         uncheckedTrackColor = Palette.surfaceInset,
                         uncheckedBorderColor = Palette.hairline,
+                    ),
+                )
+            }
+
+            // Sky behind cards (opt-in): extend the day-cycle sky behind the WHOLE Today scroll so the Card
+            // transparency slider reveals it under every card, not just the hero. Off = the sky stays a top
+            // band and lower cards fade toward the flat canvas. Needs the day-cycle background to be on.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Sky behind cards",
+                        style = NoopType.subhead,
+                        color = if (showDayCycleBackground) Palette.textPrimary else Palette.textTertiary,
+                    )
+                    Text(
+                        "Extends the sky behind the whole Today screen, so lowering Card transparency lets it show through every card. Needs the day-cycle background on.",
+                        style = NoopType.footnote,
+                        color = Palette.textTertiary,
+                    )
+                }
+                Switch(
+                    enabled = showDayCycleBackground,
+                    checked = skyBehindCards && showDayCycleBackground,
+                    onCheckedChange = {
+                        skyBehindCards = it
+                        NoopPrefs.setSkyBehindCards(context, it)
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Palette.surfaceBase,
+                        checkedTrackColor = Palette.accent,
+                        uncheckedThumbColor = Palette.textSecondary,
+                        uncheckedTrackColor = Palette.surfaceInset,
+                        uncheckedBorderColor = Palette.hairline,
+                    ),
+                )
+            }
+
+            // Card transparency: scale every frosted card's glass toward the background. Live-preview (the
+            // cards on THIS screen update as you drag) via CardAppearance; saved on release. Default solid.
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Text(
+                        "Card transparency",
+                        style = NoopType.subhead,
+                        color = Palette.textPrimary,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        "${((1f - cardOpacity) * 100).toInt()}%",
+                        style = NoopType.number(15f),
+                        color = Palette.accent,
+                    )
+                }
+                Text(
+                    "How see-through the cards (Heart Rate, Key Metrics, Recovery Vitals, …) are. Left = solid, right = clear.",
+                    style = NoopType.footnote,
+                    color = Palette.textTertiary,
+                )
+                Slider(
+                    // The slider shows TRANSPARENCY (0 = solid, 1 = fully clear); we store the OPACITY.
+                    value = 1f - cardOpacity,
+                    onValueChange = { t ->
+                        cardOpacity = 1f - t
+                        CardAppearance.opacity = cardOpacity   // live preview on every card on-screen
+                    },
+                    onValueChangeFinished = {
+                        NoopPrefs.setCardOpacityPercent(context, (cardOpacity * 100).toInt())
+                    },
+                    valueRange = 0f..1f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Palette.accent,
+                        activeTrackColor = Palette.accent,
+                        inactiveTrackColor = Palette.surfaceInset,
                     ),
                 )
             }
@@ -1096,6 +1280,104 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                     )
                 }
 
+                // "Keep NOOP alive overnight" (#386): the battery-optimisation whitelist. Shown ONLY while
+                // background connection is on (meaningless otherwise), so it never adds noise on a
+                // foreground-only setup. `checked` reflects the LIVE system exempt state, so an already-exempt
+                // phone shows it on and is never prompted again. POPUP DISCIPLINE: turning it ON fires exactly
+                // ONE system dialog; the OEM auto-start screen (aggressive vendors only) is a SEPARATE
+                // text-link, never chained onto that dialog, so one tap can't spawn two popups. The whitelist
+                // adds no battery cost of its own — it stops a premature kill; the real cost is the two
+                // toggles below.
+                if (backgroundConnection) {
+                    // Re-read the LIVE exempt state on every ON_RESUME so the toggle flips to on the moment
+                    // the user returns from the system whitelist dialog. Reading it plainly in composition
+                    // wouldn't recompose on resume — it'd show a stale "off", look like it failed, and invite
+                    // a SECOND (duplicate) popup, defeating the popup discipline.
+                    val lifecycleOwner = LocalLifecycleOwner.current
+                    var batteryExempt by remember {
+                        mutableStateOf(com.noop.ble.BackgroundHealth.isBatteryExempt(context))
+                    }
+                    DisposableEffect(lifecycleOwner) {
+                        val obs = LifecycleEventObserver { _, event ->
+                            if (event == Lifecycle.Event.ON_RESUME) {
+                                batteryExempt = com.noop.ble.BackgroundHealth.isBatteryExempt(context)
+                            }
+                        }
+                        lifecycleOwner.lifecycle.addObserver(obs)
+                        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+                    }
+                    val oemAutostart = remember { com.noop.ble.BackgroundHealth.oemAutostartIntent(context) }
+                    // Only NAME the manufacturer as a killer when it actually is one — a Pixel/Samsung
+                    // shouldn't read "especially Google". The whitelist still helps everyone (it also
+                    // exempts from Doze deferral), so the row still shows; only the copy is vendor-aware.
+                    val aggressiveVendor = remember { com.noop.ble.BackgroundHealth.isAggressiveVendor() }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Keep NOOP alive overnight",
+                                style = NoopType.subhead,
+                                color = Palette.textPrimary,
+                            )
+                            Text(
+                                if (batteryExempt) {
+                                    "Allowed — your phone won't stop NOOP's overnight sync to save battery. This " +
+                                        "doesn't use extra battery on its own; it just lets the settings above run reliably."
+                                } else {
+                                    val who = if (aggressiveVendor) "Your phone (${android.os.Build.MANUFACTURER})" else "Some phones"
+                                    "$who can stop background apps to save battery, which can make NOOP miss overnight " +
+                                        "sleep and recovery data. Turn this on to whitelist NOOP. It doesn't use extra " +
+                                        "battery on its own — it only lets the overnight sync you've enabled above actually finish."
+                                },
+                                style = NoopType.footnote,
+                                color = Palette.textTertiary,
+                            )
+                            // Aggressive-OEM only, and only while not yet exempt: a SEPARATE, explicit link to
+                            // the vendor's auto-start screen (which the generic whitelist can't reach). One
+                            // extra tap by choice — never auto-opened alongside the whitelist dialog.
+                            if (!batteryExempt && oemAutostart != null) {
+                                Text(
+                                    "Some phones also need auto-start enabled — open that screen",
+                                    style = NoopType.footnote,
+                                    color = Palette.accent,
+                                    modifier = Modifier
+                                        .padding(top = 6.dp)
+                                        .clickable { runCatching { context.startActivity(oemAutostart) } },
+                                )
+                            }
+                        }
+                        Switch(
+                            checked = batteryExempt,
+                            // A system grant can't be toggled OFF from here (that's a system action): a tap
+                            // only ever REQUESTS it, and when already exempt the switch is inert (no re-prompt).
+                            onCheckedChange = { wantOn ->
+                                if (wantOn && !batteryExempt) {
+                                    // The whole feature exists for ROMs that strip things — so the fallback
+                                    // is guarded too: if BOTH the exemption dialog and the app-settings page
+                                    // are missing, no-op rather than crash (the OEM link below is another path).
+                                    runCatching {
+                                        context.startActivity(com.noop.ble.BackgroundHealth.batteryExemptionIntent(context))
+                                    }.onFailure {
+                                        runCatching {
+                                            context.startActivity(com.noop.ble.BackgroundHealth.appBatterySettingsIntent(context))
+                                        }
+                                    }
+                                }
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Palette.surfaceBase,
+                                checkedTrackColor = Palette.accent,
+                                uncheckedThumbColor = Palette.textSecondary,
+                                uncheckedTrackColor = Palette.surfaceInset,
+                                uncheckedBorderColor = Palette.hairline,
+                            ),
+                        )
+                    }
+                }
+
                 // Continuous HRV capture: keep the dense beat-to-beat (R-R) stream armed even with no Live
                 // screen open, so the strap banks far more data overnight for better HRV/recovery/sleep.
                 // Honest battery framing — continuous HR streaming uses more battery. Needs background
@@ -1149,7 +1431,9 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                                 color = Palette.textPrimary,
                             )
                             Text(
-                                "Runs the stream only during your quiet hours window (22:00 to 07:00 by default), roughly halving the battery cost. Daytime Stress readings will be sparser, since Stress reads this live stream.",
+                                "Runs the continuous HRV stream only during your quiet hours window (22:00–07:00 by default), roughly halving the battery cost. Daytime Stress readings will be sparser. " +
+                                "Note: continuous background HRV capture (including daytime naps) is paused outside this window. " +
+                                "For on-demand daytime HRV readings (including naps), use the \"Take an HRV reading\" button on the Live screen.",
                                 style = NoopType.footnote,
                                 color = Palette.textTertiary,
                             )
@@ -1171,45 +1455,44 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                     }
                 }
 
-                // Diagnostics: "Debug logging" mirrors the strap log to logcat (adb). Default OFF — a
-                // normal user never needs to write the connection log to the system log; the in-app log
-                // (and the "Share strap log" export below) work regardless. Developers flip this on to
-                // watch the connection live over `adb logcat -s WhoopBleClient`.
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            "Debug logging",
-                            style = NoopType.subhead,
-                            color = Palette.textPrimary,
-                        )
-                        Text(
-                            "Also write the strap log to the system log (logcat) for development over adb. Off by default; the in-app log and “Share strap log” below work either way.",
-                            style = NoopType.footnote,
-                            color = Palette.textTertiary,
-                        )
-                    }
-                    Switch(
-                        checked = debugLogging,
-                        onCheckedChange = {
-                            debugLogging = it
-                            vm.setDebugLogging(it)
-                        },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = Palette.surfaceBase,
-                            checkedTrackColor = Palette.accent,
-                            uncheckedThumbColor = Palette.textSecondary,
-                            uncheckedTrackColor = Palette.surfaceInset,
-                            uncheckedBorderColor = Palette.hairline,
-                        ),
-                        modifier = Modifier.semantics {
-                            contentDescription = "Debug logging"
+                // HRV window (#141) — grouped with the other HRV settings (#155). Measure nightly HRV over
+                // the whole night (NOOP's long-standing value) or DEEP sleep only (WHOOP-style, reads lower
+                // and more comparable to WHOOP/Polar). Unlike the Effort scale this CHANGES the number, so a
+                // switch forces a re-score + re-baseline.
+                FormRow(label = "HRV window") {
+                    SegmentedPillControl(
+                        items = listOf(HrvWindow.WHOLE_NIGHT, HrvWindow.DEEP_SLEEP),
+                        selection = hrvWindow,
+                        // #153: "Night" (not "Whole night") so the two-segment pill reads the same as the iOS
+                        // picker and stays short — keeps the label consistent across platforms.
+                        label = { if (it == HrvWindow.DEEP_SLEEP) "Deep sleep" else "Night" },
+                        onSelect = {
+                            hrvWindow = it
+                            UnitPrefs.setHrvWindow(context, it)
+                            // #201: the new window shifts every night's avgHrv, so the HRV baseline must reflect
+                            // it too — but a plain re-score already achieves that. analyzeRecent re-scores the
+                            // recent ~21 nights' avgHrv under the new window AND re-folds the HRV baseline from
+                            // them in the same pass, and the baseline's 14-night-half-life EWMA is dominated by
+                            // that fresh re-scored tail. So DON'T re-anchor the baseline epoch: doing so would
+                            // drop all history and force a multi-night "calibrating" reset for someone who already
+                            // has plenty of nights (that reset reading as "the setting is broken" was #195). Clear
+                            // the analyze watermark so the re-score runs even though the raw HR fingerprint is
+                            // unchanged. A genuine cold-start user (<4 valid nights) still calibrates honestly.
+                            NoopPrefs.setAnalyzeWatermark(context, "")
+                            vm.syncNow()
+                            Toast.makeText(
+                                context,
+                                "Re-scoring your recent nights over the ${if (it == HrvWindow.DEEP_SLEEP) "deep-sleep" else "whole-night"} window. Charge updates as soon as it's done.",
+                                Toast.LENGTH_LONG,
+                            ).show()
                         },
                     )
                 }
+                Text(
+                    "Whole night is NOOP's default measure; Deep sleep pools HRV over slow-wave sleep only, reading lower and matching WHOOP. Switching re-scores your recent nights over the new window and takes effect right away once you have a few nights of data.",
+                    style = NoopType.footnote,
+                    color = Palette.textTertiary,
+                )
 
                 // Diagnostics: export the strap connection log so people can attach it to a bug report.
                 NoopButton(
@@ -1217,7 +1500,7 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                     leadingIcon = Icons.Filled.Upload,
                     kind = NoopButtonKind.Secondary,
                     fullWidth = true,
-                    onClick = { LogExport.shareStrapLog(context, vm.ble.exportLogText()) },
+                    onClick = { scope.launch { LogExport.shareStrapLog(context, vm.ble.exportLogText()) } },
                 )
 
                 // "WHOOP 4.0 vs 5.0/MG — what each can read and why" (FI-2 / #490). Shown to BOTH model
@@ -1259,6 +1542,100 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                         }
                         Text("›", style = NoopType.title2, color = Palette.accent)
                     }
+                }
+            }
+        }
+
+        // #477 Power saving. Two BENIGN battery levers only: the offload-cadence stretch (%-gated) and
+        // the HRV-capture pause (Battery-Saver-gated). The riskier connection-priority idle throttle is
+        // deliberately not surfaced here — it stays dormant pending on-strap validation (#478).
+        SettingsSection(
+            icon = Icons.Filled.BatteryStd,
+            title = stringResource(R.string.power_saving),
+            blurb = stringResource(R.string.power_saving_blurb),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(stringResource(R.string.power_saving_mode), style = NoopType.subhead, color = Palette.textPrimary)
+                    Text(
+                        stringResource(R.string.power_saving_mode_desc),
+                        style = NoopType.footnote,
+                        color = Palette.textTertiary,
+                    )
+                }
+                Switch(
+                    checked = powerSaving,
+                    onCheckedChange = {
+                        powerSaving = it
+                        vm.setPowerSaving(it)
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Palette.surfaceBase,
+                        checkedTrackColor = Palette.accent,
+                        uncheckedThumbColor = Palette.textSecondary,
+                        uncheckedTrackColor = Palette.surfaceInset,
+                        uncheckedBorderColor = Palette.hairline,
+                    ),
+                )
+            }
+            if (powerSaving) {
+                RowDivider()
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(stringResource(R.string.power_saving_kick_in), style = NoopType.subhead, color = Palette.textPrimary)
+                        Text(stringResource(R.string.power_saving_pct, powerSavingBatteryPct), style = NoopType.subhead, color = Palette.accent)
+                    }
+                    Slider(
+                        value = powerSavingBatteryPct.toFloat(),
+                        // 10–30% snapping to 5% steps (10/15/20/25/30). steps = the 3 stops BETWEEN ends.
+                        onValueChange = { powerSavingBatteryPct = it.roundToInt() },
+                        onValueChangeFinished = { vm.setPowerSavingBatteryPct(powerSavingBatteryPct) },
+                        valueRange = 10f..30f,
+                        steps = 3,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Palette.accent,
+                            activeTrackColor = Palette.accent,
+                            inactiveTrackColor = Palette.surfaceInset,
+                        ),
+                    )
+                }
+                RowDivider()
+                // HRV pause: a sub-option of power saving, ON by default when the master is on.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.power_saving_hrv_pause), style = NoopType.subhead, color = Palette.textPrimary)
+                        Text(
+                            stringResource(R.string.power_saving_hrv_pause_desc),
+                            style = NoopType.footnote,
+                            color = Palette.textTertiary,
+                        )
+                    }
+                    Switch(
+                        checked = pauseHrvOnPowerSave,
+                        onCheckedChange = {
+                            pauseHrvOnPowerSave = it
+                            vm.setPauseHrvOnPowerSave(it)
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Palette.surfaceBase,
+                            checkedTrackColor = Palette.accent,
+                            uncheckedThumbColor = Palette.textSecondary,
+                            uncheckedTrackColor = Palette.surfaceInset,
+                            uncheckedBorderColor = Palette.hairline,
+                        ),
+                    )
                 }
             }
         }
@@ -1324,7 +1701,7 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
                     Text(
-                        "Broadcast heart rate (Garmin/ANT)",
+                        "Broadcast strap HR (Garmin/ANT)",
                         style = NoopType.subhead,
                         color = Palette.textPrimary,
                         modifier = Modifier.weight(1f),
@@ -1478,7 +1855,7 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                     leadingIcon = Icons.Filled.IosShare,
                     kind = NoopButtonKind.Secondary,
                     fullWidth = true,
-                    onClick = { LogExport.shareRawAndLog(context, vm.ble.exportLogText(), live.whoop5Detected) },
+                    onClick = { scope.launch { LogExport.shareRawAndLog(context, vm.ble.exportLogText(), live.whoop5Detected) } },
                 )
             }
         }
@@ -1492,14 +1869,15 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
             blurb = "A read-only export of the decoded sensor streams NOOP already stores. Works on any strap. Nothing is written to your device, and nothing is uploaded.",
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                // --- Experimental sleep staging (V2) — opt-in, default OFF, every model. (V7 Pillar 3b) ---
+                // --- Sleep staging (V2) — the DEFAULT engine after the 44-subject benchmark; toggle off to
+                //     fall back to V1. Every model. (V7 Pillar 3b) ---
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
                     Text(
-                        "Experimental sleep staging (V2)",
+                        "Sleep staging (V2)",
                         style = NoopType.subhead,
                         color = Palette.textPrimary,
                         modifier = Modifier.weight(1f),
@@ -1518,15 +1896,56 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                             uncheckedBorderColor = Palette.hairline,
                         ),
                         modifier = Modifier.semantics {
-                            contentDescription = "Experimental sleep staging V2"
+                            contentDescription = "Sleep staging V2"
                         },
                     )
                 }
                 Text(
-                    "A transparent cardiorespiratory recipe that recovers deep and REM better than the " +
-                        "default staging. Opt-in and experimental: it only changes how already-detected " +
-                        "nights are split into stages (detection and scores are unchanged), and the default " +
-                        "staging stays in place if you leave this off. Takes effect on the next nights staged.",
+                    "A transparent cardiorespiratory recipe that recovers deep and REM better than the older " +
+                        "V1 staging, and is now the default. It only changes how already-detected nights are " +
+                        "split into stages (detection and scores are unchanged); turn it off to fall back to " +
+                        "V1. Takes effect on the next nights staged.",
+                    style = NoopType.caption,
+                    color = Palette.textTertiary,
+                )
+
+                // --- Motion-aware wake refinement (#364 follow-up) — OFF by default. ---
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Text(
+                        "Motion-aware wake refinement",
+                        style = NoopType.subhead,
+                        color = Palette.textPrimary,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(
+                        checked = motionAwareWake,
+                        onCheckedChange = {
+                            motionAwareWake = it
+                            puffinExperiment.motionAwareWake = it
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Palette.surfaceBase,
+                            checkedTrackColor = Palette.accent,
+                            uncheckedThumbColor = Palette.textSecondary,
+                            uncheckedTrackColor = Palette.surfaceInset,
+                            uncheckedBorderColor = Palette.hairline,
+                        ),
+                        modifier = Modifier.semantics {
+                            contentDescription = "Motion-aware wake refinement"
+                        },
+                    )
+                }
+                Text(
+                    "Reviews each scored wake block for real evidence of getting up (walking cadence, a " +
+                        "change in body position) instead of just a heart-rate rise. A wake block with no " +
+                        "locomotion and a stable posture -- a hot night, a brief turn-over -- is folded back " +
+                        "into light sleep; a real get-up is left alone. Self-checks how much motion detail " +
+                        "your strap actually recorded and stays off on a night that's too sparse to trust " +
+                        "(older WHOOP 4.0 firmware, mainly). Off by default; takes effect on the next nights staged.",
                     style = NoopType.caption,
                     color = Palette.textTertiary,
                 )
@@ -1564,105 +1983,6 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                     "Feel the current time as a sequence of buzzes (#460). Does nothing unless your strap is connected.",
                     style = NoopType.caption,
                     color = Palette.textTertiary,
-                )
-            }
-        }
-
-        // --- Scheduled debug export (#510, maddognik) --- a daily, no-UI drop of the timestamped strap
-        // log (+ raw .bin when a 5/MG capture exists) into the app's export folder at a time you choose, so
-        // an intermittent overnight fault leaves a dated log waiting instead of needing a manual share. The
-        // feature core lives in DebugExportScheduler/DebugExportSettings; this is just the controls. OFF by
-        // default. SharedPreferences isn't reactive, so the Switch + time mirror into local state.
-        SettingsSection(
-            icon = Icons.Filled.Storage,
-            title = "Scheduled debug export (#510)",
-            blurb = "Once a day at a time you choose, NOOP writes a timestamped strap log (plus the raw 5/MG capture, if you have one) to its export folder. No sharing, nothing leaves the phone. Useful for chasing an intermittent overnight fault. Off by default.",
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            "Daily auto-export",
-                            style = NoopType.subhead,
-                            color = Palette.textPrimary,
-                        )
-                        Text(
-                            "Writes a timestamped strap log (and the raw .bin if a 5/MG capture exists) to the app's export folder once a day at the time below.",
-                            style = NoopType.footnote,
-                            color = Palette.textTertiary,
-                        )
-                    }
-                    Switch(
-                        checked = debugExportEnabled,
-                        onCheckedChange = {
-                            debugExportEnabled = it
-                            debugExportSettings.enabled = it
-                            DebugExportScheduler.reschedule(context)
-                        },
-                        colors = SwitchDefaults.colors(
-                            checkedThumbColor = Palette.surfaceBase,
-                            checkedTrackColor = Palette.accent,
-                            uncheckedThumbColor = Palette.textSecondary,
-                            uncheckedTrackColor = Palette.surfaceInset,
-                            uncheckedBorderColor = Palette.hairline,
-                        ),
-                        modifier = Modifier.semantics {
-                            contentDescription = "Daily auto-export"
-                        },
-                    )
-                }
-
-                if (debugExportEnabled) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Export time", style = NoopType.subhead, color = Palette.textPrimary)
-                            Text(
-                                "The daily export runs at this time.",
-                                style = NoopType.footnote,
-                                color = Palette.textTertiary,
-                            )
-                        }
-                        TimeChip(
-                            minutes = debugExportMinutes,
-                            accessibilityLabel = "Daily export time",
-                            onPicked = {
-                                debugExportMinutes = it
-                                debugExportSettings.timeMinutes = it
-                                DebugExportScheduler.applyTimeChange(context)
-                            },
-                        )
-                    }
-                }
-
-                // "Export now" writes the dated file immediately (off the main thread, like the CSV export
-                // above) and confirms with a Toast naming the folder, so the user sees the feature work
-                // without waiting for the scheduled run.
-                NoopButton(
-                    text = "Export now",
-                    leadingIcon = Icons.Filled.SaveAlt,
-                    kind = NoopButtonKind.Secondary,
-                    fullWidth = true,
-                    onClick = {
-                        scope.launch {
-                            val files = withContext(Dispatchers.IO) {
-                                LogExport.writeScheduledExport(context, vm.ble.exportLogText())
-                            }
-                            Toast.makeText(
-                                context,
-                                if (files.isNotEmpty()) "Wrote a dated debug export (${files.size} file${if (files.size == 1) "" else "s"}) to the app's export folder."
-                                else "Couldn't write the debug export.",
-                                Toast.LENGTH_LONG,
-                            ).show()
-                        }
-                    },
                 )
             }
         }
@@ -1967,6 +2287,24 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
             }
         }
 
+        // --- Automatic backups ---
+        // Discoverability signpost: the daily-backup toggle, folder picker and keep-count live on the
+        // separate Backup & Sync screen; surface an entry here, right under the one-off Backup & restore,
+        // since that's where a user looks for "turn on automatic backups".
+        SettingsSection(
+            icon = Icons.Filled.CloudSync,
+            title = "Automatic backups",
+            blurb = "Have NOOP save a dated backup to a folder every day (around 1am) and keep the last several - so if data ever corrupts, restore the newest. Point the folder at Drive/Dropbox for off-device copies. Off until you switch it on.",
+        ) {
+            NoopButton(
+                text = "Set up automatic backups",
+                leadingIcon = Icons.Filled.CloudSync,
+                kind = NoopButtonKind.Primary,
+                fullWidth = true,
+                onClick = onOpenBackupSync,
+            )
+        }
+
         // --- About ---
         SettingsSection(
             icon = Icons.Filled.Info,
@@ -1982,8 +2320,7 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                     StatePill("v${BuildConfig.VERSION_NAME}", tone = StrandTone.Neutral, showsDot = false)
                 }
 
-                // Project home — NOOP's code, releases, issues and wiki live on GitHub
-                // (canonical; noop.fans is kept as a mirror).
+                // Project home — NOOP's code, releases, issues and wiki live on GitHub.
                 val projectHomeInteraction = remember { MutableInteractionSource() }
                 Box(
                     modifier = Modifier
@@ -1996,11 +2333,11 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                             interactionSource = projectHomeInteraction,
                             indication = null,
                         ) {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/NoopApp/noop"))
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/ryanbr/noop"))
                             try {
                                 context.startActivity(intent)
                             } catch (_: ActivityNotFoundException) {
-                                Toast.makeText(context, "github.com/NoopApp/noop", Toast.LENGTH_LONG).show()
+                                Toast.makeText(context, "github.com/ryanbr/noop", Toast.LENGTH_LONG).show()
                             }
                         }
                         .padding(horizontal = 14.dp, vertical = 12.dp)
@@ -2010,40 +2347,6 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                         Text("Project home & source", style = NoopType.body, color = Palette.textPrimary)
                         Text(
                             "GitHub: code, releases, issues and the wiki.",
-                            style = NoopType.caption,
-                            color = Palette.textTertiary,
-                        )
-                    }
-                }
-
-                // Mirror — noop.fans carries every release alongside GitHub, so users have a
-                // fallback if GitHub is ever unreachable (#606). Same downloads, release for release.
-                val mirrorInteraction = remember { MutableInteractionSource() }
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .liquidPress(mirrorInteraction)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Palette.accent.copy(alpha = 0.10f))
-                        .border(1.dp, Palette.accent.copy(alpha = 0.25f), RoundedCornerShape(10.dp))
-                        .clickable(
-                            interactionSource = mirrorInteraction,
-                            indication = null,
-                        ) {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://noop.fans"))
-                            try {
-                                context.startActivity(intent)
-                            } catch (_: ActivityNotFoundException) {
-                                Toast.makeText(context, "noop.fans", Toast.LENGTH_LONG).show()
-                            }
-                        }
-                        .padding(horizontal = 14.dp, vertical = 12.dp)
-                        .semantics { contentDescription = "Mirror at noop.fans, a fallback if GitHub is down" },
-                ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        Text("Mirror: noop.fans", style = NoopType.body, color = Palette.textPrimary)
-                        Text(
-                            "Every release, mirrored. A fallback if GitHub is ever down.",
                             style = NoopType.caption,
                             color = Palette.textTertiary,
                         )
@@ -2253,7 +2556,7 @@ fun SettingsScreen(vm: AppViewModel, onOpenTestCentre: () -> Unit = {}) {
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         Icon(
-                            Icons.Filled.MenuBook,
+                            Icons.AutoMirrored.Filled.MenuBook,
                             contentDescription = null,
                             tint = Palette.accent,
                             modifier = Modifier.size(18.dp),

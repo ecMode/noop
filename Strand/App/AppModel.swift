@@ -275,6 +275,13 @@ final class AppModel: ObservableObject {
             BatteryNotifier.onBatteryUpdate(pct: Int(pct.rounded()),
                                             charging: self.live.charging,
                                             enabled: self.behavior.batteryAlerts)
+            // Predictive runtime alert: the same reading just banked into the SoC buffer, so
+            // batteryEstimate is fresh here. Nil estimate (no readings yet) is a no-op — the 15%
+            // alert above remains the safety net.
+            BatteryNotifier.onRuntimeEstimate(remainingHours: self.live.batteryEstimate?.remainingHours,
+                                              charging: self.live.charging,
+                                              enabled: self.behavior.batteryAlerts
+                                                    && self.behavior.batteryPredictiveAlerts)
         }
         // HR-zone haptic coaching (bond-gated) and spoken zone audio (bond-free) both watch the smoothed bpm.
         $bpm.sink { [weak self] hr in
@@ -283,12 +290,24 @@ final class AppModel: ObservableObject {
         }.store(in: &hrCancellables)
         // Illness/strain early-warning recomputes when the daily history changes.
         repo.$days.sink { [weak self] days in self?.evaluateIllness(days) }.store(in: &hrCancellables)
-        // Re-arm the strap's firmware alarm whenever it (re)bonds. A smart-alarm time changed while the
-        // strap was away never reached it , the send is gated on bond , so the strap kept the OLD time
-        // and fired at it (#59). removeDuplicates() fires once per bond; gated on enabled so a disabled
-        // alarm doesn't disarm on every reconnect.
-        live.$bonded.removeDuplicates().sink { [weak self] bonded in
-            guard let self, bonded, self.behavior.smartAlarmEnabled else { return }
+        // Re-arm the strap's firmware alarm once the connection has SETTLED — not the instant it (re)bonds.
+        // A smart-alarm time changed while the strap was away never reached it , the send is gated on bond
+        // , so the strap kept the OLD time and fired at it (#59).
+        //
+        // #34: keyed off `connectSettled` (a monotonic counter BLEManager bumps once the connect handshake
+        // has both run AND the cmd-notify characteristic has confirmed subscribed — see LiveState.swift /
+        // BLEManager.maybeSignalConnectSettled), NOT off raw `bonded`. `state.bonded` publishes from
+        // INSIDE BLEManager's connect-handshake continuation (the bonding-confirm write's
+        // didWriteValueFor), and Combine delivered to a `$bonded` sink SYNCHRONOUSLY on that same call
+        // stack — arming there nested the alarm's SET_CLOCK/SET_ALARM_TIME/GET_ALARM_TIME burst in the
+        // MIDDLE of the handshake, ahead of its own clock-set and before the cmd-notify channel was
+        // confirmed subscribed. A strap log (#34 v8.6.2) confirmed the result: the alarm's GET_ALARM_TIME
+        // readback got no reply at all — the strap's answer had nowhere confirmed-subscribed to land.
+        // `connectSettled` only bumps once that channel is confirmed live, so the readback (and the arm
+        // itself) always goes out on a link that's actually ready. `dropFirst()` skips the initial
+        // published value (0) at subscribe time, so this doesn't fire on app launch before any connection.
+        live.$connectSettled.dropFirst().sink { [weak self] _ in
+            guard let self, self.behavior.smartAlarmEnabled else { return }
             self.applySmartAlarm()
         }.store(in: &hrCancellables)
         // The firmware alarm is a single absolute instant with no recurrence, and was re-armed ONLY on
@@ -303,6 +322,7 @@ final class AppModel: ObservableObject {
         live.$bonded.removeDuplicates().sink { [weak self] _ in
             guard let self else { return }
             self.ble.setKeepRealtimeForData(PuffinExperiment.keepRealtimeForDataEnabled)
+            self.applyPowerSaving()
         }.store(in: &hrCancellables)
         // A completed backfill has just written strap history. Refresh the dashboard cache,
         // but leave heavyweight analysis to its own guarded/background-friendly path.
@@ -342,6 +362,7 @@ final class AppModel: ObservableObject {
         // reflects it from launch , the reconciler then arms the dense stream as soon as the strap bonds
         // (and the bond sink above re-applies it on every reconnect).
         ble.setKeepRealtimeForData(PuffinExperiment.keepRealtimeForDataEnabled)
+        applyPowerSaving()
 
         // Seed the firmware-alarm intent from launch so the 5/MG post-bond reconciler can re-assert it on
         // the FIRST connect too, not only after a settings change or the bonded sink races char-readiness.
@@ -425,6 +446,18 @@ final class AppModel: ObservableObject {
     }
 
     /// Build the device registry + source coordinator once the store is open, then start observing.
+    /// #477: push the persisted Power-saving prefs to the BLE manager (parity with Android
+    /// `AppViewModel.applyPowerSaving`). Offload-cadence stretch uses the battery-% threshold (0 = off
+    /// when the master is off); the HRV pause is a sub-option, only effective while the master is on.
+    /// The riskier connection-priority idle throttle is intentionally not wired (Android-only, and dormant).
+    func applyPowerSaving() {
+        let on = PuffinExperiment.powerSavingEnabled
+        ble.setLowBatteryOffloadThrottle(on ? PuffinExperiment.powerSavingBatteryPct : 0)
+        // HRV pause is battery-%-aware like the offload lever — pass the same threshold.
+        ble.setPauseCaptureOnPowerSave(on && PuffinExperiment.pauseHrvOnPowerSaveEnabled,
+                                       thresholdPct: PuffinExperiment.powerSavingBatteryPct)
+    }
+
     /// Tiny and guarded: with no generic strap paired the active id is "my-whoop", so the coordinator
     /// observes WHOOP-active and stays a NO-OP , the existing `scan()`/`disconnect()` WHOOP flow is
     /// untouched. The coordinator only acts if/when a non-WHOOP strap becomes the active device.
@@ -917,6 +950,12 @@ final class AppModel: ObservableObject {
         ble.connect(model: chosen)
     }
     func disconnect() { ble.disconnect() }
+    /// Restart the connected strap (user-initiated, confirmation-gated in DevicesView). Non-destructive —
+    /// the strap keeps its data and re-advertises after boot; NOOP auto-reconnects. See BLEManager.rebootStrap().
+    func rebootStrap() { ble.rebootStrap() }
+    /// Send one WHOOP 4.0 reboot-probe candidate (Test Centre → Connection, 4.0 only). Confirmation-gated
+    /// in DevicesView; finds the real 4.0 reboot frame when the production one is ignored (#235).
+    func rebootProbe(_ variant: RebootProbeVariant) { ble.rebootProbe(variant) }
 
     /// Drop the current strap and clear bond state so a newly-picked strap model connects fresh
     /// (lets a user with both a WHOOP 4 and a 5/MG switch between them).
@@ -1179,15 +1218,15 @@ final class AppModel: ObservableObject {
     /// HONEST: this is NOT a guaranteed loud alarm. A sideloaded build has no critical-alert entitlement,
     /// so iOS Focus / silent mode can still suppress the sound. The UI copy says to keep a real backup.
     ///
-    /// Gated on the wrist-alerts master (the same switch `postWristAlert` honours) and on the OS already
-    /// having authorized notifications (no second prompt). Always removes the prior set first, so a re-arm
-    /// replaces rather than stacks. `weekdays` empty = every day (single daily trigger); a non-empty set
-    /// fans out to one weekday-pinned trigger per selected day. No-op on macOS.
-    /// `log` (optional): strap-log sink for the two guard bails below (#401 close-out). The bails were
-    /// silent no-ops, so a user whose backup never fired (wrist-alerts master off, or notification
-    /// permission revoked after arming) had NOTHING in the log to explain the missed backup. The caller
-    /// wraps the sink in a main-actor hop (the auth check completes off-main). Diagnostic only - both
-    /// guards bail exactly as before.
+    /// Gated on the ALARM being enabled (its sole caller `applySmartAlarm()` already enforces that) plus
+    /// notification permission — NOT the wrist-alerts master (#34): a wake backup must not depend on the
+    /// unrelated HR/strain-alerts switch. When permission is undetermined the user is prompted here (they
+    /// just enabled the alarm) and scheduled on grant, so the FIRST night is covered. Always removes the
+    /// prior set first, so a re-arm replaces rather than stacks. `weekdays` empty = every day (single daily
+    /// trigger); a non-empty set fans out to one weekday-pinned trigger per selected day. No-op on macOS.
+    /// `log` (optional): strap-log sink for the not-authorized bail (#401 close-out) — a silent no-op left a
+    /// user whose backup never fired with nothing in the log. The caller wraps the sink in a main-actor hop
+    /// (the auth check completes off-main). Diagnostic only.
     static func scheduleSmartAlarmBackupNotification(minutes: Int, weekdays: Set<Int>,
                                                      log: ((String) -> Void)? = nil) {
         #if os(iOS)
@@ -1195,18 +1234,18 @@ final class AppModel: ObservableObject {
         // Always clear BOTH the single and the per-day ids so switching modes (or editing the weekday set)
         // never leaves an orphaned trigger or double-fires.
         center.removePendingNotificationRequests(withIdentifiers: smartAlarmBackupIds)
-        guard UserDefaults.standard.bool(forKey: wristAlertsMasterKey) else {
-            log?("Smart alarm: backup notification NOT scheduled (wrist-alerts master is off)")
-            return
-        }
+        // #34: the backup follows THE ALARM, not the wrist-alerts master. This is only reached from
+        // applySmartAlarm() with the alarm enabled, so the alarm being on IS the correct gate — a user who
+        // sets a smart alarm but never turned on the separate wrist HR/strain alerts must still get a backup
+        // wake. The old `notif.masterEnabled` guard suppressed it for exactly those users, so a strap that
+        // couldn't arm left them with nothing.
         let valid = weekdays.filter { (1...7).contains($0) }
         // A non-empty selection that filters to nothing (only out-of-range numbers) has no day to fire on.
         if !weekdays.isEmpty && valid.isEmpty { return }
-        center.getNotificationSettings { settings in
-            guard settings.authorizationStatus == .authorized else {
-                log?("Smart alarm: backup notification NOT scheduled (notifications not authorized)")
-                return
-            }
+
+        // Build + add the repeating trigger(s). Factored so the already-authorized and the just-granted
+        // paths schedule identically.
+        func addRequests() {
             let content = UNMutableNotificationContent()
             content.title = String(localized: "Smart alarm")
             content.body = String(localized: "Backup wake: your smart alarm time is here.")
@@ -1229,6 +1268,23 @@ final class AppModel: ObservableObject {
                     center.add(UNNotificationRequest(identifier: "\(smartAlarmBackupId)-d\(weekday)",
                                                      content: content, trigger: trigger))
                 }
+            }
+        }
+
+        center.getNotificationSettings { settings in
+            switch settings.authorizationStatus {
+            case .authorized:
+                addRequests()
+            case .notDetermined:
+                // The user just enabled the alarm but was never asked for notification permission (nothing
+                // else prompted — wrist alerts, which used to, may be off). Ask now, then schedule on grant
+                // so the FIRST night is covered rather than only after some later re-arm.
+                center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                    if granted { addRequests() }
+                    else { log?("Smart alarm: backup notification NOT scheduled (notification permission denied)") }
+                }
+            default:
+                log?("Smart alarm: backup notification NOT scheduled (notifications not authorized)")
             }
         }
         #endif

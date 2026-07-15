@@ -190,6 +190,27 @@ public func parseFrame(_ frame: [UInt8], collectFields: Bool = false) -> ParsedF
                        fields: fb.fields, parsed: fb.parsed)
 }
 
+/// #47: the packet type NAME only — NO CRC verify, NO FieldBuilder — for hot-path pre-filters that just
+/// need a frame's TYPE (e.g. "is this an EVENT?") before deciding whether to pay a full `parseFrame`. On a
+/// multi-minute offload of thousands of type-47 records that only ever act on rare EVENT frames, this skips
+/// the redundant decode for the ~99% that aren't. Mirrors `parseFrame`'s family split EXACTLY — the inner
+/// type byte is at [4] on WHOOP4 and [8] on 5/MG, with the same lookup each uses (`schema.typeName` /
+/// `canonicalTypeName`). Returns nil for a frame too short / wrong SOF — which `parseFrame` would also mark
+/// INVALID (never "EVENT") — so a pre-filter guarded on `== "EVENT"` is byte-identical to the full-parse
+/// guard.
+public func frameTypeName(_ frame: [UInt8], family: DeviceFamily) -> String? {
+    guard frame.first == 0xAA else { return nil }
+    let schema = loadSchema()
+    switch family {
+    case .whoop4:
+        guard frame.count >= 8 else { return nil }        // parseFrame's `count < 8` INVALID guard
+        return schema.typeName(Int(frame[4]))
+    case .whoop5:
+        guard frame.count >= 12 else { return nil }       // parseFrameWhoop5's `count < 12` INVALID guard
+        return canonicalTypeName(Int(frame[8]), schema: schema)
+    }
+}
+
 /// Family-aware frame parsing.
 ///
 /// `whoop4` behaves EXACTLY like the no-family `parseFrame(_:)` above (back-compat). `whoop5`
@@ -284,6 +305,8 @@ private func parseFrameWhoop5(_ frame: [UInt8], collectFields: Bool) -> ParsedFr
             decodeWhoop5CommandResponse(frame, fb: fb, schema: schema, payloadEnd: payloadEnd)
         } else if spec!.post == "event" {
             decodeWhoop5Event(frame, fb: fb, schema: schema)
+        } else if spec!.post == "console_logs" {
+            decodeWhoop5ConsoleLogs(frame, fb: fb, payloadEnd: payloadEnd)
         } else if let payloadEnd = payloadEnd, innerStart + 3 < payloadEnd, payloadEnd <= frame.count {
             // Other types: static fields decoded above; the remaining variable body is kept raw —
             // its 4.0 post-hook awaits per-type 5.0 hardware verification before we apply it at +4.
@@ -463,12 +486,38 @@ private func decodeWhoop5Historical(_ frame: [UInt8], fb: FieldBuilder, payloadE
         fb.add(82, 1, "aux_byte_82", "status", value: .int(v),
                note: "raw; observed nonzero only while sleep_state = asleep (meaning not pinned)")
     }
+    // ── The @82–119 "optical/perfusion + tail" span, characterised over 18,602 real v18 records from a
+    // third strap (overnight R22 live stream) + cross-checked on the two fixture devices above. The span
+    // is ~85% ZERO PADDING: bytes 83–103, 110–112 and 117–119 are constant 0x00 on every record, and @104
+    // is a constant 0x01 marker (5/5 fixtures, both devices). Only four groups carry data — @106 (u16),
+    // @108/@109 (a paired channel) and the @113 float — and none is physiologically ground-truth-named
+    // (no SpO2/respiratory reference exists), so each is carried RAW with its observed behaviour, never
+    // mapped to a named metric. This documents the region honestly instead of leaving 38 opaque bytes.
+    if let v = readDType(frame, 106, "u16") {
+        // An analog u16 that wanders across the night with no clean correlate to HR/motion/skin-temp, and
+        // reads 0 only when the strap is off-wrist (HR=0). Optical/ADC-baseline-like; raw, not pinned.
+        fb.add(106, 2, "optical_baseline_106", "optical", value: .int(v),
+               note: "u16 LE analog optical/ADC baseline; wanders overnight, 0 = off-wrist; raw, not pinned")
+    }
+    // @108/@109 are a tightly-coupled PAIR (equal in 23.5% of records, within ±2 in ~80%). Both rise
+    // monotonically with heart rate (mean ~34 at HR 40–49 → ~58 at HR 80–89) and with motion, and both
+    // read 128 as a per-channel INVALID sentinel — observed off-wrist AND on some worn records that still
+    // carry a valid HR (the optical channel can be invalid while HR is derived elsewhere). Amplitude- or
+    // signal-quality-like; carried raw, NOT named SpO2/perfusion without on-device ground truth.
+    if let a = readDType(frame, 108, "u8") {
+        fb.add(108, 1, "optical_amp_a", "optical", value: .int(a),
+               note: "paired optical channel A (≈ optical_amp_b@109); rises with HR/motion; 128 = channel invalid; raw")
+    }
+    if let b = readDType(frame, 109, "u8") {
+        fb.add(109, 1, "optical_amp_b", "optical", value: .int(b),
+               note: "paired optical channel B (see optical_amp_a@108); 128 = channel invalid; raw")
+    }
     if let d = readF32(frame, 113), d.isFinite {
         // A float32 at @113 (observed range ~ -5.3…0, 0 = unset); purpose unknown, carried raw.
         fb.add(113, 4, "unknown_f32_113", "aux", value: .double(d), note: "float32, purpose unknown")
     }
-    // The remaining bytes (optical/perfusion + the unmapped tail) are not ground-truth-mapped; keep them
-    // as one honest raw region.
+    // The bytes NOT annotated above are the constant zero padding (83–103, 105, 110–112, 117–119) and the
+    // @104 = 0x01 marker; keep one honest raw region over the whole span so nothing is silently dropped.
     // PROVENANCE / lossless-tail note (A10): the fields above split into VERIFIED (physiologically
     // cross-checked vs the live 2A37 HR / |gravity|~1g: unix, heart_rate, rr, gravity, skin_temp) and
     // EMPIRICAL / not-pinned (status words, aux bytes, unknown_f32_113). This decoder never truncates
@@ -476,7 +525,7 @@ private func decodeWhoop5Historical(_ frame: [UInt8], fb: FieldBuilder, payloadE
     // undecodable records, the raw-capture batch when that toggle is on), so a future re-decode is
     // lossless. Kept in lockstep with the Android decodeWhoop5Historical provenance note.
     if let payloadEnd = payloadEnd, 82 < payloadEnd, payloadEnd <= frame.count {
-        fb.region(82, payloadEnd, "unmapped (optical/perfusion + tail)", "unknown")
+        fb.region(82, payloadEnd, "optical/tail (mostly zero padding; see @106/@108/@109/@113)", "unknown")
     }
 }
 
@@ -702,6 +751,36 @@ private func decodeWhoop5Event(_ frame: [UInt8], fb: FieldBuilder, schema: Schem
     if let ch = readDType(frame, 30, "u8"), ch <= 1 {
         fb.add(30, 1, "battery_charging", "battery", value: .int(ch & 1))
     }
+}
+
+/// Decode a WHOOP 5.0 CONSOLE_LOGS (type 50) frame — the strap firmware's own plaintext diagnostics
+/// channel. The console is one continuous text stream chunked into fixed-size pieces, so a log line
+/// routinely splits mid-sentence across frames; consumers reassemble by `record_index` order before
+/// reading. Lines look like `19, 146552119: BLE: History burst success. Trim: …` (boot-count,
+/// firmware tick ms, tag, message) and narrate the history sync and the sensor pipeline
+/// ("SENSORS: AFE configuration changed", "SIGPROC: generated a valid SPO2 during sleep") — primary
+/// raw material for the deep-data work (#103).
+///
+/// Record header, verified across 3 257 real frames from two nights (all one shape: 76-byte frame,
+/// chunk_len 52, channel 1): `record_index` u16@9 (monotonic per-chunk counter — the frame's u8 seq
+/// slot is its low byte), `unix` u32@12 + `subsec` u16@16 (batch write time), chunk_len u16@18,
+/// channel u8@20, text bytes @21 up to the CRC32 trailer with NUL padding. The Kotlin twin is
+/// `Framing.decodeConsoleLogsWhoop5` (text key "console"), same offsets.
+private func decodeWhoop5ConsoleLogs(_ frame: [UInt8], fb: FieldBuilder, payloadEnd: Int?) {
+    if let idx = readDType(frame, 9, "u16") {
+        fb.add(9, 2, "record_index", "meta", value: .int(idx), note: "per-chunk counter")
+    }
+    if let unix = readDType(frame, 12, "u32") { fb.add(12, 4, "unix", "time", value: .int(unix)) }
+    if let ss = readDType(frame, 16, "u16") { fb.add(16, 2, "subsec", "time", value: .int(ss)) }
+    guard let payloadEnd = payloadEnd, 21 < payloadEnd, payloadEnd <= frame.count else { return }
+    var textBytes = Array(frame[21..<payloadEnd])
+    while textBytes.last == 0 { textBytes.removeLast() }
+    guard !textBytes.isEmpty else { return }
+    let txt = String(decoding: textBytes, as: UTF8.self)
+    fb.region(21, payloadEnd, "console log text", "text", note: String(txt.prefix(80)))
+    // Same 2 KB cap as the 4.0 console post-hook: a garbled/malicious peer must not pin arbitrary
+    // bytes as a String on the parse path. A real chunk is 51 bytes.
+    fb.parsed["log"] = .string(String(txt.prefix(2048)))
 }
 
 @inline(__always)

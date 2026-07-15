@@ -145,6 +145,10 @@ public final class OuraLiveSource: NSObject, ObservableObject {
 
     /// Logs the FIRST live HR sample of a connection only (never every push); reset on stop/disconnect.
     private var loggedFirstHR = false
+    /// The ring's optical HR needs a beat or two to settle after (re)subscribe, so the very first live-HR
+    /// sample of a session is often an artifact (observed on-device). Drop exactly one, then stream
+    /// normally. Reset on stop/disconnect alongside `loggedFirstHR`.
+    private var droppedFirstLiveHR = false
     /// Logs the FIRST skin-temp sample DECODED THIS SESSION only (never every record); reset on
     /// stop/disconnect. These are last-night values from the history fetch, not live pushes, but we still
     /// only want one log line, not one per sample. Twin of `loggedFirstHR`.
@@ -158,6 +162,28 @@ public final class OuraLiveSource: NSObject, ObservableObject {
     /// ONLY (see the `allowTierB: true` comment at driver construction) - the log is how we collect raw
     /// captures to validate these layouts; nothing here ever persists or scores. Reset on stop/disconnect.
     private var loggedTierBKinds: Set<String> = []
+
+    // MARK: - Activity (0x50 MET) estimate accumulation — INVESTIGATION ONLY
+    // Aggregate the decoded 0x50 MET stream into an honest, clearly-labeled per-day estimate
+    // (OuraActivityEstimator) logged at drain-end, for eyeballing against WHOOP active minutes / Apple
+    // exercise minutes. Tier-B: never persisted, never scored, never a step count. Reset per connection.
+    /// MET samples bucketed by LOCAL calendar day (key `yyyy-MM-dd`, so a bucket matches the WHOOP / Apple
+    /// daily figure being compared), accumulated across the history drain.
+    private var activityMETByDay: [String: [Double]] = [:]
+    /// Cadence self-check state: the previous 0x50 record's UTC and sample count, plus the per-sample
+    /// seconds observed between consecutive records — `(curr.utc - prev.utc) / prev.sampleCount`. The
+    /// median pins the ring's MET epoch directly from the stream, validating `activityEpochSeconds`.
+    private var lastActivityUtc: Int?
+    private var lastActivitySampleCount = 0
+    private var activityCadenceObs: [Double] = []
+    /// Assumed per-sample epoch for the estimate log (the ONE calibration knob; the cadence self-check
+    /// above measures the real value). 60 s = Oura's common 1-minute MET resolution.
+    private let activityEpochSeconds: Double = 60
+    /// Cached local-day formatter (the 0x50 stream is high-volume; avoid building one per record).
+    private static let activityDayFormatter: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; return f   // local time zone by default
+    }()
+
     /// History-fetched events decoded BEFORE a ring-time -> UTC anchor exists this session, held here
     /// (with their own ring timestamp) until the anchor lands (`drainPendingAnchorEvents`), so they get
     /// their real historical time instead of a premature wall-clock guess. The ring's 0x42 time-sync can
@@ -226,10 +252,25 @@ public final class OuraLiveSource: NSObject, ObservableObject {
     // arrive by. Neither temp nor SpO2 is ever pushed live on this hardware; both are banked overnight and
     // retrievable only by asking the ring for its history.
 
-    /// The GetEvents cursor to resume from, loaded from `OuraHistoryCursorStore` on connect and advanced
-    /// as `0x11` summaries arrive. 0 = fetch everything the ring has banked (first-ever connect for this
-    /// ring; OURA_PROTOCOL.md s5.1).
+    /// The GetEvents resume cursor — a CLIENT-managed event-envelope ring-time (open_oura
+    /// `nextEventToSync`), loaded from `OuraHistoryCursorStore` on connect and COMMITTED only when a
+    /// drain completes (from `maxStoredRingTime`). 0 = fetch everything the ring has banked.
+    ///
+    /// #91: the `0x11` response carries NO cursor — only `bytes_left` (a remaining-byte count). NOOP
+    /// previously persisted that byte-count as a "cursor" and compared it across sessions as a clock,
+    /// minting a phantom "ring-time regression" → reset-to-0 → full re-dump on every connect.
     private var historyCursor: UInt32 = 0
+    /// The pure, unit-tested drain + resume-cursor decision core (#291): the stall/deadline guards, the
+    /// stored-ring-time high-water mark, the reboot flag, the cursor-commit and loaded-cursor-sanitize
+    /// decisions, and the plausibility ceiling. OuraLiveSource keeps only the I/O — anchor resolution,
+    /// persistence, logging, and the `historyCursorAdvanced` emit — and delegates every decision here so
+    /// they can't silently regress in a refactor again (they did once: #91 → #291). See OuraHistoryDrainTests.
+    private var drain = OuraHistoryDrain()
+    /// The cursor we resumed FROM at the start of the current fetch — passed into `drain.noteStoredRingTime`
+    /// so a real stored sample OLDER than it flags a genuine ring reboot (clock reset / seek ignored).
+    private var resumeCursorAtFetchStart: UInt32 = 0
+    /// Wall-clock start of the current drain; `drain`'s deadline guard force-stops one running too long.
+    private var drainStartedAt: Date?
     /// Periodic re-fetch while connected, so an overnight-connected session (or one left open after a nap)
     /// picks up freshly-banked sleep data without needing a reconnect. Mirrors BLEManager's ~15 min
     /// periodic WHOOP history-offload floor.
@@ -241,7 +282,12 @@ public final class OuraLiveSource: NSObject, ObservableObject {
     /// both right after reaching `.streaming` and from the periodic timer).
     private func fetchHistoryIfIdle() {
         guard let driver, driver.phase == .streaming else { return }
-        log("Oura: fetching history from cursor \(historyCursor) (\(describeCursor(historyCursor)))")
+        // Arm the per-drain state: where we sought from (reboot detection), the stored-sample high-water
+        // mark the cursor will commit from, and the stall/deadline guards.
+        resumeCursorAtFetchStart = historyCursor
+        drainStartedAt = Date()
+        drain.reset()
+        log("Oura: fetching history from cursor \(historyCursor) (\(describeCursor(historyCursor))) [cursor-fix]")
         advance(.startHistoryFetch(cursor: historyCursor))
     }
 
@@ -258,36 +304,86 @@ public final class OuraLiveSource: NSObject, ObservableObject {
         historyFetchTimer = nil
     }
 
-    /// Handle a `0x11` GetEvents response (OURA_PROTOCOL.md s5.2): persist the advanced cursor (so a LATER
-    /// connection resumes rather than re-fetching everything) and drive the driver's cursor-loop state
-    /// machine, which asks for another ack-fetch while `moreData` or returns to `.streaming` once caught up.
+    /// Handle a `0x11` GetEvents summary (open_oura `EventBatchSummary`): the drain continues while
+    /// `bytes_left > 0` and is complete at `bytes_left == 0`. The response's byte-count is NEVER persisted
+    /// — persisting it and comparing byte-counts across sessions as clocks was the #91 re-dump loop.
     ///
-    /// The ring's terminal "no more data" response (moreData=false, status 0x00) zero-fills the cursor
-    /// field, whereas a mid-fetch response (moreData=true) carries a real advancing nonzero cursor. So the
-    /// cursor is only trusted/persisted while the response is actually carrying new data - persisting the
-    /// terminal zero would reset the cursor to 0 on every fetch and force a full backlog re-fetch forever.
-    ///
-    /// A cursor persisted from one BLE connection can come back SMALLER on the next connection's first real
-    /// cursor: `ringTimestamp = (session << 16) | counter` (OURA_PROTOCOL.md s2.3), and the ring's internal
-    /// `session` component can shift across reconnects/restarts. This is the same class of problem s5.5
-    /// documents for the UTC anchor (ring-start with rt regression -> invalidate anchor). Resuming from a
-    /// cursor whose session no longer matches the ring's current one is not a real resume - the ring just
-    /// re-dumps its whole backlog anyway - so we detect the regression and reset to an honest, explicit 0
-    /// rather than feed the ring a now-meaningless reference.
-    private func handleHistorySummary(_ summary: (cursor: UInt32, moreData: Bool)) {
-        if summary.moreData {
-            if summary.cursor < historyCursor {
-                log("Oura: ring-time regression detected (fetch cursor \(summary.cursor) [\(describeCursor(summary.cursor))] < persisted \(historyCursor) [\(describeCursor(historyCursor))]) - the ring's session likely reset; resetting our cursor to 0")
-                historyCursor = 0
-                OuraHistoryCursorStore.save(0, deviceId: deviceId)
-            } else {
-                historyCursor = summary.cursor
-                OuraHistoryCursorStore.save(summary.cursor, deviceId: deviceId)
-            }
-        } else {
-            log("Oura: history fetch caught up (cursor \(historyCursor) [\(describeCursor(historyCursor))])")
+    /// The durable resume point (open_oura `nextEventToSync`) is the newest STORED history sample's
+    /// ring-time (`maxStoredRingTime`), committed here when the drain completes. A genuine ring reboot is
+    /// caught by `sawPreResumeData` — a stored sample OLDER than where we sought means the ring's clock
+    /// reset (or it ignored the seek), so next connect does a full pull rather than resume from a
+    /// now-stale ring-time. Stall/deadline guards are backstops only; they force-stop the drain but keep
+    /// whatever forward progress was banked (never reset to 0 — that re-arms the loop).
+    private func handleHistorySummary(_ summary: (eventsReceived: UInt8, bytesLeft: UInt32, moreData: Bool)) {
+        // Stall + deadline backstops (a healthy drain ends at bytes_left 0, where moreData is false).
+        let elapsed = drainStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+        let continueDrain = drain.onSummary(bytesLeft: summary.bytesLeft, moreData: summary.moreData,
+                                            elapsedSeconds: elapsed)
+        if summary.moreData, !continueDrain {
+            let reason = elapsed > OuraHistoryDrain.maxDrainSeconds
+                ? "exceeded \(Int(OuraHistoryDrain.maxDrainSeconds))s deadline"
+                : "bytes_left stalled"
+            log("Oura: history drain force-stopped - \(reason) at bytes_left \(summary.bytesLeft) (guard)")
         }
-        advance(.historyCursorAdvanced(cursor: summary.cursor, moreData: summary.moreData))
+        if !continueDrain {
+            commitResumeCursor(drainCompleted: !summary.moreData)
+            logActivityEstimateSummary()
+        }
+        // The continuation cursor is the resume point; the ring streams the remainder (maxEvents=0 ack).
+        advance(.historyCursorAdvanced(cursor: historyCursor, moreData: continueDrain))
+    }
+
+    /// Commit the durable resume cursor at drain end. Only a cursor that (a) moved forward, (b) is below
+    /// the plausibility ceiling, and (c) resolves to a real time under the CURRENT anchor is persisted;
+    /// a reboot (`sawPreResumeData`) resets to 0 so next connect does an honest full pull.
+    private func commitResumeCursor(drainCompleted: Bool) {
+        let how = drainCompleted ? "caught up (bytes_left 0)" : "stopped early"
+        let resolves = drain.maxStoredRingTime > 0
+            && (driver?.unixSeconds(forRingTimestamp: drain.maxStoredRingTime) != nil)
+        let newCursor = drain.resumeCursorAtDrainEnd(currentCursor: historyCursor, resolvesUnderAnchor: resolves)
+        if drain.sawPreResumeData {
+            log("Oura: history \(how) but the ring served data older than cursor \(resumeCursorAtFetchStart) - clock reset/seek ignored; next connect does a full pull")
+            historyCursor = 0
+            OuraHistoryCursorStore.save(0, deviceId: deviceId)
+        } else if newCursor != historyCursor {
+            historyCursor = newCursor
+            OuraHistoryCursorStore.save(newCursor, deviceId: deviceId)
+            log("Oura: history \(how) - resume cursor advanced to \(historyCursor) [\(describeCursor(historyCursor))]")
+        } else if drain.maxStoredRingTime > historyCursor {
+            log("Oura: history \(how) but resume candidate \(drain.maxStoredRingTime) does not resolve under the current anchor - keeping cursor \(historyCursor)")
+        } else {
+            log("Oura: history \(how) (resume cursor unchanged \(historyCursor) [\(describeCursor(historyCursor))])")
+        }
+    }
+
+    /// Record a STORED history sample's ring-time toward the resume cursor (open_oura `nextEventToSync`).
+    /// Called only where a sample resolved a REAL anchored time and was enqueued — never for a no-anchor
+    /// wall-clock fallback. Also flags a reboot: a real sample older than where we sought this fetch.
+    private func noteStoredHistoryRingTime(_ rt: UInt32) {
+        // A ring-time above the plausibility ceiling is corrupt; letting it set the resume cursor would
+        // seek the next session into nonsense. Bounds the cursor at the source.
+        drain.noteStoredRingTime(rt, resumeCursorAtFetchStart: resumeCursorAtFetchStart)
+    }
+
+    /// Log the per-day MET-derived activity estimate + the empirical cadence cross-check at drain-end.
+    /// INVESTIGATION ONLY (OuraActivityEstimator; weight-free, so no kcal): a clearly-labeled Tier-B
+    /// estimate for eyeballing against WHOOP active minutes / Apple exercise minutes. The cadence line
+    /// reports the ring's real per-sample spacing so `activityEpochSeconds` can be pinned. Never
+    /// persisted, never scored, never a step count.
+    private func logActivityEstimateSummary() {
+        guard !activityMETByDay.isEmpty else { return }
+        if !activityCadenceObs.isEmpty {
+            let sorted = activityCadenceObs.sorted()
+            let median = sorted[sorted.count / 2]
+            log(String(format: "Oura: activity cadence self-check - median %.1fs/sample over %d gaps (assumed %.0fs)",
+                       median, activityCadenceObs.count, activityEpochSeconds))
+        }
+        for day in activityMETByDay.keys.sorted() {
+            let est = OuraActivityEstimator.estimate(metSamples: activityMETByDay[day] ?? [],
+                                                     epochSeconds: activityEpochSeconds)
+            log(String(format: "Oura: activity estimate day=%@ samples=%d meanMET=%.2f maxMET=%.1f metMin=%.1f activeMin=%.1f [assumed %.0fs/sample, Tier-B est]",
+                       day, est.sampleCount, est.meanMET, est.maxMET, est.metMinutes, est.activeMinutes, activityEpochSeconds))
+        }
     }
 
     // MARK: - Sample buffer
@@ -424,10 +520,18 @@ public final class OuraLiveSource: NSObject, ObservableObject {
         driver = nil
         reassembler.reset()
         loggedFirstHR = false
+        droppedFirstLiveHR = false
         loggedFirstTemp = false
         loggedFirstSpo2 = false
         loggedAnchor = false
         loggedTierBKinds.removeAll()
+        activityMETByDay.removeAll()
+        activityCadenceObs.removeAll()
+        lastActivityUtc = nil
+        lastActivitySampleCount = 0
+        drain.reset()
+        resumeCursorAtFetchStart = 0
+        drainStartedAt = nil
         reachedStreaming = false
         pendingInstallKey = nil
         adoptPhase = .idle
@@ -578,8 +682,12 @@ public final class OuraLiveSource: NSObject, ObservableObject {
         guard !pendingAnchorEvents.isEmpty, let driver else { return }
         let now = Int(Date().timeIntervalSince1970)
         for pending in pendingAnchorEvents {
-            let ts = driver.unixSeconds(forRingTimestamp: pending.ringTimestamp) ?? now
-            enqueue([pending.event], ts: ts)
+            if let ts = driver.unixSeconds(forRingTimestamp: pending.ringTimestamp) {
+                enqueue([pending.event], ts: ts)
+                noteStoredHistoryRingTime(pending.ringTimestamp)   // parked sample placed → advance resume cursor
+            } else {
+                enqueue([pending.event], ts: now)   // honest wall-clock fallback; NEVER advances the cursor
+            }
         }
         pendingAnchorEvents.removeAll()
     }
@@ -600,6 +708,13 @@ public final class OuraLiveSource: NSObject, ObservableObject {
             switch e {
             case .hr(let hr):
                 guard hr.bpm >= 30, hr.bpm <= 220 else { continue }   // physiological gate
+                // Drop the first (settling) live-HR sample of the session — it is frequently an artifact.
+                // The value is never shown or persisted; the NEXT sample becomes the first real reading.
+                if !droppedFirstLiveHR {
+                    droppedFirstLiveHR = true
+                    log("Oura: dropping first live HR \(hr.bpm) bpm (settling sample)")
+                    continue
+                }
                 if !loggedFirstHR {
                     loggedFirstHR = true
                     log("Oura: receiving live data - first HR \(hr.bpm) bpm")
@@ -628,6 +743,7 @@ public final class OuraLiveSource: NSObject, ObservableObject {
                 }
                 if let ts = driver.unixSeconds(forRingTimestamp: t.ringTimestamp) {
                     enqueue([e], ts: ts)
+                    noteStoredHistoryRingTime(t.ringTimestamp)
                 } else {
                     pendingAnchorEvents.append((e, t.ringTimestamp))
                 }
@@ -639,6 +755,7 @@ public final class OuraLiveSource: NSObject, ObservableObject {
                 }
                 if let ts = driver.unixSeconds(forRingTimestamp: s.ringTimestamp) {
                     enqueue([e], ts: ts)
+                    noteStoredHistoryRingTime(s.ringTimestamp)
                 } else {
                     pendingAnchorEvents.append((e, s.ringTimestamp))
                 }
@@ -646,6 +763,7 @@ public final class OuraLiveSource: NSObject, ObservableObject {
             case .hrv(let v):
                 if let ts = driver.unixSeconds(forRingTimestamp: v.ringTimestamp) {
                     enqueue([e], ts: ts)
+                    noteStoredHistoryRingTime(v.ringTimestamp)
                 } else {
                     pendingAnchorEvents.append((e, v.ringTimestamp))
                 }
@@ -653,18 +771,36 @@ public final class OuraLiveSource: NSObject, ObservableObject {
             case .sleepPhase(let v):
                 if let ts = driver.unixSeconds(forRingTimestamp: v.ringTimestamp) {
                     enqueue([e], ts: ts)
+                    noteStoredHistoryRingTime(v.ringTimestamp)
                 } else {
                     pendingAnchorEvents.append((e, v.ringTimestamp))
                 }
 
-            case .timeSync:
-                if !loggedAnchor {
-                    loggedAnchor = true
-                    log("Oura: UTC time anchor acquired - history-fetched samples now get their real time")
+            case .timeSync(let ts):
+                // #91: a 0x42 whose epoch is outside the 2020–2035 plausibility window is silently ignored,
+                // so history samples stay unanchored (no sleep/daily). Log the rejection with the offending
+                // epoch; only announce "acquired" when the sync ACTUALLY anchored (the old unconditional
+                // "acquired" line fired even on a rejected sync). `epochMs` holds the raw wire value, which
+                // is unix SECONDS despite the name (s6.11).
+                if OuraDriver.isPlausibleAnchorEpoch(ts.epochMs) {
+                    if !loggedAnchor {
+                        loggedAnchor = true
+                        log("Oura: UTC time anchor acquired - history-fetched samples now get their real time")
+                    }
+                } else {
+                    log("Oura: 0x42 time-sync REJECTED - implausible epoch \(ts.epochMs)s (outside the 2020–2035 anchor window); history samples stay unanchored (#91)")
                 }
                 // The 0x42 time-sync can arrive ANYWHERE in a history-fetch stream, not necessarily first.
                 // Anything parked while unanchored gets its real time retroactively the moment an anchor lands.
                 drainPendingAnchorEvents()
+
+            case .rtcBeacon(let r):
+                // #91: the 0x85 beacon is the SECONDARY anchor (fills the gap only until a 0x42 arrives). A
+                // beacon ignored because a primary anchor already exists is NORMAL and not logged; only an
+                // IMPLAUSIBLE-epoch beacon is a real failure (it can never anchor), so log just that.
+                if !OuraDriver.isPlausibleAnchorEpoch(Int64(r.unixSeconds)) {
+                    log("Oura: 0x85 RTC beacon REJECTED - implausible epoch \(r.unixSeconds)s (outside the 2020–2035 anchor window) (#91)")
+                }
 
             case .tierB(let summary):
                 // INVESTIGATION ONLY (real_steps / activity-summary / sleep-summary / smoothed-SpO2,
@@ -685,10 +821,28 @@ public final class OuraLiveSource: NSObject, ObservableObject {
                 // every time (not once-per-kind): this is the tag under active plausibility evaluation, so
                 // every real capture is evidence. Never persisted, never scored, and NEVER converted into
                 // steps (MET is not a step count; OuraStreamMapping drops .activityInfo unconditionally).
-                log("Oura: activity (Tier-B) state=\(info.state) met=\(info.met)")
+                // Include the record's anchored timestamp so an individual MET burst can be correlated
+                // with what the wearer was doing (walk / swim / …); before the UTC anchor lands it reads
+                // "no anchor yet".
+                let utc = driver.unixSeconds(forRingTimestamp: info.ringTimestamp)
+                let when = utc.map { Self.cursorDateFormatter.string(from: Date(timeIntervalSince1970: TimeInterval($0))) } ?? "no anchor yet"
+                log("Oura: activity (Tier-B) [\(when)] state=\(info.state) met=\(info.met)")
+                // Accumulate the MET series by local day for the drain-end estimate, and observe the
+                // per-sample cadence from consecutive record times (both investigation-only, never scored).
+                if let utc = utc {
+                    let dayKey = Self.activityDayFormatter.string(from: Date(timeIntervalSince1970: Double(utc)))
+                    activityMETByDay[dayKey, default: []].append(contentsOf: info.met)
+                    if let prev = lastActivityUtc, lastActivitySampleCount > 0 {
+                        let perSample = Double(utc - prev) / Double(lastActivitySampleCount)
+                        // Reject off-wrist gaps / out-of-order re-dumps; keep only plausible epoch spacings.
+                        if perSample >= 5, perSample <= 600 { activityCadenceObs.append(perSample) }
+                    }
+                    lastActivityUtc = utc
+                    lastActivitySampleCount = info.met.count
+                }
 
             default:
-                break   // motion / state / rtcBeacon / debugText: not a durable Streams row (see OuraStreamMapping)
+                break   // motion / state / debugText: not a durable Streams row (see OuraStreamMapping)
             }
         }
     }
@@ -834,6 +988,7 @@ extension OuraLiveSource: @preconcurrency CBCentralManagerDelegate {
                             allowKeyInstall: adoptIntent)
         reachedStreaming = false
         loggedFirstHR = false
+        droppedFirstLiveHR = false
         loggedFirstTemp = false
         loggedFirstSpo2 = false
         loggedAnchor = false
@@ -842,9 +997,20 @@ extension OuraLiveSource: @preconcurrency CBCentralManagerDelegate {
         pendingInstallKey = nil
         adoptPhase = .idle
         reassembler.reset()
+        // Per-drain cursor state starts clean each session (fetchHistoryIfIdle re-arms it per drain).
+        drain.reset()
+        resumeCursorAtFetchStart = 0
+        drainStartedAt = nil
         // Resume the GetEvents cursor from where the LAST connection to this ring left off (s5.1/5.3), so
-        // a routine reconnect doesn't re-fetch the ring's entire banked history every time.
-        historyCursor = OuraHistoryCursorStore.read(deviceId: deviceId)
+        // a routine reconnect doesn't re-fetch the ring's entire banked history every time. A persisted
+        // value above the plausibility ceiling is garbage banked by a pre-fix build (a bytes_left count or
+        // a misframe-era ring-time) - seeking to it would starve the fetch; reset to a full pull instead.
+        let loadedCursor = OuraHistoryCursorStore.read(deviceId: deviceId)
+        historyCursor = OuraHistoryDrain.sanitizeLoadedCursor(loadedCursor)
+        if historyCursor != loadedCursor {
+            log("Oura: persisted resume cursor \(loadedCursor) exceeds the plausibility ceiling (pre-fix garbage) - full pull")
+            OuraHistoryCursorStore.save(0, deviceId: deviceId)
+        }
         peripheral.discoverServices([Self.service])
     }
 
@@ -881,10 +1047,15 @@ extension OuraLiveSource: @preconcurrency CBCentralManagerDelegate {
         reassembler.reset()
         writeCharacteristic = nil
         loggedFirstHR = false
+        droppedFirstLiveHR = false
         loggedFirstTemp = false
         loggedFirstSpo2 = false
         loggedAnchor = false
         loggedTierBKinds.removeAll()
+        activityMETByDay.removeAll()
+        activityCadenceObs.removeAll()
+        lastActivityUtc = nil
+        lastActivitySampleCount = 0
         reachedStreaming = false
         pendingInstallKey = nil
         // A disconnect MID-install is an honest failure (no ack came); a disconnect after streaming leaves

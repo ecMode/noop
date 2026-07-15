@@ -1,5 +1,10 @@
 import SwiftUI
 import StrandDesign
+#if os(iOS)
+import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 
 /// Smart alarm (#207) — the iOS/macOS surface.
 ///
@@ -18,6 +23,9 @@ struct SmartAlarmView: View {
     @EnvironmentObject private var behavior: BehaviorStore
 
     @State private var windDownOn = WindDownNudge.isEnabled
+    /// Shown when the user flips the nudge on but notifications are denied at the OS level — the reminder
+    /// can never fire, so we revert the switch and point them to Settings instead of failing silently.
+    @State private var showNotifDeniedAlert = false
     /// Earliest wake time the nudge is derived from (minutes since midnight). Seeded from the store.
     @State private var wakeMinutes = WindDownNudge.wakeMinutes
 
@@ -26,6 +34,11 @@ struct SmartAlarmView: View {
     // behaves exactly as before (one wake time for every evening).
     @State private var perDayOn = WindDownNudge.hasPerDayOverrides
     @State private var overrides: [Int: Int] = WindDownNudge.perDayWakeOverrides
+
+    // #34: consecutive times the strap reported back a DIFFERENT alarm time than we sent (set in
+    // FrameRouter). ≥2 = the strap is persistently refusing the alarm (a corrupted clock/alarm register),
+    // which the strapRejectedCard surfaces with reset guidance. @AppStorage so it updates live.
+    @AppStorage("alarm.rejectStreak") private var alarmRejectStreak = 0
     /// Calendar weekday numbers laid out Monday-first (Mon…Sun → 2,3,4,5,6,7,1), matching AutomationsView.
     private static let weekdayOrder = [2, 3, 4, 5, 6, 7, 1]
 
@@ -37,10 +50,31 @@ struct SmartAlarmView: View {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 windowHero
                 strapAlarmCard
+                strapRejectedCard   // #34: only shows when the strap keeps refusing the alarm
                 honestyCard
                 windDownCard
             }
         }
+        .alert(String(localized: "Notifications are off"), isPresented: $showNotifDeniedAlert) {
+            Button(String(localized: "Open Settings")) { Self.openNotificationSettings() }
+            Button(String(localized: "Not now"), role: .cancel) {}
+        } message: {
+            Text("Turn on notifications for NOOP in Settings to get your wind-down reminder.")
+        }
+    }
+
+    /// Deep-link to the OS notification settings so a user who denied can flip it back on — the system
+    /// permission dialog only appears once, so Settings is the only recovery path.
+    private static func openNotificationSettings() {
+        #if os(iOS)
+        if let url = URL(string: UIApplication.openSettingsURLString) {
+            UIApplication.shared.open(url)
+        }
+        #elseif os(macOS)
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications") {
+            NSWorkspace.shared.open(url)
+        }
+        #endif
     }
 
     // A small Rest-tinted hero — the wind-down readout as a clean time pairing (wind-down → wake)
@@ -83,6 +117,31 @@ struct SmartAlarmView: View {
             Text(time)
                 .font(StrandFont.number(28))
                 .foregroundStyle(tint)
+        }
+    }
+
+    // #34: shown ONLY when the strap has repeatedly reported back a different alarm time than we sent —
+    // i.e. its firmware is refusing the write (a reset/corrupted clock/alarm register). Gated on the alarm
+    // being on and a rejection STREAK (≥2) so a one-off readback quirk never nags. Actionable: a strap
+    // reset via the official app clears it; the phone Clock alarm covers the gap meanwhile.
+    @ViewBuilder private var strapRejectedCard: some View {
+        if behavior.smartAlarmEnabled && alarmRejectStreak >= 2 {
+            StrandCard(padding: 20) {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(StrandPalette.statusWarning)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Your strap isn't accepting the alarm")
+                            .font(StrandFont.headline)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                        Text("The strap keeps reporting a different time than NOOP sends, so its firmware alarm won't fire at your wake time — usually a strap whose clock or alarm has reset. Reset the strap in the official WHOOP app (or fully charge it and reconnect), and keep your phone's Clock alarm as your wake until it takes.")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
         }
     }
 
@@ -222,7 +281,16 @@ struct SmartAlarmView: View {
                     Toggle("", isOn: $windDownOn)
                         .labelsHidden().toggleStyle(.switch).tint(StrandPalette.accent)
                         .accessibilityLabel("Remind me to wind down")
-                        .onChangeCompat(of: windDownOn) { on in WindDownNudge.setEnabled(on) }
+                        .onChangeCompat(of: windDownOn) { on in
+                            WindDownNudge.setEnabled(on) { outcome in
+                                // Denied at the OS level: the reminder can never fire, so reflect reality
+                                // (revert the switch) and surface the path to Settings.
+                                if outcome == .denied {
+                                    windDownOn = false
+                                    showNotifDeniedAlert = true
+                                }
+                            }
+                        }
                 }
                 .frame(minHeight: 42)
 

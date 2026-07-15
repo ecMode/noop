@@ -22,8 +22,8 @@ android {
         applicationId = "com.noop.whoop"
         minSdk = 26
         targetSdk = 34
-        versionCode = 260
-        versionName = "8.2.1"
+        versionCode = 289
+        versionName = "9.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -32,6 +32,15 @@ android {
     }
 
     signingConfigs {
+        getByName("debug") {
+            val forkDebugKeystore = rootProject.file("fork-debug.keystore")
+            if (forkDebugKeystore.exists()) {
+                storeFile = forkDebugKeystore
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
         create("release") {
             if (keystorePropsFile.exists()) {
                 storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
@@ -49,10 +58,11 @@ android {
             versionNameSuffix = "-debug"
         }
         release {
-            // R8 full-mode was stripping classes the app needs at runtime (Compose/Room/Tink
-            // reflective paths), so release builds installed then crashed on launch. This is an
-            // offline app where a ~20 MB APK is fine, so we ship UNMINIFIED for reliability.
-            // Re-enabling minify later requires device-verified keep rules first.
+            // Shipped UNMINIFIED for reliability. R8 minification crashes this app at runtime: full-mode
+            // over-strips reflective paths, and even with full-mode OFF + broad keeps (com.noop.** +
+            // Tink/Worker/ViewModel) a minified build STILL died right after the terms gate on a real
+            // device — a library reflective path we couldn't pin without a device to trace. Offline app,
+            // a ~18 MB APK is fine. Re-enabling minify needs the exact crash trace + device verification.
             isMinifyEnabled = false
             isShrinkResources = false
             proguardFiles(
@@ -65,6 +75,13 @@ android {
                 signingConfigs.getByName("release")
             else
                 signingConfigs.getByName("debug")
+            // Fork staging release: built with -PstagingRelease (the fork testing-build CI only), the
+            // release APK gets its own id/name so it installs BESIDE both the official app and the
+            // .debug staging build. A real release (no property) keeps the true com.noop.whoop id.
+            if (project.hasProperty("stagingRelease")) {
+                applicationIdSuffix = ".staging"
+                versionNameSuffix = "-staging"
+            }
         }
     }
 

@@ -32,6 +32,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -101,6 +102,13 @@ fun CoupledScreen(
         }.getOrDefault(emptyList())
     }
 
+    // The learned habitual midsleep the Sleep tab hero threads into its main-night pick, so the bed-wake
+    // span below resolves the IDENTICAL block (#294) instead of a screen-local heuristic.
+    var habitualMidsleepSec by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(days) {
+        habitualMidsleepSec = runCatching { vm.repo.habitualMidsleepSec("my-whoop") }.getOrNull()
+    }
+
     // Imported export-verbatim sleep figures (sleep_performance / need), preferred over the on-device
     // approximation, mirroring SleepScreen. Keyed on `days` (metricSeries has no Flow).
     var importedPerf by remember { mutableStateOf<Map<String, Double>>(emptyMap()) }
@@ -146,9 +154,12 @@ fun CoupledScreen(
     }
 
     // Recovery cold-start nights (the SAME pure helper Today's ring reads), for the honest calibrating
-    // caption + accessibility copy while the HRV baseline still seeds.
-    val calibrationNights = remember(days, todayRow) {
-        recoveryCalibrationNights(days, hasRecovery = todayRow?.recovery != null)
+    // caption + accessibility copy while the HRV baseline still seeds. Threads the persisted
+    // "Recalibrate HRV baseline" epoch so N folds the SAME epoch-aware history the engine folds (Bug B).
+    val context = LocalContext.current
+    val hrvEpoch = remember { NoopPrefs.of(context).getLong(Baselines.hrvBaselineEpochKey, 0L).toDouble() }
+    val calibrationNights = remember(days, todayRow, hrvEpoch) {
+        recoveryCalibrationNights(days, hasRecovery = todayRow?.recovery != null, hrvBaselineEpoch = hrvEpoch)
     }
 
     // The Charge breakdown (the hero's tap target, the EXISTING Today sheet) + the scoring guide it
@@ -157,6 +168,12 @@ fun CoupledScreen(
     var showChargeBreakdown by remember { mutableStateOf(false) }
     var showGuide by remember { mutableStateOf(false) }
 
+    // Day-cycle sky + sky-behind-cards: the SAME two Appearance gates every other screen honours.
+    // (This screen previously drew the sky unconditionally - it now matches Today/Trends/Sleep,
+    // including turning OFF with the day-cycle setting.) Read once; SharedPreferences isn't reactive.
+    val skyCtx = androidx.compose.ui.platform.LocalContext.current
+    val showDayCycleBackground = remember { NoopPrefs.showDayCycleBackground(skyCtx) }
+    val skyBehindCards = remember { NoopPrefs.skyBehindCards(skyCtx) }
     ScreenScaffold(
         title = "Day",
         subtitle = subtitleToday(),
@@ -166,8 +183,10 @@ fun CoupledScreen(
         // The Android equivalent of the iOS `ScreenScaffold(topBackground: liquidScaffoldSky())`; it replaces
         // the classic flat-canvas backdrop with the liquid day-of-sky (LiquidSkyStatic — no per-frame cost on
         // this scrolling column). The other liquid screens drop in the SAME LiquidScreenSky() slot verbatim.
-        // Coupled has no per-screen day-cycle toggle of its own, so the sky is unconditional here.
-        topBackground = { LiquidScreenSky() },
+        topBackground = if (showDayCycleBackground) { { LiquidScreenSky(fillHeight = skyBehindCards) } } else null,
+        // Sky-behind-cards fills the viewport so the transparent cards reveal the sky the whole way
+        // down (Today / Trends / Sleep / metric-detail parity - same two prefs, same two behaviours).
+        fullBleedBackground = showDayCycleBackground && skyBehindCards,
     ) {
         HeroCard(
             recovery = recovery,
@@ -188,7 +207,7 @@ fun CoupledScreen(
             sleepPerformance = sleepPerformance,
             asleepMin = todayRow?.totalSleepMin,
             needMin = sleepNeedForDay(todayRow, days, importedNeed),
-            bedWakeSpan = bedWakeSpan(sleeps),
+            bedWakeSpan = bedWakeSpan(sleeps, habitualMidsleepSec),
             onOpenSleep = onOpenSleep,
         )
         Text(
@@ -569,12 +588,19 @@ private fun sleepNeedForDay(day: DailyMetric?, days: List<DailyMetric>, imported
     return maxOf(450.0, mean ?: 450.0) // 450 min = 7.5h
 }
 
-/** Last night's bed -> wake span, only when the freshest session touches last night, not a days-old import. */
-private fun bedWakeSpan(sleeps: List<SleepSession>): String? {
+/**
+ * Last night's bed -> wake span, from the day's bridged MAIN-night span ([mainSleepSpan], the SAME
+ * resolver the Sleep tab hero and the daily total use), only when that night actually touches the last
+ * 36h (a days-old import is not "last night"). Was previously this screen's own "freshest-ending
+ * session" pick, which could name a different block -- and so a different span -- than the Sleep tab and
+ * Today's HR graph for a night stored as more than one block (#294).
+ */
+private fun bedWakeSpan(sleeps: List<SleepSession>, habitualMidsleepSec: Long?): String? {
     val windowStart = System.currentTimeMillis() / 1000L - 36 * 3600L // within the last 36h counts as last night
-    val s = sleeps.filter { it.endTs > windowStart }.maxByOrNull { it.endTs } ?: return null
+    val candidates = sleeps.filter { it.endTs > windowStart }
+    val span = mainSleepSpan(candidates, habitualMidsleepSec) ?: return null
     val fmt = SimpleDateFormat("HH:mm", Locale.getDefault())
-    return "${fmt.format(Date(s.effectiveStartTs * 1000L))} - ${fmt.format(Date(s.endTs * 1000L))}"
+    return "${fmt.format(Date(span.first * 1000L))} - ${fmt.format(Date(span.second * 1000L))}"
 }
 
 // MARK: - OPTIMAL strain range (task #43) — pure display-only recovery->strain mapping

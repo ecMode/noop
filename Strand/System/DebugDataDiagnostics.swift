@@ -22,9 +22,9 @@ enum DebugDataDiagnostics {
         lines.append(String(repeating: "─", count: 40))
         lines.append("Strap & data")
         let d = UserDefaults.standard
-        // The persisted value is the WhoopModel rawValue ("WHOOP 5.0 / MG"), NOT a short code — comparing
-        // against "whoop5"/"whoop4" mislabelled every paired strap as "unknown". Compare the rawValues.
         let model: String
+        // selectedWhoopModel persists the WhoopModel rawValue ("WHOOP 5.0 / MG" / "WHOOP 4.0"), NOT a short
+        // code — matching short codes here mislabelled every paired strap "unknown". Compare rawValues.
         switch d.string(forKey: "selectedWhoopModel") {
         case WhoopModel.whoop5mg.rawValue: model = WhoopModel.whoop5mg.rawValue
         case WhoopModel.whoop4.rawValue:   model = WhoopModel.whoop4.rawValue
@@ -34,78 +34,36 @@ enum DebugDataDiagnostics {
         lines.append("Firmware:    \(d.string(forKey: "noop.lastFirmware") ?? "unknown (connect to record)")")
         let syncSec = d.double(forKey: "lastSyncedAt")
         lines.append("Last sync:   \(syncSec > 0 ? relTime(Date().timeIntervalSince1970 - syncSec) : "never")")
+        // #57: write-health. "Last sync" fires even on an empty/failed offload, so distinguish "rows
+        // actually landed" from "an offload STALLED on a persist failure" (history won't persist — usually a
+        // backup restored without an app restart, the closed-store class).
+        let now = Date().timeIntervalSince1970
+        let okAt = d.double(forKey: "sync.lastWriteOkAt")
+        let stalledAt = d.double(forKey: "sync.lastWriteStalledAt")
+        let restoreAt = d.double(forKey: "backup.lastRestoreAt")
+        lines.append("Data write:  \(okAt > 0 ? "rows last landed \(relTime(now - okAt))" : "no rows ever persisted")")
+        if stalledAt > 0, stalledAt >= okAt {
+            lines.append("             ⚠ history NOT persisting — last offload STALLED \(relTime(now - stalledAt)) "
+                + "(if you restored a backup, fully restart the app — #57)")
+        }
+        if restoreAt > 0 { lines.append("Last restore: \(relTime(now - restoreAt))") }
+        #if os(iOS)
+        // #52: iOS Backup & Sync folder-picker health. When users report "won't let me pick a folder",
+        // this pins the failure stage: "cancelled"/"never used" ⇒ the picker's Open button never fired
+        // (an iOS-side picker issue — the in-app "Use NOOP's own folder" fallback sidesteps it);
+        // "picked" + a FAILED flag ⇒ a returned folder failed to bookmark HERE (our bug).
+        let pickEvent = d.string(forKey: "backupPicker.lastEvent") ?? "never used"
+        let pickAt = d.double(forKey: "backupPicker.lastEventAt")
+        lines.append("Folder picker: \(pickEvent)\(pickAt > 0 ? " (\(relTime(now - pickAt)))" : "")")
+        if pickEvent == "picked" {
+            let scoped = d.bool(forKey: "backupPicker.lastScopedOpen")
+            let bmOk = d.bool(forKey: "backupPicker.lastBookmarkOk")
+            lines.append("             scoped-access \(scoped ? "ok" : "FAILED"), bookmark \(bmOk ? "ok" : "FAILED")")
+        }
+        lines.append("Backup mode:  \(FolderBackup.useInternalFolder ? "NOOP's own folder (#52 fallback)" : (FolderBackup.hasFolder ? "external folder" : "none chosen"))")
+        #endif
         lines.append("Timezone:    \(tzLine())")
-        lines += alarmLines()   // self-delimited block; rides both the scheduled + interactive export paths
         return lines
-    }
-
-    /// Alarm triage for the debug export (#34): the configured wake, the model + 5/MG experimental gate,
-    /// strap-clock skew, the last arm's sent-vs-strap-reports (mismatch flag), and last-fired — so a
-    /// "didn't buzz" report is decidable at a glance across the didn't-arm / didn't-stick / didn't-fire
-    /// legs. Reads persisted defaults (written by BLEManager.armStrapAlarm + recordAlarmArm, the FrameRouter
-    /// readback + event-57, and LiveState.setStrapRange). Sync + guarded.
-    static func alarmLines() -> [String] {
-        var lines: [String] = []
-        lines.append(String(repeating: "─", count: 40))
-        lines.append("Alarm")
-        let d = UserDefaults.standard
-        let on = d.bool(forKey: "behavior.smartAlarmEnabled")
-        let mins = (d.object(forKey: "behavior.smartAlarmMinutes") as? Int) ?? 7 * 60
-        lines.append("Enabled: \(on ? "yes" : "no") · set \(String(format: "%02d:%02d", mins / 60, mins % 60))")
-        // Model + the 5/MG experimental gate: a 5/MG firmware alarm is NOT armed unless Experimental is on
-        // (the #1 "5/MG alarm never fires" cause). Compare the stored rawValue, not a short code.
-        if d.string(forKey: "selectedWhoopModel") == WhoopModel.whoop5mg.rawValue {
-            lines.append("Model: \(WhoopModel.whoop5mg.rawValue) · experimental: "
-                + (PuffinExperiment.isEnabled ? "on" : "off → firmware alarm NOT armed"))
-        } else if d.string(forKey: "selectedWhoopModel") == WhoopModel.whoop4.rawValue {
-            lines.append("Model: \(WhoopModel.whoop4.rawValue)")
-        } else {
-            lines.append("Model: unknown (never paired)")
-        }
-        // Strap clock health: a reset/stale (behind) OR future-dated (ahead) RTC breaks the firmware alarm
-        // even when armed, because the strap fires by comparing the absolute wake epoch to its own clock.
-        if let newest = d.object(forKey: "strap.newestRecordTs") as? Int, newest > 0 {
-            let skew = Int(Date().timeIntervalSince1970) - newest
-            if skew > 3 * 86400 {
-                lines.append("Strap clock: \(skew / 86400)d behind wall (reset/stale — alarm unreliable)")
-            } else if skew < -3 * 86400 {
-                lines.append("Strap clock: \(-skew / 86400)d ahead of wall (future-dated — alarm unreliable)")
-            } else {
-                lines.append("Strap clock: OK")
-            }
-        }
-        if let sent = d.object(forKey: "alarm.lastArmSentEpoch") as? Int {
-            var line = "Last arm: sent \(alarmStamp(sent))"
-            if let at = d.object(forKey: "alarm.lastArmAt") as? Double {
-                line += " · \(relTime(Date().timeIntervalSince1970 - at))"
-            }
-            if !d.bool(forKey: "alarm.lastArmConnected") { line += " · strap NOT connected (queued)" }
-            lines.append(line)
-            if let reported = d.object(forKey: "alarm.lastReportedEpoch") as? Int {
-                let mismatch = abs(reported - sent) > 120
-                lines.append("Strap reports: \(alarmStamp(reported))"
-                    + (mismatch ? "  ⚠️ MISMATCH — strap didn't accept the time" : "  ✓ matches"))
-            } else {
-                lines.append("Strap reports: (no readback)")
-            }
-        } else {
-            lines.append("Last arm: never")
-        }
-        // Did the strap actually fire? (STRAP_DRIVEN_ALARM_EXECUTED / event 57) — the leg that confirms the
-        // 5/MG firmware alarm buzzes on its own, still never observed on this fork.
-        if let firedAt = d.object(forKey: "alarm.lastFiredAt") as? Double {
-            lines.append("Last fired: \(relTime(Date().timeIntervalSince1970 - firedAt))")
-        } else {
-            lines.append("Last fired: never observed")
-        }
-        return lines
-    }
-
-    private static func alarmStamp(_ epochSec: Int) -> String {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyy-MM-dd HH:mm"
-        return f.string(from: Date(timeIntervalSince1970: TimeInterval(epochSec)))
     }
 
     /// The full dynamic block: strap state + data spine (preloaded `repo.days`) + the REM/skin-temp funnels
@@ -123,24 +81,39 @@ enum DebugDataDiagnostics {
             lines.append("Last recov.: \(r.day) · \(Int(r.recovery ?? 0))%")
         } else { lines.append("Last recov.: none") }
 
+        // Workout & imported-activity source breakdown (#28/#29 "counted but not shown" class). Runs BEFORE
+        // the funnels since those can early-return, so this always lands in the export.
+        lines += await workoutSourceLines(repo: repo)
+        lines += await dailyDataLines(repo: repo)
+        lines += alarmLines()
+
         // Funnels for the latest night — best-effort, self-reporting.
         lines.append(String(repeating: "─", count: 40))
         lines.append("Analytics funnels (latest night, best-effort)")
         let nowSec = Int(Date().timeIntervalSince1970)
-        guard let cs = await repo.sleepSessions(from: nowSec - 14 * 86400, to: nowSec, limit: 1).last else {
-            lines.append("(no sleep session in the last 14 days to analyze)")
-            return lines
-        }
         guard let store = await repo.storeHandle() else {
             lines.append("(on-device store not open yet)")
             return lines
         }
         let did = repo.deviceId
+        // Pick the MOST RECENT night that actually carries skin-temp — not the OLDEST in the window. The old
+        // `sleepSessions(…, limit: 1).last` returned the oldest session (ASC order), so a fresh gap night read
+        // "skin=0" and the funnel never saw a real night. Walk newest→oldest and stop at the first with skin.
+        let recent = await repo.sleepSessions(from: nowSec - 14 * 86400, to: nowSec, limit: 200)
+        guard let newest = recent.last else {
+            lines.append("(no sleep session in the last 14 days to analyze)")
+            return lines
+        }
+        var cs = newest
+        var skin: [SkinTempSample] = []
+        for s in recent.reversed() {
+            let sk = (try? await store.skinTempSamples(deviceId: did, from: s.startTs, to: s.endTs, limit: 200_000)) ?? []
+            if !sk.isEmpty { cs = s; skin = sk; break }
+        }
         let grav = (try? await store.gravitySamples(deviceId: did, from: cs.startTs, to: cs.endTs, limit: 200_000)) ?? []
         let hr = await repo.hrSamples(from: cs.startTs, to: cs.endTs, limit: 200_000)
         let rr = (try? await store.rrIntervals(deviceId: did, from: cs.startTs, to: cs.endTs, limit: 200_000)) ?? []
         let resp = (try? await store.respSamples(deviceId: did, from: cs.startTs, to: cs.endTs, limit: 200_000)) ?? []
-        let skin = (try? await store.skinTempSamples(deviceId: did, from: cs.startTs, to: cs.endTs, limit: 200_000)) ?? []
         lines.append("Night \(dayStamp(cs.startTs)): grav=\(grav.count) hr=\(hr.count) rr=\(rr.count) resp=\(resp.count) skin=\(skin.count)")
         if grav.isEmpty && hr.isEmpty {
             lines.append("(no raw biometric samples under '\(did)' for this night — expected on a freshly re-added strap; reconnect + let a history sync run, then re-export)")
@@ -154,8 +127,163 @@ enum DebugDataDiagnostics {
         let det = SleepSession(start: cs.startTs, end: cs.endTs, efficiency: cs.efficiency ?? 0,
                                stages: [], restingHR: cs.restingHr, avgHRV: cs.avgHrv)
         let family: DeviceFamily = (UserDefaults.standard.string(forKey: "selectedWhoopModel") == WhoopModel.whoop5mg.rawValue) ? .whoop5 : .whoop4
-        lines.append(AnalyticsEngine.skinTempFunnel([det], hr: hr, skinTemp: skin, family: family).summary)
+        // Mirror the real per-device anchor (#404): learn it from the WHOLE recent window's raws — not just
+        // this night — so a single sparse night (<100 in-band) can't misreport under the global fallback when
+        // the window as a whole has enough in-band samples for analyzeDay to learn a device anchor.
+        let windowSkin = (try? await store.skinTempSamples(deviceId: did, from: nowSec - 14 * 86400, to: nowSec, limit: 200_000)) ?? []
+        let devAnchor = family == .whoop4 ? Whoop4SkinTemp.deviceAnchorRaw(windowSkin.map { $0.raw }) : nil
+        lines.append(AnalyticsEngine.skinTempFunnel([det], hr: hr, skinTemp: skin,
+                                                    family: family, anchorRaw: devAnchor).summary)
         return lines
+    }
+
+    /// Workout & imported-activity source breakdown: the resolved active deviceId + a per-source STORED
+    /// workout count + the most-recent workout, so a "workouts not showing" report reveals WHERE workouts
+    /// live vs what the Workouts screen loads (#28 strap↔my-whoop, #29 activity-file). Best-effort.
+    @MainActor static func workoutSourceLines(repo: Repository) async -> [String] {
+        var lines: [String] = []
+        lines.append(String(repeating: "─", count: 40))
+        lines.append("Workouts by source")
+        let did = repo.deviceId
+        lines.append("Active deviceId: \(did)\(did == "my-whoop" ? "" : "  (imports + spine under my-whoop)")")
+        guard let store = await repo.storeHandle() else {
+            lines.append("(on-device store not open yet)")
+            return lines
+        }
+        let nowSec = Int(Date().timeIntervalSince1970)
+        var seen = Set<String>()
+        let ids = [did, "my-whoop", "\(did)-noop", "my-whoop-noop",
+                   "activity-file", "lifting", "apple-health", "health-connect"].filter { seen.insert($0).inserted }
+        var parts: [String] = []
+        var latestTs = -1
+        var latestDesc = ""
+        for id in ids {
+            let rows = (try? await store.workouts(deviceId: id, from: 0, to: nowSec, limit: 100_000)) ?? []
+            parts.append("\(id)=\(rows.count)")
+            if let m = rows.max(by: { $0.startTs < $1.startTs }), m.startTs > latestTs {
+                latestTs = m.startTs
+                latestDesc = "\(dayStamp(m.startTs)) · \(m.sport) (\(m.source))"
+            }
+        }
+        lines.append("Stored: " + parts.joined(separator: "  "))
+        lines.append(latestTs >= 0 ? "Latest: \(latestDesc)" : "Latest: none")
+        return lines
+    }
+
+    /// Daily-data source breakdown + on-device volume: per-source day counts, which metrics are populated
+    /// over the recent week on the imported spine, and the raw-row footprint — the same source reconciliation
+    /// the workout block gives, for the "no data / no steps / 0% REM" report class. Best-effort.
+    @MainActor static func dailyDataLines(repo: Repository) async -> [String] {
+        var lines: [String] = []
+        lines.append(String(repeating: "─", count: 40))
+        lines.append("Daily data by source")
+        let did = repo.deviceId
+        guard let store = await repo.storeHandle() else {
+            lines.append("(on-device store not open yet)")
+            return lines
+        }
+        var seen = Set<String>()
+        let ids = [did, "my-whoop", "\(did)-noop", "my-whoop-noop",
+                   "apple-health", "health-connect"].filter { seen.insert($0).inserted }
+        var parts: [String] = []
+        var spine: [DailyMetric] = []
+        for id in ids {
+            let rows = (try? await store.dailyMetrics(deviceId: id, from: "0000-01-01", to: "9999-12-31")) ?? []
+            parts.append("\(id)=\(rows.count)")
+            if id == "my-whoop" { spine = rows }
+        }
+        lines.append("Days: " + parts.joined(separator: "  "))
+        let recent = Array(spine.suffix(7))
+        if !recent.isEmpty {
+            let n = recent.count
+            lines.append("Recent \(n)d (my-whoop): "
+                + "sleep=\(recent.filter { ($0.totalSleepMin ?? 0) > 0 }.count)/\(n)  "
+                + "recovery=\(recent.filter { $0.recovery != nil }.count)/\(n)  "
+                + "steps=\(recent.filter { $0.steps != nil }.count)/\(n)  "
+                + "kcal=\(recent.filter { $0.activeKcalEst != nil }.count)/\(n)")
+        } else {
+            lines.append("Recent: no day rows")
+        }
+        if let dv = await repo.dataVolumeSnapshot() {
+            lines.append("Volume: rawRows=\(dv.dbRows)  importedDays=\(dv.importedDays)  workouts=\(dv.workouts)")
+        }
+        return lines
+    }
+
+    /// Alarm state for the debug export: the configured wake + the last arm's sent-vs-strap-reports (#34), so
+    /// a "didn't buzz" report shows at a glance whether the strap accepted the time. Reads persisted defaults
+    /// (written by BLEManager.armStrapAlarm + the FrameRouter readback); sync + guarded.
+    static func alarmLines() -> [String] {
+        var lines: [String] = []
+        lines.append(String(repeating: "─", count: 40))
+        lines.append("Alarm")
+        let d = UserDefaults.standard
+        let on = d.bool(forKey: "behavior.smartAlarmEnabled")
+        let mins = (d.object(forKey: "behavior.smartAlarmMinutes") as? Int) ?? 7 * 60
+        lines.append("Enabled: \(on ? "yes" : "no") · set \(String(format: "%02d:%02d", mins / 60, mins % 60))")
+        // #3: model + the 5/MG experimental gate — a 5/MG firmware alarm is NOT armed unless Experimental is on.
+        // (selectedWhoopModel stores the WhoopModel rawValue — "WHOOP 5.0 / MG" / "WHOOP 4.0" — not "whoop5".)
+        let model = d.string(forKey: "selectedWhoopModel") ?? WhoopModel.whoop4.rawValue
+        if model == WhoopModel.whoop5mg.rawValue {
+            lines.append("Model: \(model) · experimental: \(PuffinExperiment.isEnabled ? "on" : "off → firmware alarm NOT armed")")
+        } else {
+            lines.append("Model: \(model)")
+        }
+        // #4 / #67: strap clock health — a reset/stale OR future-dated clock (the #34 / #928 causes) breaks
+        // the alarm even when armed, AND misdates offloaded sleep: the strap banks last night with its wrong
+        // RTC, so the night lands on the stale date and reads as "missed sleep" on the recent timeline (#67).
+        if let newest = d.object(forKey: "strap.newestRecordTs") as? Int, newest > 0 {
+            let behind = Int(Date().timeIntervalSince1970) - newest
+            if behind > 3 * 86400 {
+                lines.append("Strap clock: \(behind / 86400)d behind wall (reset/stale — alarm unreliable; recent sleep may be filed ~\(behind / 86400)d in the past, #67)")
+            } else if behind < -3 * 86400 {
+                lines.append("Strap clock: \(-behind / 86400)d AHEAD of wall (future-dated — alarm unreliable; recent sleep may be misdated, #67)")
+            } else {
+                lines.append("Strap clock: OK")
+            }
+        }
+        if let sent = d.object(forKey: "alarm.lastArmSentEpoch") as? Int {
+            var line = "Last arm: sent \(alarmStamp(sent))"
+            if let at = d.object(forKey: "alarm.lastArmAt") as? Double {
+                line += " · \(relTime(Date().timeIntervalSince1970 - at))"
+            }
+            if !d.bool(forKey: "alarm.lastArmConnected") { line += " · strap NOT connected (queued)" }
+            // #34: the strap-clock skew AT ARM. Skew ~0 but the strap still rejects ⇒ a corrupted alarm
+            // register, not a clock problem (which pins whether a re-clock could ever help).
+            if let skew = d.object(forKey: "alarm.lastArmClockSkew") as? Int, abs(skew) > 3600 {
+                let mag = abs(skew) >= 86400 ? "\(skew / 86400)d" : "\(skew / 3600)h"
+                line += " · strap clock at arm \(skew > 0 ? "+" : "")\(mag)"
+            }
+            lines.append(line)
+            if let reported = d.object(forKey: "alarm.lastReportedEpoch") as? Int {
+                let mismatch = abs(reported - sent) > 120
+                var rline = "Strap reports: \(alarmStamp(reported))"
+                    + (mismatch ? "  ⚠️ MISMATCH — strap didn't accept the time" : "  ✓ matches")
+                // #34: consecutive rejections — a persistent refusal (vs a one-off) points at a strap whose
+                // alarm register needs a reset, and is what SmartAlarmView warns the user about at ≥2.
+                let streak = d.integer(forKey: "alarm.rejectStreak")
+                if streak >= 2 { rline += " · \(streak) in a row (register likely needs a reset, #34)" }
+                lines.append(rline)
+            } else {
+                lines.append("Strap reports: (no readback)")
+            }
+        } else {
+            lines.append("Last arm: never")
+        }
+        // #1: did the strap actually fire? (STRAP_DRIVEN_ALARM_EXECUTED)
+        if let firedAt = d.object(forKey: "alarm.lastFiredAt") as? Double {
+            lines.append("Last fired: \(relTime(Date().timeIntervalSince1970 - firedAt))")
+        } else {
+            lines.append("Last fired: never observed")
+        }
+        return lines
+    }
+
+    private static func alarmStamp(_ epochSec: Int) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        return f.string(from: Date(timeIntervalSince1970: TimeInterval(epochSec)))
     }
 
     // MARK: - Formatting helpers

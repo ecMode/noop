@@ -23,7 +23,7 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -175,7 +175,7 @@ fun LabBookScreen(vm: AppViewModel) {
                             .background(Palette.metricCyan.copy(alpha = 0.14f)),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Icon(Icons.Filled.MenuBook, contentDescription = null, tint = Palette.metricCyan, modifier = Modifier.size(16.dp))
+                        Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null, tint = Palette.metricCyan, modifier = Modifier.size(16.dp))
                     }
                     Column(modifier = Modifier.weight(1f)) {
                         Text(countLine(markers), style = NoopType.headline, color = Palette.textPrimary)
@@ -391,7 +391,7 @@ private fun MarkerDetailSheet(
         val to = labDay(1)
         val from = labDay(-4000)
         val markerSeries = vm.repo.metricSeries(WhoopDao.LAB_BOOK_SOURCE_ID, markerKey, from, to).map { it.day to it.value }
-        val wearable = vm.repo.resolvedSeries(s.key, s.source, from, to).values
+        val wearable = vm.repo.resolvedSeries(s.key, s.source, from, to, strapDeviceId = vm.activeStrapId).values
         val built = LabBookProjection.pairMarkerToWearable(markerSeries, wearable, window.days)
         pairs = built
         correlation = if (built.size >= LAB_FLOOR) {

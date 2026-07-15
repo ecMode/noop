@@ -11,6 +11,7 @@ options:
   developmentLanguage: en
 settings:
   base:
+    # Fork keeps its own independent version line (loop-*), not upstream's 9.0.0.
     MARKETING_VERSION: "0.1.0"
     # iOS build number (CFBundleVersion). GLOBAL so the iOS app AND its widget extension inherit the
     # SAME value — they must match or iOS warns "extension version must match parent app" (#416).
@@ -84,6 +85,13 @@ targets:
           # The liquid Today is now cross-platform: its iOS-only chrome (topBarTrailing / navigationBarTitleDisplayMode
           # / presentationCompactAdaptation / two-param onChange / sensoryFeedback) is guarded, so the mac split-view
           # shell hosts LiquidTodayView too. All Liquid/* now compile into the mac target.
+    # Oura BYO-app OAuth credentials. OuraConfig.xcconfig is a tracked wrapper that optionally
+    # includes the untracked, gitignored Strand/Oura/OuraSecrets.xcconfig (template at
+    # OuraSecrets.example.xcconfig) — absent secrets leave the $(OURA_*) references in the
+    # info.properties below empty, which disables the Oura Cloud lane at runtime.
+    configFiles:
+      Debug: Strand/Oura/OuraConfig.xcconfig
+      Release: Strand/Oura/OuraConfig.xcconfig
     info:
       path: Strand/Resources/Info.plist
       properties:
@@ -106,6 +114,15 @@ targets:
         # HTTPS endpoints are unaffected. No arbitrary-loads blanket exemption.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        # Oura BYO-app OAuth credentials (values come from configFiles above); read at runtime via
+        # OuraCredentials.fromBundle. Absent/blank values cleanly disable the Connect-Oura lane.
+        OURA_CLIENT_ID: $(OURA_CLIENT_ID)
+        OURA_CLIENT_SECRET: $(OURA_CLIENT_SECRET)
+        OURA_REDIRECT_URI: $(OURA_REDIRECT_URI)
+        # Registers the noop:// URL scheme so ASWebAuthenticationSession's OAuth redirect
+        # (noop://oura/callback) reaches OuraOAuthProvider instead of bouncing off the OS.
+        CFBundleURLTypes:
+          - CFBundleURLSchemes: [noop]
     entitlements:
       path: Strand/Resources/Strand.entitlements
       properties:
@@ -164,6 +181,11 @@ targets:
     deploymentTarget: "14.0"
     sources:
       - StrandTests
+    # Same wrapper as the app target, so the OURA_CLOUD_IMPORT-gated Oura tests compile exactly
+    # when the app's Oura lane does (flag + creds both come from the untracked OuraSecrets.xcconfig).
+    configFiles:
+      Debug: Strand/Oura/OuraConfig.xcconfig
+      Release: Strand/Oura/OuraConfig.xcconfig
     dependencies:
       - target: Strand
       - package: WhoopProtocol
@@ -213,6 +235,10 @@ targets:
           - "Resources/Info.plist"
           - "Resources/NOOP.entitlements"
       - path: StrandiOSShared
+    # Same tracked wrapper as the macOS target (Strand/Oura/ is shared, not per-platform).
+    configFiles:
+      Debug: Strand/Oura/OuraConfig.xcconfig
+      Release: Strand/Oura/OuraConfig.xcconfig
     info:
       path: StrandiOS/Resources/Info.plist
       properties:
@@ -271,7 +297,7 @@ targets:
           - com.ecmode.loop.debugexport
         NSBluetoothAlwaysUsageDescription: "NOOP connects directly to your WHOOP strap over Bluetooth to read heart rate, R-R intervals, battery, and sensor data locally on your iPhone. Nothing leaves your device."
         NSLocationWhenInUseUsageDescription: "NOOP records your route during an outdoor workout to show distance, pace, and a map, and keeps recording while the screen is off. The route stays on your device. Nothing leaves it."
-        NSMotionUsageDescription: "NOOP uses the iPhone barometric altimeter during an outdoor workout to measure elevation and grade, which sharpens pace and your VO2max estimate. It stays on your device."
+        NSMotionUsageDescription: "NOOP uses your iPhone's motion sensors during a workout — the barometric altimeter to measure elevation and grade (which sharpens pace and your VO2max estimate), and your step count for a walking or running workout. It stays on your device. Nothing leaves it."
         NSHealthShareUsageDescription: "NOOP reads your own Apple Health data on-device to compute recovery, strain, and sleep. Nothing leaves your device."
         NSHealthUpdateUsageDescription: "NOOP writes the metrics it computes from your strap back into Apple Health, on-device and only when you allow it."
         # #187: the opt-in AI Coach's "Custom (OpenAI-compatible)" provider can point at a LOCAL LLM on
@@ -285,6 +311,15 @@ targets:
         # Both keys are required for the folder to actually appear in Files.
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        # Oura BYO-app OAuth credentials (values come from configFiles above); read at runtime via
+        # OuraCredentials.fromBundle. Absent/blank values cleanly disable the Connect-Oura lane.
+        OURA_CLIENT_ID: $(OURA_CLIENT_ID)
+        OURA_CLIENT_SECRET: $(OURA_CLIENT_SECRET)
+        OURA_REDIRECT_URI: $(OURA_REDIRECT_URI)
+        # Registers the noop:// URL scheme so ASWebAuthenticationSession's OAuth redirect
+        # (noop://oura/callback) reaches OuraOAuthProvider instead of bouncing off the OS.
+        CFBundleURLTypes:
+          - CFBundleURLSchemes: [noop]
     entitlements:
       path: StrandiOS/Resources/NOOP.entitlements
       properties:

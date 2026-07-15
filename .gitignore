@@ -98,3 +98,5 @@ err.txt
 
 # Swift Package Manager build artifacts (Tools/*)
 .build/
+# Oura OAuth app credentials (BYO; never committed)
+Strand/Oura/OuraSecrets.xcconfig

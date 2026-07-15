@@ -26,7 +26,9 @@ import java.util.zip.ZipInputStream
  *
  *   • Oura   : the Account -> Export Data per-category files (CSV, `;`-delimited; or an older JSON
  *              variant): sleep periods (durations/HRV/RHR/breath; a `deleted` type is skipped), daily
- *              readiness (RHR, temperature deviation, score), daily activity (steps/calories/distance),
+ *              readiness (temperature deviation, score — its `contributors.resting_heart_rate` is a
+ *              0-100 SCORE, not bpm, never read as resting HR; the real RHR comes only from a sleep
+ *              period's lowest_heart_rate), daily activity (steps/calories/distance),
  *              daily SpO2 (`spo2_percentage.average`), VO2max (`vo2_max`). Field names verified against a
  *              REAL Oura export schema (issue #862). The many health types NOOP doesn't model
  *              (bloodglucose, contraception, medication, ring config, raw sample streams, ...) are skipped
@@ -58,6 +60,13 @@ object WearableExportImporter {
 
     private const val MAX_ENTRY_BYTES = 256L shl 20  // per-entry uncompressed ceiling (zip-bomb guard)
     private const val MAX_FILES = 200_000
+
+    /** Aggregate RAM ceiling across ALL retained wellness files from one import. The real backstop here: a
+     *  zip can carry up to [MAX_FILES] (200k) entries, and the per-entry cap bounds each one but NOT their
+     *  sum — without this a crafted export could accumulate unbounded ByteArray in the map. A whole
+     *  multi-year export is tens of MB, so 1 GB never trips in practice. Mirrors the Swift
+     *  WearableExportImporter.maxTotalBytes (#70). */
+    internal const val MAX_TOTAL_BYTES = 1L shl 30
     private const val MAX_ROWS = 5_000_000
 
     // Oura CSV detection (#857). Header keys are already HeaderNorm-normalized.
@@ -100,7 +109,7 @@ object WearableExportImporter {
     // ------------------------------------------------------------------------
 
     suspend fun importExport(context: Context, uri: Uri, repo: WhoopRepository): ImportSummary {
-        val files = try {
+        val (files, truncated) = try {
             collectFiles(context, uri)
         } catch (e: Exception) {
             return ImportSummary.failure("Wearable export", "Couldn't read the export: ${e.message ?: "unknown error"}")
@@ -128,7 +137,14 @@ object WearableExportImporter {
             }
             return ImportSummary.failure(brand.label, "${brand.label} export held no sleep or daily wellness data.")
         }
-        return persist(repo, brand, parsed)
+        val summary = persist(repo, brand, parsed)
+        // #70: never silently truncate. If the aggregate RAM budget tripped, the retained file set was
+        // partial — surface it plainly rather than reporting a clean import over incomplete data.
+        return if (truncated) {
+            summary.copy(message = summary.message + " (partial — export exceeded the ${MAX_TOTAL_BYTES shr 30} GB import memory budget)")
+        } else {
+            summary
+        }
     }
 
     /** True when every collected file is a raw heart-rate CSV (no daily-summary file): the #857 case. */
@@ -244,13 +260,16 @@ object WearableExportImporter {
                     if (d.restingHr == null) d.restingHr = session.lowestHr
                 }
             }
+            // Daily readiness → temperature deviation + reference readiness score.
+            // `contributors.resting_heart_rate` (and a flattened `resting_heart_rate` alongside it) is a
+            // 0-100 readiness contributor SCORE, not bpm — it must never land on d.restingHr (the old code
+            // clobbered the sleep-derived value above). The real resting HR comes only from the sleep
+            // loop's `lowest_heart_rate`. Twin of the Swift OuraExportParser fix.
             (categoryArray(root, "daily_readiness") ?: categoryArray(root, "readiness"))?.let { arr ->
                 for (i in 0 until arr.length()) {
                     val r = arr.optJSONObject(i) ?: continue
                     val key = r.strOpt("day") ?: continue
                     val d = day(key)
-                    r.optJSONObject("contributors")?.let { d.restingHr = it.posInt("resting_heart_rate") ?: d.restingHr }
-                    d.restingHr = r.posInt("resting_heart_rate") ?: d.restingHr
                     d.skinTempDevC = r.dblOpt("temperature_deviation") ?: d.skinTempDevC
                     d.readinessScore = r.posInt("score") ?: d.readinessScore
                 }
@@ -711,7 +730,7 @@ object WearableExportImporter {
     // ------------------------------------------------------------------------
 
     /** Read the picked content. A `.zip` is extracted (zip-bomb-guarded); anything else is one entry. */
-    private fun collectFiles(context: Context, uri: Uri): Map<String, ByteArray> {
+    private fun collectFiles(context: Context, uri: Uri): Pair<Map<String, ByteArray>, Boolean> {
         val head = ByteArray(4)
         context.contentResolver.openInputStream(uri)?.use { it.read(head) }
             ?: throw IllegalStateException("Couldn't open the selected file.")
@@ -721,25 +740,46 @@ object WearableExportImporter {
             val bytes = context.contentResolver.openInputStream(uri)?.use { readCapped(it, MAX_ENTRY_BYTES) }
                 ?: throw IllegalStateException("Couldn't open the selected file.")
             val name = displayName(context, uri)?.lowercase() ?: "export.json"
-            return if (isWellnessFile(name, bytes)) mapOf(name to bytes) else emptyMap()
+            // A single file is one entry — the aggregate budget can't trip here.
+            return (if (isWellnessFile(name, bytes)) mapOf(name to bytes) else emptyMap()) to false
         }
 
+        val raw = context.contentResolver.openInputStream(uri)
+            ?: throw IllegalStateException("Couldn't open the selected file.")
+        return raw.use { collectZipEntries(it, MAX_TOTAL_BYTES) }
+    }
+
+    /** The zip-entry collection loop, extracted so a unit test can drive it from an in-memory zip without a
+     *  ContentResolver (the same seam pattern as [AppleHealthImporter.parseStreamForTest]). Retains wellness
+     *  JSON/CSV first-wins, per-entry + per-count capped, and STOPS once the next retained entry would push
+     *  past [maxTotalBytes] — returning `truncated = true` so the caller can say so instead of silently
+     *  importing a partial set. ZipInputStream yields entries in archive order, so it's deterministic. (#70) */
+    internal fun collectZipEntries(
+        input: InputStream,
+        maxTotalBytes: Long = MAX_TOTAL_BYTES,
+    ): Pair<Map<String, ByteArray>, Boolean> {
         val out = LinkedHashMap<String, ByteArray>()
-        context.contentResolver.openInputStream(uri)?.use { raw ->
-            ZipInputStream(raw).use { zin ->
-                var entry = zin.nextEntry
-                while (entry != null && out.size < MAX_FILES) {
-                    val path = entry.name.lowercase()
-                    val base = last(path)
-                    if (!entry.isDirectory && (base.endsWith(".json") || base.endsWith(".csv"))) {
-                        val bytes = runCatching { readCapped(zin, MAX_ENTRY_BYTES) }.getOrNull()
-                        if (bytes != null && bytes.isNotEmpty() && isWellnessFile(base, bytes)) out[path] = bytes
+        var total = 0L
+        var truncated = false
+        ZipInputStream(input).use { zin ->
+            var entry = zin.nextEntry
+            while (entry != null && out.size < MAX_FILES) {
+                val path = entry.name.lowercase()
+                val base = last(path)
+                if (!entry.isDirectory && (base.endsWith(".json") || base.endsWith(".csv"))) {
+                    val bytes = runCatching { readCapped(zin, MAX_ENTRY_BYTES) }.getOrNull()
+                    // First-wins dedup (was last-wins overwrite) so the running `total` matches the retained
+                    // bytes exactly; mirrors the Swift zip loader's `if result[path] == nil` guard.
+                    if (bytes != null && bytes.isNotEmpty() && isWellnessFile(base, bytes) && !out.containsKey(path)) {
+                        if (total + bytes.size > maxTotalBytes) { truncated = true; break }
+                        out[path] = bytes
+                        total += bytes.size
                     }
-                    entry = zin.nextEntry
                 }
+                entry = zin.nextEntry
             }
         }
-        return out
+        return out to truncated
     }
 
     /** True if the file is a wellness JSON/CSV we care about (filters out a brand's non-wellness bulk). */

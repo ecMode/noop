@@ -92,13 +92,32 @@ final class Backfiller {
     /// Without it the fresh session's `sessionRowsPersisted` is 0 and the scary "charge to 100%" line
     /// false-fires on the empty tail of a sync that just offloaded real records.
     private(set) var continuedAfterRows = false
+    /// #57: set true the moment ANY chunk's persist (decoded rows / reject archive / raw enqueue / trim
+    /// cursor) fails this session. While set, `finishChunk` must NOT ack — not even a subsequent EMPTY END,
+    /// which skips the insert and would otherwise advance the strap's trim PAST the held records-carrying
+    /// chunks, freeing history we never stored. The offload stalls safely (strap keeps everything past the
+    /// last GOOD ack); a fresh session (`begin`) clears it. Twin of the Android guard. Exposed read-only so
+    /// the client can surface a "history isn't persisting" signal in the debug export (#57).
+    private(set) var persistStalled = false
     private(set) var sessionMotionRows = 0
     /// #727: skin-temp samples banked this session. WHOOP 4.0 carries skin temp (and the raw SpO2 channel)
     /// ONLY in its full DSP sleep records; a strap banking HR/RR-only records reports 0 here even on a
     /// healthy-looking sync, so surfacing it makes "skin temp never appears" reports self-diagnosing.
     private(set) var sessionSkinTempRows = 0
-    private var sessionNightKeys: Set<Int> = []
+    private(set) var sessionNightKeys: Set<Int> = []
     var sessionNights: Int { sessionNightKeys.count }
+
+    /// #67 diag: the clock reference the offload ACTUALLY decoded with, captured on the first chunk of the
+    /// session. Surfaces whether the stale-RTC timestamp correction (FIX #72's `correctedWall`) could even
+    /// engage. `sessionUsedIdentityRef` = no clock correlation had landed when the first chunk decoded, so
+    /// that decode fell back to an identity
+    /// ref (device==wall==now) → clock offset 0 → correction OFF. On a strap whose RTC has reset, that
+    /// silently stores the strap's stale (years-old) timestamps verbatim, so the night lands off the recent
+    /// timeline and reads as "missed sleep". Paired with the persisted-nights DATE RANGE below, one strap
+    /// log now shows both WHERE the rows landed and WHY. Reset in begin(). Log-only.
+    private(set) var sessionClockDevice: Int?
+    private(set) var sessionClockWall: Int?
+    private(set) var sessionUsedIdentityRef = false
     /// Logged once per session when the strap reports trim=0xFFFFFFFF — the "no valid flash cursor"
     /// sentinel: it has no banked history to offload (a clock/charge state, not a decode bug).
     private var loggedNoCursor = false
@@ -163,8 +182,12 @@ final class Backfiller {
          connectionActive: @escaping () -> Bool = { false },
          connectionLog: ((String) -> Void)? = nil,
          firmwareLayout: ((Int) -> Void)? = nil,
+         // The default (prod) Extractor reads the opt-in HR-from-PPG sub-lag interpolation flag (Test Centre →
+         // Experimental algorithms) at decode time and threads it into the pure decoder, so the pure package
+         // never reaches for UserDefaults. Default OFF = byte-identical to today. Tests inject their own seam.
          extract: @escaping Extractor = { extractHistoricalStreams($0, deviceClockRef: $1, wallClockRef: $2,
-                                                                    sessionOldestUnix: $3, sessionNewestUnix: $4) }) {
+                                                                    sessionOldestUnix: $3, sessionNewestUnix: $4,
+                                                                    subLagInterp: PuffinExperiment.ppgHrSubLagInterpEnabled) }) {
         self.store = store
         self.deviceId = deviceId
         self.ackTrim = ackTrim
@@ -193,12 +216,16 @@ final class Backfiller {
         self.family = family
         self.continuedAfterRows = continuedAfterRows
         isBackfilling = true
+        persistStalled = false   // #57: fresh session starts un-stalled
         chunk.removeAll(keepingCapacity: true)
         chunkOpen = true
         sessionRowsPersisted = 0
         sessionMotionRows = 0
         sessionSkinTempRows = 0
         sessionNightKeys.removeAll(keepingCapacity: true)
+        sessionClockDevice = nil          // #67: re-capture the decode clock ref for this session
+        sessionClockWall = nil
+        sessionUsedIdentityRef = false
         loggedNoCursor = false
         loggedFutureRtc = false
         sessionDroppedImplausible = 0
@@ -261,6 +288,37 @@ final class Backfiller {
     nonisolated static func sessionSummaryLine(rows: Int, motion: Int, skinTemp: Int, nights: Int) -> String? {
         guard rows > 0 else { return nil }
         return "Backfill: session persisted \(rows) rows (\(motion) with motion, \(skinTemp) skin-temp) across \(nights) night(s)."
+    }
+
+    /// #67 diag: the persisted-nights DATE RANGE plus the offload's effective clock state — the two facts
+    /// the summary above omits. `nightKeys` are UTC day-keys (ts / 86400); their min/max are the day(s) the
+    /// rows LANDED on. When those days sit years in the past while the clock ref reads ~now (an identity
+    /// fallback, or an in-sync ref on a strap that banked stale), the night is misdated off the recent
+    /// timeline — the "missed sleep" signature (#67). Returns nil when nothing landed. Log-only, pure.
+    nonisolated static func sessionClockDiagLine(nightKeys: Set<Int>,
+                                                 device: Int?, wall: Int?, usedIdentityRef: Bool) -> String? {
+        guard let lo = nightKeys.min(), let hi = nightKeys.max() else { return nil }
+        let day: (Int) -> String = { key in
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "en_US_POSIX")   // fixed Gregorian yyyy — not the device calendar
+            f.dateFormat = "yyyy-MM-dd"
+            f.timeZone = TimeZone(identifier: "UTC")
+            return f.string(from: Date(timeIntervalSince1970: Double(key) * 86_400))
+        }
+        let range = lo == hi ? day(lo) : "\(day(lo))…\(day(hi))"
+        var line = "Backfill: rows landed on \(range)"
+        if let device, let wall {
+            let offset = wall - device
+            let days = offset / 86_400
+            if usedIdentityRef {
+                line += " · clock ref: IDENTITY fallback (no clock correlation at decode) - stale-record correction OFF"
+            } else if abs(offset) > 86_400 {
+                line += " · strap clock \(days >= 0 ? "\(days)d behind" : "\(-days)d ahead") wall - correction engaged"
+            } else {
+                line += " · clock ref in sync"
+            }
+        }
+        return line
     }
 
     /// The trim=0xFFFFFFFF sentinel line (#783). 0xFFFFFFFF means two different things depending on whether
@@ -347,6 +405,13 @@ final class Backfiller {
             // decodes to correct wall time, and we can persist + ack + upload. The correlation is only
             // truly required to map REALTIME (type-40/43) device-epoch timestamps, never in a hist chunk.
             let ref = clockRef ?? { let now = Int(Date().timeIntervalSince1970); return ClockRef(device: now, wall: now) }()
+            // #67 diag: remember the ref (and whether it was the identity fallback) for the session summary,
+            // so a strap log shows whether stale-RTC correction could engage. Captured on the first chunk.
+            if sessionClockDevice == nil {
+                sessionClockDevice = ref.device
+                sessionClockWall = ref.wall
+                sessionUsedIdentityRef = (clockRef == nil)
+            }
             // PERF (2026-07-03): the heavy decode — parseFrame ×N, extractHistoricalStreams, and the
             // reject-classifier's SECOND full parse — runs OFF the main actor so a long history offload no
             // longer freezes the UI (was ~54K parseFrame calls on main for a 27K-row import). Pure functions
@@ -431,8 +496,23 @@ final class Backfiller {
                 let wasZero = sessionDroppedImplausible == 0
                 sessionDroppedImplausible += decoded.droppedImplausible
                 if wasZero {
-                    log?("Backfill: dropped record(s) with an implausible timestamp (trim=\(trim)) — the strap's clock is wrong (records dated far in the past or future), so those samples were skipped rather than misfiled onto the wrong day. Fully charge and reconnect the strap so its clock re-syncs.")
+                    // #324: append the epoch SPAN of the dropped block + how far off it sits, so the strap log
+                    // shows WHETHER the whole banked range is future-dated (safe to fast-forward-discard) or
+                    // just a slice. `droppedImplausibleOldestTs/NewestTs` are the records' OWN dated values
+                    // (the strap's wrong clock), captured by the #547 gate as it dropped them.
+                    let span = BadClockDiagnostics.droppedSpanClause(
+                        oldest: decoded.droppedImplausibleOldestTs,
+                        newest: decoded.droppedImplausibleNewestTs,
+                        now: Int(Date().timeIntervalSince1970))
+                    log?("Backfill: dropped record(s) with an implausible timestamp (trim=\(trim))\(span) — the strap's clock is wrong (records dated far in the past or future), so those samples were skipped rather than misfiled onto the wrong day. Fully charge and reconnect the strap so its clock re-syncs.")
                 }
+            }
+            // #324: the strap RTC-state events (RTC_LOST / BOOT / SET_RTC) the #547 gate dropped for a bad
+            // own-timestamp — the GROUND TRUTH that the clock reset. Sparse (not per-record), so log each as
+            // it appears; the bad `rawTs` is the future/past base the RTC jumped to.
+            let nowForRtc = Int(Date().timeIntervalSince1970)
+            for ev in decoded.droppedRtcEvents {
+                log?("Backfill: strap reported \(ev.kind) with an implausible own-timestamp \(BadClockDiagnostics.isoDay(ev.rawTs)) (\(BadClockDiagnostics.hoursOffset(ev.rawTs, now: nowForRtc)) vs now) — the strap's RTC reset to a wrong base (#324/#928); this is the ground-truth cause of the future-dated banking, not a NOOP decode bug.")
             }
             // Diagnostic (#77): the AGGREGATE silent-loss case — frames arrived but produced no rows at
             // all (CRC fail / unmapped layout / out-of-range timestamp), so this chunk persists nothing
@@ -476,6 +556,7 @@ final class Backfiller {
                 // works" class. We return WITHOUT acking so the strap keeps this chunk and re-sends it next
                 // session (no data loss), but a silent return left a strap log with no trace of the stall.
                 log?("Backfill: failed to persist decoded rows (trim=\(trim)): \(error) — holding ack so the strap re-sends this chunk; history won't advance until the write succeeds.")
+                persistStalled = true   // #57: stall ALL further acks so an empty END can't advance past this
                 return
             }
             // Success-side observability (#150): tally what actually persisted so the session can emit
@@ -499,6 +580,7 @@ final class Backfiller {
             if !rejected.isEmpty, let rejectedSink {
                 guard rejectedSink(rejected, trim, family) else {
                     log?("Backfill: rejected-frame archive failed (trim=\(trim)) — holding ack so the strap re-sends.")
+                    persistStalled = true   // #57
                     return
                 }
             }
@@ -520,6 +602,7 @@ final class Backfiller {
                     // (return) so the strap re-sends — the research toggle's contract is that raw is durable
                     // before the trim advances. Surface it so a stalled offload with raw-capture on is visible.
                     log?("Backfill: failed to enqueue raw batch (trim=\(trim)): \(error) — holding ack so the strap re-sends this chunk; raw capture must be durable before the trim advances.")
+                    persistStalled = true   // #57
                     return
                 }
             }
@@ -544,6 +627,16 @@ final class Backfiller {
             emitConnection(ConnectionTrace.noCursorLine())
         }
 
+        // #57: if an EARLIER chunk this session failed to persist, do NOT advance the cursor or ack — not
+        // even for this (possibly empty/metadata) END. An empty END skips the insert and never throws;
+        // acking it would trim the strap PAST the held records-carrying chunks, freeing history we never
+        // stored. Stall the whole offload until a fresh session with a working store re-offers everything
+        // past the last GOOD ack. Twin of the Android guard.
+        if persistStalled {
+            log?("Backfill: persist stalled earlier this session — NOT acking trim=\(trim) so the strap can't trim past un-stored history. Reconnect once the store is healthy (#57).")
+            return
+        }
+
         do { try await store.setCursor("strap_trim", Int(trim)) } catch {
             // Diag (#601): decoded (and raw, if on) are durable but the strap_trim cursor write failed. We
             // return WITHOUT acking — acking now would let the strap trim past records the cursor hasn't
@@ -551,6 +644,7 @@ final class Backfiller {
             // strap re-offers this chunk next session. A silent return here was a prime "history won't advance"
             // suspect with nothing in the log to confirm it.
             log?("Backfill: failed to write strap_trim cursor (trim=\(trim)): \(error) — holding ack so the strap re-sends this chunk; history won't advance until the cursor write succeeds.")
+            persistStalled = true   // #57
             return
         }
 

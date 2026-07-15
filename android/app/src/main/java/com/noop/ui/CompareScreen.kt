@@ -1,5 +1,6 @@
 package com.noop.ui
 
+import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -186,6 +187,8 @@ private object CompareCatalog {
 
     fun byKey(key: String): CompareMetric? = all.firstOrNull { it.key == key }
 
+    fun byId(id: String): CompareMetric? = all.firstOrNull { it.id == id }
+
     /** Map a my-whoop metric key to the matching DailyMetric column accessor, if any. */
     fun dailyPick(key: String): ((DailyMetric) -> Double?)? = when (key) {
         "recovery" -> { d -> d.recovery }
@@ -218,6 +221,54 @@ private enum class CompareRange(val label: String, val days: Int?, val phrase: S
     /** This range plus every LARGER range, ascending — the auto-expand search order. */
     val widening: List<CompareRange>
         get() = entries.subList(ordinal, entries.size)
+}
+
+private val defaultCompareMetricKeys = listOf("recovery", "sleep_performance", "weight")
+
+internal fun parseCompareSelection(raw: String?, minSelection: Int, maxSelection: Int): List<CompareMetric>? {
+    if (raw == null) return null
+
+    val tokens = raw.split(",")
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+    val parsed = tokens
+        .mapNotNull { CompareCatalog.byId(it) }
+        .distinctBy { it.id }
+        .take(maxSelection)
+
+    return if (parsed.size == tokens.distinct().size || parsed.size >= minSelection) {
+        parsed
+    } else {
+        null
+    }
+}
+
+private object ComparePrefs {
+    private const val KEY_RANGE = "compare.range"
+    private const val KEY_SELECTED = "compare.selectedMetrics"
+
+    fun readRange(context: Context): CompareRange {
+        val raw = NoopPrefs.of(context).getString(KEY_RANGE, null) ?: return CompareRange.Year
+        return CompareRange.entries.firstOrNull { it.name == raw } ?: CompareRange.Year
+    }
+
+    fun writeRange(context: Context, range: CompareRange) {
+        NoopPrefs.of(context).edit().putString(KEY_RANGE, range.name).apply()
+    }
+
+    fun readSelection(context: Context, minSelection: Int, maxSelection: Int): List<CompareMetric> {
+        val raw = NoopPrefs.of(context).getString(KEY_SELECTED, null)
+        parseCompareSelection(raw, minSelection, maxSelection)?.let { return it }
+
+        val picks = defaultCompareMetricKeys.mapNotNull { CompareCatalog.byKey(it) }
+        return (if (picks.isEmpty()) CompareCatalog.all.take(2) else picks).take(maxSelection)
+    }
+
+    fun writeSelection(context: Context, selected: List<CompareMetric>) {
+        NoopPrefs.of(context).edit()
+            .putString(KEY_SELECTED, selected.joinToString(",") { it.id })
+            .apply()
+    }
 }
 
 // MARK: - Per-series model
@@ -330,19 +381,17 @@ fun CompareScreen(vm: AppViewModel) {
     // same day-cycle-background preference the liquid Today honours. Off = the flat dark canvas path.
     val context = LocalContext.current
     val showDayCycleBackground = remember { NoopPrefs.showDayCycleBackground(context) }
+    val skyBehindCards = remember { NoopPrefs.skyBehindCards(context) }
 
     val maxSelection = 4
     val minSelection = 2
 
-    // Default starter selection (falls back gracefully if a key is missing).
-    val defaultKeys = listOf("recovery", "sleep_performance", "weight")
-
-    var range by remember { mutableStateOf(CompareRange.Year) }
+    var range by remember { mutableStateOf(ComparePrefs.readRange(context)) }
     // Ordered selection (max 4). Drives both the legend order and color mapping.
     val selected = remember {
-        val picks = defaultKeys.mapNotNull { CompareCatalog.byKey(it) }
-        val seed = if (picks.isEmpty()) CompareCatalog.all.take(2) else picks.take(maxSelection)
-        mutableStateListOf<CompareMetric>().apply { addAll(seed) }
+        mutableStateListOf<CompareMetric>().apply {
+            addAll(ComparePrefs.readSelection(context, minSelection, maxSelection))
+        }
     }
     // Full-history series per selected metric id (ascending by day).
     val fullSeries = remember { mutableStateMapOf<String, List<Pair<String, Double>>>() }
@@ -413,7 +462,10 @@ fun CompareScreen(vm: AppViewModel) {
         subtitle = "Overlay signals, draw conclusions.",
         // Liquid sky backdrop (LiquidScreenSky.kt) in the scaffold's topBackground slot, gated on the
         // day-cycle preference — the same pilot plumbing the liquid Today uses.
-        topBackground = if (showDayCycleBackground) { { LiquidScreenSky() } } else null,
+        topBackground = if (showDayCycleBackground) { { LiquidScreenSky(fillHeight = skyBehindCards) } } else null,
+        // Sky-behind-cards fills the viewport so the transparent cards reveal the sky the whole way
+        // down (Today / Trends / Sleep / metric-detail parity - same two prefs, same two behaviours).
+        fullBleedBackground = showDayCycleBackground && skyBehindCards,
     ) {
 
         // ── Metric picker section (chips + range control)
@@ -427,7 +479,10 @@ fun CompareScreen(vm: AppViewModel) {
                             items = CompareRange.entries.toList(),
                             selection = range,
                             label = { it.label },
-                            onSelect = { range = it },
+                            onSelect = {
+                                range = it
+                                ComparePrefs.writeRange(context, it)
+                            },
                         )
                         Spacer(Modifier.weight(1f))
                         AddMetricMenu(
@@ -441,6 +496,7 @@ fun CompareScreen(vm: AppViewModel) {
                                 } else if (selected.size < maxSelection) {
                                     selected.add(m)
                                 }
+                                ComparePrefs.writeSelection(context, selected)
                             },
                         )
                     }
@@ -466,7 +522,10 @@ fun CompareScreen(vm: AppViewModel) {
                                 val i = selected.indexOfFirst { it.id == m.id }
                                 if (i < 0) Palette.textSecondary else seriesPalette[i % seriesPalette.size]
                             },
-                            onRemove = { m -> selected.removeAll { it.id == m.id } },
+                            onRemove = { m ->
+                                selected.removeAll { it.id == m.id }
+                                ComparePrefs.writeSelection(context, selected)
+                            },
                         )
                     }
                 }
@@ -517,7 +576,7 @@ private suspend fun loadFullSeries(
     // Wide window covering all of history (the macOS days = 4000 default).
     val to = todayDay(1)
     val from = todayDay(-4000)
-    return vm.repo.resolvedSeries(metric.key, metric.source, from, to).values
+    return vm.repo.resolvedSeries(metric.key, metric.source, from, to, strapDeviceId = vm.activeStrapId).values
 }
 
 /** "yyyy-MM-dd" for today offset by [deltaDays], fixed UTC. */

@@ -45,6 +45,35 @@ public enum SleepStageTotals {
         return nil
     }
 
+    /// #259: return `stagesJSON` with its `[{start,end,stage}]` segments trimmed to begin no earlier than
+    /// `onsetSec` — segments fully before the onset are dropped, one straddling it is cut to `[onsetSec, end]`.
+    /// Only the computed segment-array shape carries the timestamps a trim needs, so the `{stage:min}` /
+    /// dict (imported) shape and any unparseable JSON are returned UNCHANGED. A no-op when every segment
+    /// already starts at/after the onset (the common, already-consistent case). The result is re-parsed by
+    /// `minutes` / `dailyAggregate` on the SAME platform, so only the decoded minute totals need
+    /// cross-platform parity, not the exact string. Mirrors Kotlin `clampStagesToOnset`.
+    public static func clampStagesToOnset(_ stagesJSON: String?, onsetSec: Int) -> String? {
+        guard let stagesJSON, let data = stagesJSON.data(using: .utf8),
+              let arr = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+            return stagesJSON   // dict/imported shape or unparseable → unchanged
+        }
+        var out: [[String: Any]] = []
+        for seg in arr {
+            // Shape check is start+end only (matches Kotlin): a {stage:min} entry has neither → bail
+            // unchanged. A malformed segment missing only `stage` defaults to "" (minutes() ignores it),
+            // exactly as the Kotlin twin's `optString("stage", "")` does.
+            guard let rawS = (seg["start"] as? NSNumber)?.intValue,
+                  let e = (seg["end"] as? NSNumber)?.intValue else { return stagesJSON }
+            let name = seg["stage"] as? String ?? ""
+            let s = max(rawS, onsetSec)
+            guard e > s else { continue }                                        // fully before the onset → drop
+            out.append(["start": s, "end": e, "stage": name])
+        }
+        guard let outData = try? JSONSerialization.data(withJSONObject: out),
+              let str = String(data: outData, encoding: .utf8) else { return stagesJSON }
+        return str
+    }
+
     /// The sleep-derived daily fields for a night made of these blocks' `stagesJSON`, or nil if none
     /// decode. `efficiency` is asleep / in-bed (TST / Σ stage minutes) in [0,1]. For the segment stages
     /// noop stores (which TILE the window, last segment clamped to the wake), Σ stage minutes equals the
@@ -276,26 +305,29 @@ public enum SleepStageTotals {
         return out
     }
 
-    /// The indices (into the ORIGINAL `blocks`) of the MAIN-NIGHT GROUP: the main night plus any adjacent
-    /// fragments bridged into it. A biphasic / briefly-interrupted main sleep that reaches the selector still
-    /// split into two blocks (a wake gap shorter than `gapBridgeMaxMin` between them) is scored as ONE night
-    /// rather than two competing fragments, then the winning bridged group's fragments are ALL returned so the
-    /// caller can SUM their stages for the day's headline figure. (#561)
-    ///
-    /// Pipeline:
-    ///   1. `bridgeAdjacent` merges blocks whose gap is in `[0, gapBridgeMaxMin*60)` into bridged spans, in
-    ///      `start` order, recording which original indices fell into each bridged group.
-    ///   2. `mainNightIndex` scores the BRIDGED spans (so a two-fragment night's combined span out-scores a
-    ///      lone nap) and picks the winning bridged group.
-    ///   3. The original indices of that winning group are returned, ascending.
-    ///
-    /// Returns nil only for an empty list. A day with no bridgeable gap collapses to the single-block group the
-    /// bare `mainNightIndex` would pick — byte-identical to the old behaviour for the common case. Pure +
-    /// deterministic; shares `bridgeAdjacent` + `mainNightIndex` so the bridged pick stays cross-platform
-    /// stable. (#561)
-    public static func mainNightGroupIndices(_ blocks: [NightBlock], offsetSec: Int,
-                                             habitualMidsleepSec: Int? = nil) -> [Int]? {
-        guard !blocks.isEmpty else { return nil }
+    /// One bridged night group over the whole input: the fragments (as ORIGINAL indices, ascending)
+    /// plus the group's inter-fragment wake seams. Produced by `bridgedNightGroups` for the consumers
+    /// that must present a briefly-interrupted night as ONE night — the Health write-back and the
+    /// sleep screens — so they group exactly as the day totals do and can fold each seam in as an
+    /// explicit `wake` segment. (#364)
+    public struct BridgedNightGroup: Equatable {
+        public let indices: [Int]
+        public let gaps: [GapSpan]
+        /// One inter-fragment seam: (previous bridged end, next fragment start), end > start always.
+        public struct GapSpan: Equatable {
+            public let start: Int, end: Int
+            public init(start: Int, end: Int) { self.start = start; self.end = end }
+        }
+        public init(indices: [Int], gaps: [GapSpan]) { self.indices = indices; self.gaps = gaps }
+    }
+
+    /// EVERY bridged group over `blocks` — the same two-tier bridge `mainNightGroupIndices` applies
+    /// (#561 short-wake, plus the #861 overnight night-tail widening), WITHOUT the winner pick. A
+    /// negative gap (a block starting inside the previous span) does not bridge — pinned legacy
+    /// semantics, `gap >= 0` — and never fabricates a seam. Groups ordered by start; pure and
+    /// deterministic; Kotlin twin `bridgedNightGroups`. (#364)
+    public static func bridgedNightGroups(_ blocks: [NightBlock], offsetSec: Int) -> [BridgedNightGroup] {
+        guard !blocks.isEmpty else { return [] }
         // Sort indices by onset so bridging sees neighbours, exactly as `bridgeAdjacent` sorts the blocks.
         let order = blocks.indices.sorted { blocks[$0].start < blocks[$1].start }
         let bridgeS = gapBridgeMaxMin * 60
@@ -303,6 +335,7 @@ public enum SleepStageTotals {
         // Build the bridged spans AND the original indices that compose each one, in one pass over `order`.
         var bridged: [NightBlock] = []
         var groups: [[Int]] = []
+        var gaps: [[BridgedNightGroup.GapSpan]] = []
         for idx in order {
             let b = blocks[idx]
             if let last = bridged.last {
@@ -317,6 +350,9 @@ public enum SleepStageTotals {
                     && (gap < bridgeS
                         || (gap < nightTailBridgeS && isOvernightOnset(b.start, offsetSec: offsetSec)))
                 if bridges {
+                    if gap > 0 {
+                        gaps[gaps.count - 1].append(.init(start: last.end, end: b.start))
+                    }
                     bridged[bridged.count - 1] = NightBlock(start: last.start, end: max(last.end, b.end))
                     groups[groups.count - 1].append(idx)
                     continue
@@ -324,10 +360,41 @@ public enum SleepStageTotals {
             }
             bridged.append(b)
             groups.append([idx])
+            gaps.append([])
         }
-        guard let winner = mainNightIndex(bridged, offsetSec: offsetSec,
+        return zip(groups, gaps).map { BridgedNightGroup(indices: $0.sorted(), gaps: $1) }
+    }
+
+    /// The indices (into the ORIGINAL `blocks`) of the MAIN-NIGHT GROUP: the main night plus any adjacent
+    /// fragments bridged into it. A biphasic / briefly-interrupted main sleep that reaches the selector still
+    /// split into two blocks (a wake gap shorter than `gapBridgeMaxMin` between them) is scored as ONE night
+    /// rather than two competing fragments, then the winning bridged group's fragments are ALL returned so the
+    /// caller can SUM their stages for the day's headline figure. (#561)
+    ///
+    /// Pipeline:
+    ///   1. `bridgedNightGroups` merges blocks whose gap is in `[0, gapBridgeMaxMin*60)` (or the #861
+    ///      night-tail window) into bridged groups, in `start` order.
+    ///   2. `mainNightIndex` scores the BRIDGED spans (so a two-fragment night's combined span out-scores a
+    ///      lone nap) and picks the winning bridged group.
+    ///   3. The original indices of that winning group are returned, ascending.
+    ///
+    /// Returns nil only for an empty list. A day with no bridgeable gap collapses to the single-block group the
+    /// bare `mainNightIndex` would pick — byte-identical to the old behaviour for the common case. Pure +
+    /// deterministic; shares the `bridgedNightGroups` pass + `mainNightIndex` so the bridged pick stays
+    /// cross-platform stable. (#561)
+    public static func mainNightGroupIndices(_ blocks: [NightBlock], offsetSec: Int,
+                                             habitualMidsleepSec: Int? = nil) -> [Int]? {
+        guard !blocks.isEmpty else { return nil }
+        let all = bridgedNightGroups(blocks, offsetSec: offsetSec)
+        // Rebuild each group's bridged span for scoring: sorted-ascending fragments make the span
+        // (first start, running-max end) — identical to the span the one-pass loop accumulated.
+        let bridgedSpans = all.map { g -> NightBlock in
+            NightBlock(start: g.indices.map { blocks[$0].start }.min() ?? 0,
+                       end: g.indices.map { blocks[$0].end }.max() ?? 0)
+        }
+        guard let winner = mainNightIndex(bridgedSpans, offsetSec: offsetSec,
                                           habitualMidsleepSec: habitualMidsleepSec) else { return nil }
-        return groups[winner].sorted()
+        return all[winner].indices
     }
 
     /// Index of the day's MAIN night among `blocks`, by the LEARNED-TIMING SCORE (replaces the old hard
@@ -511,15 +578,25 @@ public enum SleepStageTotals {
             // effective span is `[onset, onset + decoded in-bed]`; the gap between consecutive fragments is
             // awake the fragments' own stages don't cover.
             if let group {
-                let spans: [(start: Int, end: Int)] = group.map { i in
-                    let b = blocks[i]
-                    let onset = onsetByStart[b.startTs] ?? b.startTs
-                    let inBedSec = Int((minutes(fromStagesJSON: b.stagesJSON)?.inBed ?? 0) * 60.0)
+                // #259: trim each SELECTED block's stages to its EFFECTIVE onset before summing. A hand-edited
+                // or onset-trimmed bedtime that the raw was too sparse to re-stage (WHOOP 4.0) leaves pre-onset
+                // segments in the stored stagesJSON; summing them in full pushes asleep past time-in-bed (the
+                // impossible "6h41m asleep / 4h33m in bed" card). Selection above ran on the ORIGINAL blocks,
+                // so no #525/#547 pick regression — only the SUMMED main-night total is clamped. A block
+                // already staged from its onset (the common case) is unchanged. Mirrors Kotlin.
+                let clampedStages: [String?] = group.map { i in
+                    if let onset = onsetByStart[blocks[i].startTs] {
+                        return clampStagesToOnset(blocks[i].stagesJSON, onsetSec: onset)
+                    }
+                    return blocks[i].stagesJSON
+                }
+                let spans: [(start: Int, end: Int)] = group.enumerated().map { (gi, i) in
+                    let onset = onsetByStart[blocks[i].startTs] ?? blocks[i].startTs
+                    let inBedSec = Int((minutes(fromStagesJSON: clampedStages[gi])?.inBed ?? 0) * 60.0)
                     return (start: onset, end: onset + inBedSec)
                 }
                 let gapAwakeS = interFragmentAwakeSeconds(spans)
-                if let agg = dailyAggregate(group.map { blocks[$0].stagesJSON },
-                                            interFragmentAwakeSeconds: gapAwakeS) {
+                if let agg = dailyAggregate(clampedStages, interFragmentAwakeSeconds: gapAwakeS) {
                     return (agg, applied)
                 }
             }

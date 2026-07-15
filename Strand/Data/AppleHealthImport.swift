@@ -44,7 +44,11 @@ enum AppleHealthImport {
                         disturbances: nil,
                         restingHr: d.restingHr.map { Int($0.rounded()) },
                         avgHrv: d.hrvSDNN, recovery: nil, strain: nil, exerciseCount: nil,
-                        spo2Pct: d.spo2Pct, skinTempDevC: nil, respRateBpm: d.respRate)
+                        spo2Pct: d.spo2Pct, skinTempDevC: nil, respRateBpm: d.respRate,
+                        // #89: Apple Health steps must land in DailyMetric.steps too — the sourced-daily
+                        // arbitration resolves "steps" via metricValue(d) = d.steps, so leaving it nil (the
+                        // pre-fix state) meant imported Apple steps never surfaced there.
+                        steps: d.steps.map { Int($0) })
         }
         let dmWritten = try await store.upsertDailyMetrics(dm, deviceId: deviceId)
 
@@ -59,7 +63,8 @@ enum AppleHealthImport {
                        endTs: Int(w.end.timeIntervalSince1970),
                        sport: w.activityType, source: WorkoutSource.appleHealthSource,
                        durationS: w.durationS, energyKcal: w.energyKcal,
-                       avgHr: nil, maxHr: nil, strain: nil,
+                       avgHr: w.avgHr.map { Int($0.rounded()) },
+                       maxHr: w.maxHr.map { Int($0.rounded()) }, strain: nil,
                        distanceM: w.distanceM, zonesJSON: nil, notes: nil)
         }
         let workoutsWritten = try await store.upsertWorkouts(workouts, deviceId: deviceId)

@@ -446,6 +446,112 @@ extension WhoopStore {
                 t.primaryKey(["deviceId", "startTs"])
             }
         }
+        migrator.registerMigration("v23-daily-spo2-raw") { db in
+            // WHOOP 4.0 raw SpO2 PPG ADC means (red/IR) over detected sleep, cached beside the other
+            // in-sleep aggregates (#93). ADDITIVE, mirroring v7's SpO2/skin-temp/resp add: two nullable
+            // INTEGER columns. Existing rows read NULL (no rebuild, no data loss), so an older database
+            // upgraded in place is unaffected — non-4.0 nights + pre-upgrade rows simply stay nil.
+            try db.alter(table: "dailyMetric") { t in
+                t.add(column: "spo2Red", .integer)
+                t.add(column: "spo2Ir", .integer)
+            }
+        }
+        migrator.registerMigration("v24-rr-seq") { db in
+            // Widen rrInterval's PK to (deviceId, ts, rrMs, seq). The value-only key + ON CONFLICT DO
+            // NOTHING silently dropped the second of two EQUAL successive R-R intervals in one 1-second
+            // ts bucket, removing a zero-difference beat and biasing RMSSD/HRV high at rest/sleep (when
+            // HRV is scored). `seq` distinguishes equal (ts, rrMs) beats; distinct beats keep seq 0.
+            // Android parity: Room v18 (#163). SQLite can't ALTER a PK, so REBUILD — LOSS-LESS: every row
+            // copied with seq = 0, exact because the old PK made (deviceId, ts, rrMs) unique per row.
+            // Forward-only: already-dropped beats can't be recovered. rrInterval is a leaf table (no FKs
+            // in or out), so the drop/rename is safe.
+            try db.create(table: "rrInterval_new") { t in
+                t.column("deviceId", .text).notNull()
+                t.column("ts", .integer).notNull()
+                t.column("rrMs", .integer).notNull()
+                t.column("seq", .integer).notNull().defaults(to: 0)
+                t.column("synced", .integer).notNull().defaults(to: 0)
+                t.primaryKey(["deviceId", "ts", "rrMs", "seq"])
+            }
+            try db.execute(sql: """
+                INSERT INTO rrInterval_new (deviceId, ts, rrMs, seq, synced)
+                SELECT deviceId, ts, rrMs, 0, synced FROM rrInterval
+                """)
+            try db.execute(sql: "DROP TABLE rrInterval")
+            try db.execute(sql: "ALTER TABLE rrInterval_new RENAME TO rrInterval")
+        }
+
+        // v25: Oura live-API raw payload archive (lossless) behind the opt-in cloud import. One row per
+        // fetched page, keyed (deviceId, endpoint, documentId); payloadJSON holds the verbatim page body
+        // so any field can be re-derived later without re-fetching from the API. Additive only — a NEW
+        // table, no existing row touched, old readers unaffected. Numbered v25: upstream's v24-rr-seq
+        // landed in the same window and registers first to keep the sequence.
+        migrator.registerMigration("v25-oura-raw") { db in
+            try db.create(table: "ouraRaw") { t in
+                t.column("deviceId", .text).notNull()
+                t.column("endpoint", .text).notNull()       // "sleep" | "daily_readiness" | "heartrate" | …
+                t.column("documentId", .text).notNull()     // synthesized page key (endpoint + window + index)
+                t.column("day", .text)                       // YYYY-MM-DD when day-keyed (nullable)
+                t.column("payloadJSON", .text).notNull()     // verbatim page body
+                t.column("fetchedAt", .integer).notNull()    // unix seconds
+                t.primaryKey(["deviceId", "endpoint", "documentId"])
+            }
+            // Per-endpoint reads scan (deviceId, endpoint) then walk day in order.
+            try db.create(index: "idx_ouraRaw_device_endpoint_day",
+                          on: "ouraRaw", columns: ["deviceId", "endpoint", "day"])
+        }
+
+        // v26 (Oura efficiency unit heal): the Oura API importer (OuraApiParser.swift) wrote Oura's
+        // native 0-100 integer `efficiency` straight into sleepSession.efficiency / dailyMetric.efficiency,
+        // but NOOP's own sleep pipeline (StrandAnalytics) stores that shared column as a 0-1 FRACTION
+        // everywhere it computes it (asleep ÷ in-bed) — same column, two scales for oura-api rows written
+        // before the importer fix. UPDATE-only, NO schema change: divides `efficiency` by 100 for every
+        // row where it's > 1.5 — a threshold no genuine fraction can exceed (the column's convention
+        // caps at 1.0: `AnalyticsEngine` writes actual-sleep ÷ in-bed) and no genuine percent-scale
+        // leftover can fall under (no real night is ≤1.5% efficient), so the predicate can't touch an
+        // already-correct row and a second run finds nothing left: idempotent. Deliberately NOT
+        // deviceId-scoped: both known percent writers are healed by the same predicate — the Oura API
+        // importer ('oura-api' rows) and the WHOOP CSV importer (rows under whatever strap deviceId the
+        // user imported into). No Android Room migration twin in this PR: the Kotlin CSV importer gets
+        // the same write-boundary fix, but healing Android's historical rows needs a Room migration a
+        // maintainer should own (schema-version bump + column-order pinning).
+        migrator.registerMigration("v26-efficiency-heal") { db in
+            try db.execute(sql: """
+                UPDATE sleepSession SET efficiency = efficiency / 100.0
+                WHERE efficiency > 1.5
+                """)
+            try db.execute(sql: """
+                UPDATE dailyMetric SET efficiency = efficiency / 100.0
+                WHERE efficiency > 1.5
+                """)
+        }
+
+        // v27 (issue #156 follow-up): durable storage for the WHOOP 5.0 v26 optical PPG waveform. The
+        // strap's 24 Hz buffer was fully DECODED (`ppg_waveform`, 24 i16 ADC samples/record) but only
+        // ever used to derive a per-second HR estimate (`ppgHrSample`, v12) — the waveform itself was
+        // discarded right after, and `rejectedHistoricalRecords` explicitly excludes v26 from the
+        // undecodable-record reject archive ("known-and-unstored by design"), so it had no home at all.
+        //
+        // One row per (deviceId, ts) — the SAME shape as every other per-second decoded stream (hrSample,
+        // spo2Sample, ppgHrSample, …) — but the 24 samples are packed into a compact BLOB (2 bytes/sample,
+        // little-endian i16, `WhoopStore.packPpgSamples`/`unpackPpgSamples`) instead of 24 scalar rows.
+        // That keeps a v26-heavy night to roughly the same order of magnitude as ONE extra per-second
+        // stream (≈50 bytes/row), not 24x that. Additive only, a NEW table, no existing row touched.
+        //
+        // Retention: no pruning, matching every other durable per-second table (hrSample, spo2Sample, …
+        // are never pruned either) — this is decoded biometric history, not the transient raw outbox.
+        // `PrunePolicy`'s ~50 MB cap governs ONLY `rawBatch` (raw, pre-decode frames kept for re-decode /
+        // re-sync); it is untouched by and unrelated to this table. Growth here is bounded by how much
+        // v26 data a strap actually emits (firmware chooses v26 vs v18 per second, not every night is
+        // v26-heavy), not by an artificial cap.
+        migrator.registerMigration("v27-ppg-waveform") { db in
+            try db.create(table: "ppgWaveformSample") { t in
+                t.column("deviceId", .text).notNull()
+                t.column("ts", .integer).notNull()
+                t.column("samples", .blob).notNull()
+                t.primaryKey(["deviceId", "ts"])
+            }
+        }
         return migrator
     }
 }

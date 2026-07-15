@@ -109,6 +109,7 @@ fun LiveScreen(viewModel: AppViewModel, onManageDevices: () -> Unit = {}) {
     // Same day-cycle gate as the liquid Today (LiquidScreenSky.kt): the time-of-day sky settles behind the
     // top content when the user hasn't opted out; otherwise the scaffold paints the plain dark canvas.
     val showDayCycleBackground = remember { NoopPrefs.showDayCycleBackground(context) }
+    val skyBehindCards = remember { NoopPrefs.skyBehindCards(context) }
 
     // The runtime Bluetooth permission gates scanning. If it isn't granted, the Connect button
     // REQUESTS it (rather than silently doing nothing), then connects once allowed. Shared with
@@ -206,7 +207,10 @@ fun LiveScreen(viewModel: AppViewModel, onManageDevices: () -> Unit = {}) {
         // behind the header + hero and the cards float over the flat canvas below. Reuses the shared
         // LiquidScreenSky() slot verbatim; when the day-cycle background is off, the scaffold paints the
         // plain surface instead (matching the liquid Today's showDayCycleBackground gate).
-        topBackground = if (showDayCycleBackground) { { LiquidScreenSky() } } else null,
+        topBackground = if (showDayCycleBackground) { { LiquidScreenSky(fillHeight = skyBehindCards) } } else null,
+        // Sky-behind-cards fills the viewport so the transparent cards reveal the sky the whole way
+        // down (Today / Trends / Sleep / metric-detail parity - same two prefs, same two behaviours).
+        fullBleedBackground = showDayCycleBackground && skyBehindCards,
     ) {
 
         // Active band row (MW-6) — names the band the console is reading, with a "Manage devices"
@@ -742,6 +746,7 @@ private fun ConsoleHeader(live: LiveState, activeConnection: Boolean) {
                 live.encryptedBond && live.backfilling -> "Bonded · syncing" to StrandTone.Accent
                 live.encryptedBond -> "Bonded" to StrandTone.Positive
                 live.bonded -> "Live HR (not fully paired)" to StrandTone.Warning
+                ringStreaming(live) -> "Streaming" to StrandTone.Positive   // #56: trusted non-WHOOP stream
                 live.connected -> "Connected" to StrandTone.Warning
                 live.scanning -> "Searching…" to StrandTone.Warning
                 else -> "Disconnected" to StrandTone.Critical
@@ -857,9 +862,18 @@ private fun OfflineConnectCallout(scanning: Boolean, onConnect: () -> Unit) {
     }
 }
 
+/** #56: a non-WHOOP live source (the Oura ring, and on Android any external HR source that drives
+ *  [LiveState.streamingLiveHR]) that is connected and actively streaming live HR. It streams without a
+ *  WHOOP encrypted bond, so `bonded`/`activeConnection` never trip — which left the console reading
+ *  "stream not yet trusted" for a perfectly good stream. The status copy treats this as a trusted stream;
+ *  the bond-only feature gates (buzz, alarm, HRV snapshot) keep keying off `activeConnection`. Twin of the
+ *  iOS LiveView.ringStreaming. */
+private fun ringStreaming(live: LiveState): Boolean = live.connected && live.streamingLiveHR
+
 private fun connectionModeBadge(live: LiveState, activeConnection: Boolean): String = when {
     activeConnection && live.encryptedBond -> "FULL BOND"
     activeConnection -> "LIVE HR ONLY"
+    ringStreaming(live) -> "STREAMING"
     live.connected -> "CONNECTING"
     live.encryptedBond -> "PAIRED"
     else -> "OFFLINE"
@@ -871,7 +885,7 @@ private fun showsModeBadge(live: LiveState, activeConnection: Boolean): Boolean 
     !(!activeConnection && !live.connected && !live.encryptedBond)
 
 private fun connectionModeColor(live: LiveState, activeConnection: Boolean): Color = when {
-    activeConnection && live.encryptedBond -> Palette.accent
+    (activeConnection && live.encryptedBond) || ringStreaming(live) -> Palette.accent
     activeConnection || live.connected -> Palette.statusWarning
     else -> Palette.metricRose
 }
@@ -1115,7 +1129,7 @@ private fun signalTiles(live: LiveState, bpm: Int?, activeConnection: Boolean): 
     SignalTile(
         "Heart rate",
         bpm?.let { "$it bpm" } ?: "Missing",
-        if (activeConnection) "Streaming now" else "No active stream",
+        if (activeConnection || ringStreaming(live)) "Streaming now" else "No active stream",
         if (bpm == null) Palette.textTertiary else Palette.accent,
     ),
     SignalTile(
@@ -1129,10 +1143,15 @@ private fun signalTiles(live: LiveState, bpm: Int?, activeConnection: Boolean): 
         when {
             activeConnection && live.encryptedBond -> "Encrypted"
             activeConnection -> "Partial"
+            ringStreaming(live) -> "Streaming"
             live.connected -> "Connected"
             else -> "Offline"
         },
-        if (activeConnection && live.encryptedBond) "Controls unlocked" else "Standard HR is not a full bond",
+        when {
+            activeConnection && live.encryptedBond -> "Controls unlocked"
+            ringStreaming(live) -> "Live stream, no WHOOP bond"
+            else -> "Standard HR is not a full bond"
+        },
         connectionModeColor(live, activeConnection),
     ),
     SignalTile(
@@ -1191,7 +1210,7 @@ private fun signalTrustSummary(live: LiveState, activeConnection: Boolean): Stri
 
 private fun connectionModeDetail(live: LiveState, activeConnection: Boolean): String = when {
     activeConnection && live.encryptedBond -> "Full strap stream is active."
-    activeConnection -> "Heart rate stream is active."
+    activeConnection || ringStreaming(live) -> "Heart rate stream is active."
     live.connected -> "Radio connected, stream not yet trusted."
     else -> "No live stream."
 }

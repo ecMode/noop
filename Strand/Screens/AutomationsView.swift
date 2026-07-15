@@ -248,11 +248,6 @@ struct AutomationsView: View {
                     stepperRow(label: String(localized: "Buzz strength"), help: String(localized: "How strong the buzz is."),
                                value: $inactivity.buzzLoops, suffix: "×", range: 1...4, step: 1)
                     rowDivider
-                    // Reuses the shared notification only-when-worn gate (notif.onlyWhenWorn).
-                    ToggleRow(label: String(localized: "Only when worn"),
-                              help: String(localized: "Don't buzz when the strap is off your wrist."),
-                              isOn: onlyWhenWornBinding)
-                    rowDivider
                     ToggleRow(label: String(localized: "Only during active hours"),
                               help: String(localized: "Only nudge during your active hours."),
                               isOn: $inactivity.activeHoursEnabled)
@@ -280,12 +275,6 @@ struct AutomationsView: View {
     /// warning so enabling the reminder while master is off isn't silently a no-op.
     private var notifMasterOn: Bool {
         UserDefaults.standard.object(forKey: "notif.masterEnabled") as? Bool ?? false
-    }
-    /// The reused only-when-worn gate (notif.onlyWhenWorn, default ON) — the SAME key the notifications
-    /// screen and the engine read, so the two screens stay in sync.
-    private var onlyWhenWornBinding: Binding<Bool> {
-        Binding(get: { UserDefaults.standard.object(forKey: "notif.onlyWhenWorn") as? Bool ?? true },
-                set: { UserDefaults.standard.set($0, forKey: "notif.onlyWhenWorn") })
     }
     private var activeStartBinding: Binding<Date> {
         Binding(get: { Self.date(fromMinutes: inactivity.activeStartMinutes) },
@@ -382,6 +371,11 @@ struct AutomationsView: View {
                 .onChangeCompat(of: behavior.batteryAlerts) { on in
                     if on { BatteryNotifier.requestAuthorization() }
                 }
+            if behavior.batteryAlerts {
+                ToggleRow(label: String(localized: "Predictive runtime warning"),
+                          help: String(localized: "An early \"recharge tonight\" heads-up when the strap has about a day of estimated runtime left, at most once per discharge cycle. Turn off to keep only the 15% warning."),
+                          isOn: $behavior.batteryPredictiveAlerts)
+            }
         }
     }
 

@@ -2,6 +2,7 @@ package com.noop.oura
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -21,6 +22,20 @@ class OuraDriverTest {
     private val rt: Long = 0x0001_0002
 
     private fun bytes(s: String) = OuraTestHex.bytes(s)
+
+    @Test
+    fun testIsPlausibleAnchorEpochBounds() {
+        // The anchor plausibility window is [2020-01-01, 2035-01-01] UTC. OuraLiveSource reads this same
+        // predicate to log WHY an anchor was rejected (#91), so the boundaries are pinned here. Twin of the
+        // Swift OuraDriverTests.testIsPlausibleAnchorEpochBounds.
+        val d = OuraDriver(ringGen = OuraRingGen.GEN3, authKey = key)
+        assertTrue(d.isPlausibleAnchorEpoch(1_577_836_800L))    // 2020-01-01, inclusive min
+        assertTrue(d.isPlausibleAnchorEpoch(2_051_222_400L))    // 2035-01-01, inclusive max
+        assertTrue(d.isPlausibleAnchorEpoch(1_700_000_000L))    // ~2023, mid-window
+        assertFalse(d.isPlausibleAnchorEpoch(1_577_836_799L))   // one second before min
+        assertFalse(d.isPlausibleAnchorEpoch(2_051_222_401L))   // one second past max
+        assertFalse(d.isPlausibleAnchorEpoch(0L))               // epoch 0 — the ~1970 anchor #91 must avoid
+    }
 
     // MARK: - Full happy-path step sequence (auth -> enable triplet -> streaming)
 
@@ -352,6 +367,44 @@ class OuraDriverTest {
         assertEquals(0x49, ev.value.tag)
         assertEquals("sleep_summary", ev.value.kind)
         assertArrayEquals(bytes("01020304"), ev.value.rawPayload)
+    }
+
+    // MARK: - #287: 0x71 green_ibi_and_amp demoted to Tier B (twin of the Swift OuraDriverTests)
+
+    @Test
+    fun testGreenIBIAmp0x71TierIsB() {
+        // TIER_A == corpus-verified; no captured 0x71 fixture + §6.2 documents a different layout than the
+        // 0x60 decoder it was wired to, so it must NOT be Tier A.
+        assertEquals(TrustTier.TIER_B, OuraEventTag.GREEN_IBI_AMP.tier)
+    }
+
+    @Test
+    fun testGreenIBIAmp0x71GatedOutOfLiveEmission() {
+        // The SAME body the 0x60 decoder turns into IBIs, but tagged 0x71. Under the old Tier-A routing it
+        // fed fabricated R-R into HRV; now Tier B → by default it yields NOTHING.
+        val d = OuraDriver(ringGen = OuraRingGen.GEN3, authKey = key)   // allowTierB defaults to false
+        val rec = OuraFraming.parseRecord(bytes("7112020001007d10000000000000000000000007"))!!
+        assertEquals(
+            "0x71 must not emit IBIs - it is not corpus-verified (#287)",
+            emptyList<OuraEvent>(), d.ingest(rec),
+        )
+        // Control: the same bytes ARE otherwise decodable, so the [] above is the tier gate, not a short body.
+        assertNotNull("0x60 decoder still yields IBIs for these bytes", OuraDecoders.decodeIBIAmplitude(rec))
+    }
+
+    @Test
+    fun testGreenIBIAmp0x71EmitsRawSummaryNotIBIUnderAllowTierB() {
+        val d = OuraDriver(ringGen = OuraRingGen.GEN3, authKey = key, allowTierB = true)
+        val rec = OuraFraming.parseRecord(bytes("7112020001007d10000000000000000000000007"))!!
+        val events = d.ingest(rec)
+        assertEquals(1, events.size)
+        assertTrue(events[0].isTierB)
+        val ev = events[0]
+        assertTrue("expected a tierB raw-bytes summary, not a fabricated IBI", ev is OuraEvent.TierB)
+        ev as OuraEvent.TierB
+        assertEquals(0x71, ev.value.tag)
+        assertEquals("green_ibi_amp", ev.value.kind)
+        for (e in events) assertFalse("0x71 must never emit Ibi (#287)", e is OuraEvent.Ibi)
     }
 
     // MARK: - Activity info (0x50, Tier B, third-party formula) - real Gen 3 captures (PR #960)

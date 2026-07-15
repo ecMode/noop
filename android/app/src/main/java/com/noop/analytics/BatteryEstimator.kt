@@ -92,9 +92,11 @@ object BatteryEstimator {
 
         val rate = measuredRate ?: (100.0 / maxOf(ratedHours, 1.0))
         val remaining = maxOf(0.0, current) / rate
-        // A fresh full charge can't realistically beat about 1.5x the rated life, so clamp out any wild
-        // estimate from a near-flat measured run that still squeaked past the drop gate.
-        val clamped = minOf(remaining, ratedHours * 1.5)
+        // #99: cap scaled to the CURRENT SoC, not a flat multiple of the FULL rated life. The old
+        // `ratedHours * 1.5` ignored SoC, so a too-slow measured slope at low charge (idle/off-wrist spans,
+        // sparse 5/MG SoC readings) extrapolated 9% to ~3 days — more than a full 12-day MG charge. You can't
+        // realistically stretch the rated per-% runtime past ~1.5x, so bound to that scaled to `current`%.
+        val clamped = minOf(remaining, ratedHours * 1.5 * (maxOf(0.0, current) / 100.0))
         return Estimate(clamped, if (measuredRate != null) Source.MEASURED else Source.RATED, current)
     }
 
@@ -125,14 +127,25 @@ object BatteryEstimator {
         }
 
         // 1b. #919: with no near-full (>=90%) charge to anchor on - common on a 12-day WHOOP 5.0 that rarely
-        //     tops past 90% between charges - anchor at the buffer's HIGHEST SoC (the top of the most recent
+        //     tops past 90% between charges - anchor at the HIGHEST SoC (the top of the most recent
         //     discharge) rather than the oldest reading, which can sit below a later charge and net to a
         //     NON-discharge window (drop < 0 -> stuck on rated). The max is >= every later reading, so the
         //     window can only discharge; the >=minDropPct gate still rejects a flat run. Preserves #8: its
         //     buffer starts at the max, so this stays index 0 there. Last occurrence of the max (>=).
+        //     #99: that max search used to scan the WHOLE buffer, so a strap that tops up short of full
+        //     every day (never tripping rule 1) could anchor on a peak several CYCLES back, netting the fit
+        //     across multiple undetected intermediate top-ups and flattening the slope into something that
+        //     no longer reflects how the strap is actually draining "today". Bounding the search to at most
+        //     the last two charge-step cycles keeps it anchored to the CURRENT usage pattern; a buffer with
+        //     0 or 1 charge-steps searches from the start exactly as before (#8, #919 unaffected).
         if (startIdx == 0) {
-            var maxIdx = 0
-            for (i in sorted.indices) if (sorted[i].second >= sorted[maxIdx].second) maxIdx = i
+            val chargeStepIdxs = mutableListOf<Int>()
+            for (i in 1 until sorted.size) {
+                if (sorted[i].second > sorted[i - 1].second + chargeStepPct) chargeStepIdxs.add(i)
+            }
+            val searchFloor = if (chargeStepIdxs.size >= 2) chargeStepIdxs[chargeStepIdxs.size - 2] else 0
+            var maxIdx = searchFloor
+            for (i in searchFloor until sorted.size) if (sorted[i].second >= sorted[maxIdx].second) maxIdx = i
             startIdx = maxIdx
         }
 
@@ -235,4 +248,34 @@ object BatteryEstimator {
     fun label(hours: Double): String =
         if (hours < 48) "~${hours.roundToLong()}h"
         else "~${String.format(Locale.US, "%.1f", hours / 24)} days"
+
+    // ---- Predictive low-battery alert policy ----
+
+    /** Fire the runtime alert when the estimate drops to this many hours of remaining life. A fixed
+     *  SoC threshold gives wildly different lead time per strap generation (15% is ~16 h on a 4.0 but
+     *  ~1.8 days on a 5.0/MG); a runtime threshold means the same "charge it tonight" warning for both. */
+    const val runtimeAlertHours = 24.0
+
+    /** Re-arm only when the estimate recovers to this. The 12 h hysteresis band means jitter in the
+     *  fitted slope around the alert line can't re-fire; only a genuine charge opens the gate again. */
+    const val runtimeRearmHours = 36.0
+
+    data class RuntimeAlertDecision(val fire: Boolean, val newAlerted: Boolean)
+
+    /**
+     * Crossing-with-hysteresis decision for the predictive alert, mirroring BatteryAlertPolicy's
+     * shape: PERSISTED `alerted` gate in, fire decision plus next gate state out. Behaviour-identical
+     * twin of the Swift `BatteryEstimator.runtimeAlert` (same fixtures, same numbers).
+     *
+     * `charging == null` means unknown — the alert still fires (only a confirmed `true` suppresses
+     * it), the same null-tolerant rule as the SoC low alert: the strap reports its charge bit only
+     * every ~8 min, and a strap that never reports one should still warn.
+     */
+    fun runtimeAlert(remainingHours: Double, charging: Boolean?, alerted: Boolean): RuntimeAlertDecision {
+        var armedOff = alerted
+        if (remainingHours >= runtimeRearmHours) armedOff = false
+        val fire = !armedOff && remainingHours <= runtimeAlertHours && charging != true
+        if (fire) armedOff = true
+        return RuntimeAlertDecision(fire, armedOff)
+    }
 }

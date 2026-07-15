@@ -148,12 +148,12 @@ final class Repository: ObservableObject {
     /// The distinct IMPORTED/MEASURED source ids to union for a dashboard read: the active strap (live raw,
     /// #814) and the canonical imported id. Active strap FIRST so per-day dedup lets the measured/live row
     /// win over the imported one. Deduped, so a single-device install (active id == canonical) reads one id.
-    private var importedReadIds: [String] {
+    var importedReadIds: [String] {
         deviceId == canonicalDeviceId ? [deviceId] : [deviceId, canonicalDeviceId]
     }
     /// The distinct COMPUTED ("-noop") source ids to union: the active strap's computed sibling and the
     /// canonical computed sibling. Same dedup rule as `importedReadIds`.
-    private var computedReadIds: [String] {
+    var computedReadIds: [String] {
         computedDeviceId == canonicalComputedId ? [computedDeviceId] : [computedDeviceId, canonicalComputedId]
     }
     private var store: WhoopStore?
@@ -425,6 +425,20 @@ final class Repository: ObservableObject {
     nonisolated static func lastVitalsDay(days: [DailyMetric], todayKey: String) -> DailyMetric? {
         DailyMetric.lastVitalsDay(days: days, todayKey: todayKey)
     }
+
+    /// PER-FIELD SpO₂ carry — the twin of `lastVitalsDay(days:todayKey:)` for the field its predicate does
+    /// NOT check. The engine writes `spo2Pct = nil` on computed rows (only imported rows carry a percentage),
+    /// so a whole-row carry lands on a null `spo2Pct`; this resolves the freshest strictly-prior row that
+    /// actually has one. Forwards to the pure package selector — pass the future-clock-safe key (the later of
+    /// logical/local) so the `< todayKey` bound is honest. See `DailyMetric.lastSpo2Day`.
+    nonisolated static func lastSpo2Day(days: [DailyMetric], todayKey: String) -> DailyMetric? {
+        DailyMetric.lastSpo2Day(days: days, todayKey: todayKey)
+    }
+
+    /// PER-FIELD skin-temperature-deviation carry — twin of the above. See `DailyMetric.lastSkinTempDay`.
+    nonisolated static func lastSkinTempDay(days: [DailyMetric], todayKey: String) -> DailyMetric? {
+        DailyMetric.lastSkinTempDay(days: days, todayKey: todayKey)
+    }
     /// The trailing 7 CALENDAR days ending today (for the week strip), oldest→newest , not the last 7
     /// stored rows, which on a stale import were old data. ISO yyyy-MM-dd compares chronologically.
     var week: [DailyMetric] {
@@ -449,7 +463,7 @@ final class Repository: ObservableObject {
     /// stream, so the source-only fold in IntelligenceEngine scores them from the daily aggregate vs the
     /// person's own baseline. Matches `WearableBrand.sourceId` plus Health Connect (Android imports HC's
     /// daily metrics under the strap source, but a sideloaded/standalone HC source id is covered too).
-    static let wearableImportSources = ["oura-import", "fitbit-import", "garmin-import", healthConnectSource]
+    static let wearableImportSources = ["oura-import", "fitbit-import", "garmin-import", "oura-api", healthConnectSource]
 
     /// `yyyy-MM-dd` in the device's local zone, matching how `DailyMetric.day` is stored.
     private static let dayKeyFormatter: DateFormatter = {
@@ -897,6 +911,21 @@ final class Repository: ObservableObject {
         return Self.latestActivityClass(perId)
     }
 
+    /// Raw strap step TICKS over `[from, to]` for a manual-workout summary (#398): the wrap-aware
+    /// `step_motion_counter@57` delta-sum (shared `StepsCounter` kernel) from the FIRST id that has a
+    /// countable window — the active strap wins, mirroring `stepActivityClassLatest`. Never MERGED across
+    /// ids: two devices' cumulative counters must not be interleaved (that would fabricate huge deltas).
+    /// `nil` when no strap counter covers the window — a WHOOP 4.0 (no @57 counter) or an MG/5.0 that hasn't
+    /// offloaded the window yet. The caller applies `stepTicksPerStep` and reconciles with the phone pedometer.
+    func strapStepTicks(from: Int, to: Int) async -> Int? {
+        guard let store = await ensureStore() else { return nil }
+        for id in importedReadIds {   // active strap FIRST
+            let samples = (try? await store.stepSamples(deviceId: id, from: from, to: to, limit: 200_000)) ?? []
+            if let ticks = StepsCounter.stepsInWindow(samples) { return ticks }
+        }
+        return nil
+    }
+
     /// Pure pick of the latest classed activity across the union's per-id step lists: the non-nil
     /// `activityClass` on the sample with the greatest ts, resolving a ts tie in favour of the FIRST list (the
     /// active strap, mirroring the union's active-wins rule). Static + pure so it's unit-testable without a
@@ -958,13 +987,10 @@ final class Repository: ObservableObject {
     /// A start with no stored series is omitted from the result (its key is absent).
     func sessionMotions(starts: [Int]) async -> [Int: [Double]] {
         guard !starts.isEmpty, let store = await ensureStore() else { return [:] }
-        var out: [Int: [Double]] = [:]
-        for start in starts {
-            if let m = try? await store.sessionMotion(deviceId: computedDeviceId, sessionStart: start), !m.isEmpty {
-                out[start] = m
-            }
-        }
-        return out
+        // One batched read keyed by startTs, not a single-row SELECT per session start. The store's
+        // batched accessor keeps the exact contract of the old loop: starts with no (or an empty) series
+        // are omitted from the result.
+        return (try? await store.sessionMotions(deviceId: computedDeviceId, sessionStarts: starts)) ?? [:]
     }
 
     /// The user's learned habitual midsleep (local time-of-day seconds), or nil under
@@ -1238,15 +1264,25 @@ final class Repository: ObservableObject {
         let hr = (try? await store.hrSamples(deviceId: deviceId, from: lo, to: hi, limit: 200_000)) ?? []
         let rr = (try? await store.rrIntervals(deviceId: deviceId, from: lo, to: hi, limit: 200_000)) ?? []
         let resp = (try? await store.respSamples(deviceId: deviceId, from: lo, to: hi, limit: 200_000)) ?? []
+        // #364 follow-up: motion-aware wake refinement (default OFF). Read the steps only when it might
+        // actually run — a plain read cost, but no point paying it on the (default) off path.
+        let useMotionAwareWake = PuffinExperiment.motionAwareWakeEnabled
+        let steps = useMotionAwareWake
+            ? ((try? await store.stepSamples(deviceId: deviceId, from: lo, to: hi, limit: 200_000)) ?? [])
+            : []
         // Which staging engine runs over the already-detected window: V2 (the cardiorespiratory recipe
-        // `SleepStagerV2`) is the DEFAULT on WHOOP 5/MG — that family has no resp channel and V1 degrades
-        // badly without it — while WHOOP 4.0 stays on V1; the experimental toggle forces V2 on any model.
-        // See `PuffinExperiment.useSleepStagerV2`. Read once here off the actor; detection is unchanged.
+        // `SleepStagerV2`) is FORCED on WHOOP 5/MG — that family has no resp channel and V1 buries the night
+        // in "light" — and is otherwise the default-on toggle for every strap (upstream #351), so a 5/MG
+        // opt-out still stays on V2 while a 4.0 opt-out falls back to V1. See `PuffinExperiment.useSleepStagerV2`.
+        // Read once here off the actor; detection is unchanged.
         let useV2 = PuffinExperiment.useSleepStagerV2
         let segs = await Task.detached(priority: .utility) {
-            useV2
+            let staged = useV2
                 ? SleepStagerV2.stageSession(start: start, end: end, grav: grav, hr: hr, rr: rr, resp: resp)
                 : SleepStager.stageSession(start: start, end: end, grav: grav, hr: hr, rr: rr, resp: resp)
+            // #364 follow-up: motion-aware wake refinement post-pass, same toggle-shaped no-op when off
+            // as every other Experimental switch here.
+            return WakeMotionRefinement.apply(staged, grav: grav, steps: steps, enabled: useMotionAwareWake)
         }.value
         return AnalyticsEngine.encodeStages(segs)
     }
@@ -1447,16 +1483,14 @@ final class Repository: ObservableObject {
     }
 
     /// Map each device id to the strap family that wrote its rows (#938), for the family-aware skin-temp
-    /// raw→°C conversion. Reads the registry ONCE; a device whose model is "WHOOP 4.0" maps to `.whoop4`,
-    /// and every other id — a 5/MG, a non-WHOOP import, or an id absent from the registry — maps to
-    /// `.whoop5` (the prior /100 behaviour), so only a KNOWN 4.0 changes scale. Best-effort: an unreadable
+    /// raw→°C conversion. Reads the registry ONCE; the model-label → family mapping (and the `.whoop5`
+    /// fallback for unknowns) lives in `DeviceFamily.forRegistryModel` (#171). Best-effort: an unreadable
     /// registry yields an empty map, so every caller falls back to `.whoop5`.
     private static func skinTempFamilies(store: WhoopStore, ids: [String]) -> [String: DeviceFamily] {
         let devices = (try? DeviceRegistryStore(dbQueue: store.registryWriter).all()) ?? []
         var out: [String: DeviceFamily] = [:]
         for id in ids {
-            let isW4 = devices.first(where: { $0.id == id }).map { WhoopModel(rawValue: $0.model) == .whoop4 } ?? false
-            out[id] = isW4 ? .whoop4 : .whoop5
+            out[id] = DeviceFamily.forRegistryModel(devices.first(where: { $0.id == id })?.model)
         }
         return out
     }
@@ -1659,14 +1693,19 @@ final class Repository: ObservableObject {
         }
 
         if preferredSource == whoopSource || preferredSource == actualWhoopSource {
-            // Active strap first (live/measured wins per day), then the CANONICAL "my-whoop" import + its
-            // computed sibling so history banked under the canonical id before a re-add still resolves (the
-            // union model). `uniqued` collapses these to one pair on a single-device install (active ==
-            // canonical), so that path is byte-identical. Apple is the final cross-source fallback.
+            // Active strap first (live/measured wins per day), then the CANONICAL "my-whoop" import, THEN
+            // the computed siblings, so history banked under the canonical id before a re-add still
+            // resolves (the union model) and imports outrank computed estimates — the documented
+            // `imported WHOOP > NOOP-computed` order. The computed sibling used to sit ahead of the
+            // canonical import, so after a device re-add (active != canonical) the new strap's computed
+            // estimates shadowed richer imported my-whoop history (Swift twin of the ryanbr/noop#240
+            // precedence fix). `uniqued` collapses these to one pair per source on a single-device
+            // install (active == canonical), so that path is byte-identical. Apple is the final
+            // cross-source fallback.
             var candidates = [
                 MetricSourceCandidate(source: actualWhoopSource, key: key),
-                MetricSourceCandidate(source: computedSource, key: key),
                 MetricSourceCandidate(source: whoopSource, key: key),
+                MetricSourceCandidate(source: computedSource, key: key),
                 MetricSourceCandidate(source: whoopSource + "-noop", key: key),
             ]
             if let appleKey = appleCompatibleKey(forWhoopKey: key) {
@@ -2505,7 +2544,11 @@ private extension DailyMetric {
             skinTempDevC: skinTempDevC ?? fallback.skinTempDevC,
             respRateBpm: respRateBpm ?? fallback.respRateBpm,
             steps: steps ?? fallback.steps,
-            activeKcalEst: activeKcalEst ?? fallback.activeKcalEst
+            activeKcalEst: activeKcalEst ?? fallback.activeKcalEst,
+            // Raw SpO2 is on-device only (imports never carry it), so the imported row's nil is
+            // backfilled from the computed fallback — otherwise the nightly means would be lost. (#93)
+            spo2Red: spo2Red ?? fallback.spo2Red,
+            spo2Ir: spo2Ir ?? fallback.spo2Ir
         )
     }
 
@@ -2531,7 +2574,9 @@ private extension DailyMetric {
             skinTempDevC: skinTempDevC,
             respRateBpm: respRateBpm,
             steps: steps,
-            activeKcalEst: activeKcalEst
+            activeKcalEst: activeKcalEst,
+            spo2Red: spo2Red,   // non-sleep field: preserved as-is (#93)
+            spo2Ir: spo2Ir
         )
     }
 }

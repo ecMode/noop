@@ -3,6 +3,12 @@
   "strings": {
     "%@ br/min": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ Atemzüge/Min"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -21,6 +27,18 @@
             "value": "%@ resp/min"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "%@ resp/min"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ вдохов/мин"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -37,6 +55,12 @@
     },
     "%@ pace": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ Tempo"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -55,6 +79,18 @@
             "value": "Ritmo %@"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Ritmo %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ темп"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -71,6 +107,12 @@
     },
     "%@ · %@s in / %@s out": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · %@s ein / %@s aus"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -89,6 +131,18 @@
             "value": "%@ · %@s dentro / %@s fuori"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "%@ · %@s inspira / %@s expira"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · %@с вдох / %@с выдох"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -105,6 +159,12 @@
     },
     "%@ · %lld kcal": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · %lld kcal"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -121,6 +181,18 @@
           "stringUnit": {
             "state": "translated",
             "value": "%@ · %lld kcal"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "%@ · %lld kcal"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · %lld ккал"
           }
         },
         "zh-Hans": {
@@ -139,6 +211,12 @@
     },
     "%lld breaths · %@": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld Atemzüge · %@"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -157,6 +235,18 @@
             "value": "%lld respiri · %@"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "%lld respirações · %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld вдохов · %@"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -173,6 +263,12 @@
     },
     "%lld seconds remaining in %@": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld Sekunden verbleibend in %@"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "new",
@@ -191,6 +287,18 @@
             "value": "%1$lld secondi rimanenti in %2$@"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "%1$lld segundos restantes em %2$@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Осталось %1$lld секунд, %2$@"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -207,6 +315,12 @@
     },
     "Allow access": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zugriff erlauben"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -225,6 +339,18 @@
             "value": "Consenti accesso"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Permitir acesso"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Разрешить доступ"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -241,6 +367,12 @@
     },
     "Box": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Box"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -257,6 +389,18 @@
           "stringUnit": {
             "state": "translated",
             "value": "Box"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Caixa"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Квадрат"
           }
         },
         "zh-Hans": {
@@ -305,6 +449,12 @@
             "value": "Respira"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Respirar"
+          }
+        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -327,6 +477,12 @@
     },
     "Breathe in": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einatmen"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -345,6 +501,18 @@
             "value": "Inspira"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Inspira"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Вдох"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -361,6 +529,12 @@
     },
     "Breathe in for %lld seconds": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einatmen für %lld Sekunden"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -379,6 +553,18 @@
             "value": "Inspira per %lld secondi"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Inspira durante %lld segundos"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Вдох на %lld секунд"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -395,6 +581,12 @@
     },
     "Breathe out": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ausatmen"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -413,6 +605,18 @@
             "value": "Espira"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Expira"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Выдох"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -429,6 +633,12 @@
     },
     "Breathe out for %lld seconds": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ausatmen für %lld Sekunden"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -445,6 +655,18 @@
           "stringUnit": {
             "state": "translated",
             "value": "Espira per %lld secondi"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Expira durante %lld segundos"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Выдох на %lld секунд"
           }
         },
         "zh-Hans": {
@@ -493,6 +715,12 @@
             "value": "Carica"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Carga"
+          }
+        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -515,6 +743,12 @@
     },
     "Coherence": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kohärenz"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -533,6 +767,18 @@
             "value": "Coerenza"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Coerência"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Когерентность"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -549,6 +795,12 @@
     },
     "DONE": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "FERTIG"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -567,6 +819,18 @@
             "value": "FATTO"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "CONCLUÍDO"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ГОТОВО"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -583,6 +847,12 @@
     },
     "Done": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fertig"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -599,6 +869,18 @@
           "stringUnit": {
             "state": "translated",
             "value": "Fatto"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Concluído"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Готово"
           }
         },
         "zh-Hans": {
@@ -647,6 +929,12 @@
             "value": "Sforzo"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Esforço"
+          }
+        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -669,6 +957,12 @@
     },
     "End": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ende"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -687,6 +981,18 @@
             "value": "Fine"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Terminar"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Завершить"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -703,6 +1009,12 @@
     },
     "End workout": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workout beenden"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -721,6 +1033,18 @@
             "value": "Termina allenamento"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Terminar treino"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Завершить тренировку"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -737,6 +1061,12 @@
     },
     "Functional strength": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Funktionelles Krafttraining"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -755,6 +1085,18 @@
             "value": "Forza funzionale"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Força funcional"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Функциональная сила"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -771,6 +1113,12 @@
     },
     "Grant Health access": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Health-Zugriff gewähren"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -787,6 +1135,18 @@
           "stringUnit": {
             "state": "translated",
             "value": "Concedi l'accesso a Salute"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Conceder acesso à Saúde"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Разрешить доступ к Health"
           }
         },
         "zh-Hans": {
@@ -835,6 +1195,12 @@
             "value": "FREQUENZA CARDIACA"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "FREQUÊNCIA CARDÍACA"
+          }
+        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -857,6 +1223,12 @@
     },
     "HR unavailable": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HF nicht verfügbar"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -875,6 +1247,18 @@
             "value": "FC non disponibile"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "FC indisponível"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ЧСС недоступна"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -891,6 +1275,12 @@
     },
     "Live heart rate and energy, recorded on your wrist. Stays on device.": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Live-Herzfrequenz und -Energie, aufgezeichnet an deinem Handgelenk. Bleibt auf dem Gerät."
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -909,6 +1299,18 @@
             "value": "Frequenza cardiaca ed energia in diretta, registrate al polso. Restano sul dispositivo."
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Frequência cardíaca e energia em tempo real, registadas no pulso. Ficam no dispositivo."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Пульс и энергия в реальном времени, записанные на запястье. Остаются на устройстве."
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -925,6 +1327,12 @@
     },
     "Open NOOP on your iPhone to sync": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Öffne NOOP auf deinem iPhone zum Synchronisieren"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -943,6 +1351,18 @@
             "value": "Apri NOOP sul tuo iPhone per sincronizzare"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Abre o NOOP no iPhone para sincronizar"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Откройте NOOP на iPhone для синхронизации"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -959,6 +1379,12 @@
     },
     "PAUSED": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PAUSIERT"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -975,6 +1401,18 @@
           "stringUnit": {
             "state": "translated",
             "value": "IN PAUSA"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "EM PAUSA"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ПАУЗА"
           }
         },
         "zh-Hans": {
@@ -1023,6 +1461,12 @@
             "value": "Pausa"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Pausar"
+          }
+        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1045,6 +1489,12 @@
     },
     "RECORDING": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AUFNAHME"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -1063,6 +1513,18 @@
             "value": "REGISTRAZIONE"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "A GRAVAR"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ЗАПИСЬ"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -1079,6 +1541,12 @@
     },
     "REST": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "RUHE"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -1097,6 +1565,18 @@
             "value": "RIPOSO"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "DESCANSO"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ОТДЫХ"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -1113,6 +1593,12 @@
     },
     "Ready to breathe": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bereit zum Atmen"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -1131,6 +1617,18 @@
             "value": "Pronto a respirare"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Pronto para respirar"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Готовы к дыханию"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -1147,6 +1645,12 @@
     },
     "Relax": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entspannen"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -1163,6 +1667,18 @@
           "stringUnit": {
             "state": "translated",
             "value": "Rilassati"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Relaxa"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Расслабьтесь"
           }
         },
         "zh-Hans": {
@@ -1209,6 +1725,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Reimposta"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Repor"
           }
         },
         "ru": {
@@ -1263,6 +1785,12 @@
             "value": "Riposo"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Descanso"
+          }
+        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1315,6 +1843,12 @@
             "value": "Riavvia"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Reiniciar"
+          }
+        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1337,6 +1871,12 @@
     },
     "Resume": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fortsetzen"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -1355,6 +1895,18 @@
             "value": "Riprendi"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Retomar"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Продолжить"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -1371,6 +1923,12 @@
     },
     "Round %lld of %lld": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Runde %lld von %lld"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -1389,6 +1947,18 @@
             "value": "Round %lld di %lld"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Ronda %lld de %lld"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Раунд %lld из %lld"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -1405,6 +1975,12 @@
     },
     "SEC": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SEK"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -1423,6 +1999,18 @@
             "value": "SEC"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "SEG"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "СЕК"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -1439,6 +2027,12 @@
     },
     "Session done": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sitzung beendet"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -1455,6 +2049,18 @@
           "stringUnit": {
             "state": "translated",
             "value": "Sessione completata"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Sessão concluída"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Сессия завершена"
           }
         },
         "zh-Hans": {
@@ -1501,6 +2107,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Avvia"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Iniciar"
           }
         },
         "ru": {
@@ -1555,6 +2167,12 @@
             "value": "Avvia sessione"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Iniciar sessão"
+          }
+        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1577,6 +2195,12 @@
     },
     "Stop": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stopp"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -1593,6 +2217,18 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ferma"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Parar"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Стоп"
           }
         },
         "zh-Hans": {
@@ -1641,6 +2277,12 @@
             "value": "Termina sessione"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Parar sessão"
+          }
+        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1663,6 +2305,12 @@
     },
     "WORK": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AKTIV"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -1681,6 +2329,18 @@
             "value": "LAVORO"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "TRABALHO"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "РАБОТА"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -1697,6 +2357,12 @@
     },
     "Workout": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workout"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -1715,6 +2381,18 @@
             "value": "Allenamento"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Treino"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Тренировка"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -1731,6 +2409,12 @@
     },
     "Workout saved": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workout gespeichert"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -1749,6 +2433,18 @@
             "value": "Allenamento salvato"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "Treino guardado"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Тренировка сохранена"
+          }
+        },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
@@ -1765,6 +2461,12 @@
     },
     "as of %@": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stand: %@"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -1781,6 +2483,18 @@
           "stringUnit": {
             "state": "translated",
             "value": "al %@"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "em %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "на %@"
           }
         },
         "zh-Hans": {
@@ -1829,6 +2543,12 @@
             "value": "bpm"
           }
         },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "bpm"
+          }
+        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1851,16 +2571,40 @@
     },
     "cal": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "cal"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
             "value": "cal"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "cal"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "кал"
           }
         }
       }
     },
     "stale · %@": {
       "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "veraltet · %@"
+          }
+        },
         "en": {
           "stringUnit": {
             "state": "translated",
@@ -1877,6 +2621,18 @@
           "stringUnit": {
             "state": "translated",
             "value": "obsoleto · %@"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "needs_review",
+            "value": "desatualizado · %@"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "устарело · %@"
           }
         },
         "zh-Hans": {

@@ -93,6 +93,7 @@ fun StressScreen(vm: AppViewModel, onBreathe: () -> Unit = {}) {
     // so turning it off falls back to the flat theme canvas on every liquid screen alike.
     val context = LocalContext.current
     val showDayCycleBackground = remember { NoopPrefs.showDayCycleBackground(context) }
+    val skyBehindCards = remember { NoopPrefs.skyBehindCards(context) }
 
     // Stored daily "stress" values (0–3), keyed by day. Loaded once per device; the
     // metricSeries store is the Android analogue of the macOS `repo.series(key:source:)`.
@@ -137,7 +138,10 @@ fun StressScreen(vm: AppViewModel, onBreathe: () -> Unit = {}) {
         // status bar via the scaffold's topBackground plumbing), and the cards float OVER it on the flat
         // surface below. The Android equivalent of the iOS `ScreenScaffold(topBackground: liquidScaffoldSky())`.
         // Gated on the "Day-cycle background" setting like Today; off passes null (the flat-canvas path).
-        topBackground = if (showDayCycleBackground) { { LiquidScreenSky() } } else null,
+        topBackground = if (showDayCycleBackground) { { LiquidScreenSky(fillHeight = skyBehindCards) } } else null,
+        // Sky-behind-cards fills the viewport so the transparent cards reveal the sky the whole way
+        // down (Today / Trends / Sleep / metric-detail parity - same two prefs, same two behaviours).
+        fullBleedBackground = showDayCycleBackground && skyBehindCards,
     ) {
         when {
             model != null -> StressContent(model, daytime, stressIndex, freqHrv, onBreathe)
@@ -1197,12 +1201,21 @@ internal class StressModel private constructor(
         /** Build from oldest→newest daily metrics plus any stored "stress" series.
          *  Returns null only when there is no usable signal at all. */
         fun build(days: List<DailyMetric>, stored: Map<String, Double>): StressModel? {
-            val today = days.lastOrNull() ?: return null
+            // Carry (#543): today's own row is often vitals-less until the overnight is analyzed —
+            // especially right after an app update relaunches and re-runs the pass — so score the NEWEST
+            // day that actually carries usable signal (RHR/HRV, or a stored/imported stress value) instead
+            // of calibrating, the same last-night carry every other Today vital uses. The predicate mirrors
+            // the storedToday||derived gate below, so an imported stress-only latest day is still honored
+            // (not skipped). Falls back to the last row when no day has any signal (cold start).
+            val idx = days.indexOfLast {
+                it.restingHr != null || it.avgHrv != null || stored.containsKey(it.day)
+            }.let { if (it >= 0) it else days.size - 1 }
+            if (idx < 0) return null   // no days at all
+            val today = days[idx]
 
-            // Baseline window: up to 30 days ending the day BEFORE today, so "today" is
-            // measured against its own recent past rather than itself.
-            val history = if (days.size > 1) days.dropLast(1) else emptyList()
-            val baseline = history.takeLast(30)
+            // Baseline window: up to 30 days ending the day BEFORE the scored day, so it's measured
+            // against its own recent past rather than itself.
+            val baseline = if (idx > 0) days.subList(0, idx).takeLast(30) else emptyList()
 
             val rhrBase = baseline.mapNotNull { it.restingHr?.toDouble() }
             val hrvBase = baseline.mapNotNull { it.avgHrv }

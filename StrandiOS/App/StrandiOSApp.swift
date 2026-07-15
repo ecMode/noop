@@ -1,6 +1,7 @@
 #if os(iOS)
 import SwiftUI
 import StrandDesign
+import UserNotifications
 
 /// iOS entry point. Unlike the macOS app (which adds a `MenuBarExtra` scene), iOS uses a single
 /// `WindowGroup`; the glanceable menu-bar role is filled by the Home/Lock-Screen widget instead.
@@ -45,6 +46,10 @@ struct StrandiOSApp: App {
         // target's BGTaskSchedulerPermittedIdentifiers (project.yml). Without this the overnight drop
         // never fires; the macOS timer, foreground catch-up, and "Run now" already work without it.
         ScheduledDebugExport.register()
+        // Foreground presentation: without a delegate, iOS suppresses a notification's banner while the app
+        // is open, so a user testing the wind-down reminder with NOOP foregrounded sees nothing. Register
+        // before the first scene so any early-fired notification is presented.
+        UNUserNotificationCenter.current().delegate = NotificationPresenter.shared
         let model = AppModel()
         _model = StateObject(wrappedValue: model)
         _health = StateObject(wrappedValue: HealthKitBridge(
@@ -128,6 +133,32 @@ struct StrandiOSApp: App {
                     // so a refresh storm can't burn the ~50/day complication transfer budget.
                     Task { await watch.pushLatest(from: model) }
                 }
+                // #114: strap battery % and connection are LIVE (model.live), not repo-cache, so they never
+                // bump refreshSeq — the widget's battery would otherwise never move while the app is open
+                // (the "battery not updating" report). Republish on those too, foreground-gated. Both are
+                // low-frequency (battery ~every 8 min; connection flips are rare), so no throttle is needed
+                // and foreground-initiated reloads are budget-exempt. dropFirst() skips the attach replay.
+                .onReceive(model.live.$batteryPct.dropFirst()) { _ in
+                    guard scenePhase == .active else { return }
+                    Task { await WidgetSnapshot.publish(from: model) }
+                }
+                .onReceive(model.live.$connected.dropFirst()) { _ in
+                    guard scenePhase == .active else { return }
+                    Task { await WidgetSnapshot.publish(from: model) }
+                }
+                // #114 (follow-up): `WidgetSnapshot.bpm` reads `model.bpm` (WidgetPublish.swift), the
+                // smoothed live HR — same LIVE-not-repo-cache category as battery/connected above, so it
+                // has the same gap: nothing bumped `refreshSeq` while a heart-rate stream was live, so the
+                // widget's HR froze at the last foreground snapshot for the rest of the session. UNLIKE
+                // battery/connection, HR is HIGH-frequency (the smoothed median moves every few seconds
+                // under activity), so — unlike the ungated hooks above — this one is throttled through
+                // `HRPublishThrottle` (60 s, mirroring Android's PushGate HR cadence) so it can't re-run
+                // publish's `exploreSeries` read + `reloadAllTimelines()` on every tick.
+                .onReceive(model.$bpm.dropFirst()) { _ in
+                    guard scenePhase == .active else { return }
+                    guard WidgetSnapshot.HRPublishThrottle.admit() else { return }
+                    Task { await WidgetSnapshot.publish(from: model) }
+                }
                 // #581: the `noop://import-health` deep link the iOS Shortcut opens after building the
                 // HealthKit-free payload. Filter on the host so other future schemes don't trip the
                 // importer; macOS never registers the scheme so this stays iOS-only.
@@ -164,6 +195,10 @@ struct StrandiOSApp: App {
                 // and iOS can't re-arm it while suspended, so it would otherwise fire once and stop.
                 model.applySmartAlarm()
                 CloudSync.shared.fetchChangesInBackground()   // pull any workouts synced from the Mac
+                // #267: pull a reasonably fresh sync on open rather than waiting for the 900s periodic
+                // timer or an incidental reconnect. Floored at 90s and never clock/empty-streak-suppressed
+                // (BackfillPolicy.shouldRun's .foreground case), so this is a safe no-op on rapid re-opens.
+                model.ble.requestSync(.foreground)
                 Task {
                     health.refreshAuthIfPreviouslyGranted()
                     await health.sync()
@@ -174,6 +209,10 @@ struct StrandiOSApp: App {
                     await watch.pushLatest(from: model)
                 }
             } else if phase == .background {
+                // #114: capture the LAST in-app live state on the way out so the Home widget matches what
+                // the user just saw — its battery/HR/score otherwise lag to the last FOREGROUND refreshSeq
+                // bump. One reload per app-exit is low-frequency and well within WidgetKit's daily budget.
+                Task { await WidgetSnapshot.publish(from: model) }
                 // #155: refresh the Documents/noop_sync.txt drop file the user's Siri Shortcut logs
                 // into Apple Health. Gated inside writeIfEnabled on the opt-in default (OFF) — a
                 // no-op until the user turns on Shortcuts Export.
@@ -310,6 +349,10 @@ enum DemoScreens {
         // Oura device card: the locally-adopted Oura ring card (Beta chip + per-gen honest capability copy
         // + battery + local-state note), rendered with mock data, no ring required.
         case "ouradevice": return AnyView(OuraDeviceDemoScreen())
+        // #221: a WHOOP 5/MG whose encrypted bond was refused (#78) — the "Connected · not paired" pill
+        // + self-service pairing guidance, screenshot-able WITHOUT reproducing the bond refusal on real
+        // hardware.
+        case "bondrefused": return AnyView(BondRefusedDemoScreen())
         default:         return nil
         }
     }

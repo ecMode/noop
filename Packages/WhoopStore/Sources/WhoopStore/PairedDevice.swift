@@ -34,6 +34,12 @@ public struct PairedDevice: Equatable, Sendable, Identifiable {
         if model.localizedCaseInsensitiveContains(brand) { return model }
         return "\(brand) \(model)"
     }
+
+    /// True for a data-partition source (a cloud API pull or a file/CSV import) rather than a live,
+    /// connectable device. UI that offers "make active" must exclude these: activating one would demote
+    /// whatever live device (WHOOP, a BLE strap, Apple Watch) currently drives BLE routing + day-owner
+    /// priority 0 — an import source has no live connection to hand that role to.
+    public var isImportSource: Bool { sourceKind == .cloudImport || sourceKind == .fileImport }
 }
 
 public enum DeviceStatus: String, Sendable, CaseIterable { case active, paired, archived }
@@ -60,6 +66,12 @@ public enum SourceKind: String, Sendable, CaseIterable {
     /// signal can't be read it stays "-" (Huami precedent), never faked. Additive (no DB migration): only
     /// the experimental add-device wizard's Oura path writes it.
     case oura
+    /// A GPX/TCX/FIT activity file imported under the `activity-file` device (#137). Distinct from
+    /// `fileImport` (a whole-day WHOOP CSV export) so the day-owner resolver can rank it BELOW day-spanning
+    /// imports: a 90-minute ride must never displace a full-day source that has HR for the same day. It
+    /// wins ownership only when nothing else has data (a genuinely strap-less day), where its measured HR
+    /// lights the day Effort. Additive (no DB migration): only the activity-file importer writes it.
+    case activityFile
 }
 
 /// Canonical metric a source can provide. Drives capability-aware UI + the day-owner resolver.

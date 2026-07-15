@@ -64,6 +64,9 @@ struct TrendsView: View {
 
     // Effort display scale (#268) — routes the Effort small-multiple's numbers + unit. Display-only.
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
+    // Trend chart style (line vs bar) — display-only; flips every trend card between the gradient line
+    // and value-ramp bars. Read here at the screen root so a Settings change re-renders on return.
+    @AppStorage(UnitPrefs.trendChartStyleKey) private var trendChartStyleRaw = TrendChartStyle.line.rawValue
     private var effortScale: EffortScale { UnitPrefs.resolveEffortScale(effortScaleRaw) }
 
     // yyyy-MM-dd → Date (en_US_POSIX, UTC), per task spec.
@@ -219,7 +222,9 @@ struct TrendsView: View {
         // (RootView), so — exactly like MetricExplorerView (#753) — wrap the scaffold in one here so the
         // pushes get Back chrome instead of hanging. The SAME shared scaffold renders on both.
         #if os(macOS)
-        NavigationStack { scaffold }
+        // Register the value routes at THIS stack's root; on iOS the tab shell's stack registers
+        // them instead (once per stack — a double registration double-pushes, #38).
+        NavigationStack { scaffold.tabRouteDestinations() }
         #else
         scaffold
         #endif
@@ -568,20 +573,9 @@ struct TrendsView: View {
         // LiquidPressStyle gives the physical settle-inward on press (the liquid tap language). The card's
         // own rich labels (title + chart series + footer stats) are surfaced by the link's button element,
         // with a hint that a tap opens the detail.
-        NavigationLink { metricDetail("recovery") } label: { card }
+        NavigationLink(value: TabRoute.metric("recovery")) { card }
             .buttonStyle(LiquidPressStyle())
             .accessibilityHint(Text(String(localized: "Opens the full Charge metric.")))
-    }
-
-    /// The per-metric detail page (chart + history) for a catalog key — the same tap-through target Today
-    /// and Explore use. Falls back to the metrics Explorer if the key isn't in the catalog.
-    @ViewBuilder
-    private func metricDetail(_ key: String) -> some View {
-        if let m = MetricCatalog.all.first(where: { $0.key == key }) {
-            MetricDetailView(metric: m)
-        } else {
-            MetricExplorerView()
-        }
     }
 
     // MARK: Small multiples — HRV / Resting HR / Day Strain
@@ -689,7 +683,7 @@ struct TrendsView: View {
         )
         // Each small-multiple taps through to its own metric detail (like Today's cards / Explore's rows),
         // with the liquid press settle. The chart itself is left uncluttered — no vessel over it (task).
-        NavigationLink { metricDetail(metricKey) } label: { card }
+        NavigationLink(value: TabRoute.metric(metricKey)) { card }
             .buttonStyle(LiquidPressStyle())
             .accessibilityHint(Text(String(localized: "Opens the full \(accessibilityTitle) metric.")))
     }
@@ -755,7 +749,9 @@ struct TrendsView: View {
         // scales and lands on the line — the previous sibling overlay guessed the plot insets and
         // floated the dot left/below the curve (#458).
         TrendChart(points: pts, gradient: gradient, valueRange: valueRange,
-                   showsArea: true, height: NoopMetrics.chartHeight, valueFormat: valueFormat,
+                   showsArea: true,
+                   showsBars: TrendChartStyle(rawValue: trendChartStyleRaw) == .bar,
+                   height: NoopMetrics.chartHeight, valueFormat: valueFormat,
                    accessibilityLabel: accessibilityLabel, nowCapColor: tip)
     }
 

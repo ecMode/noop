@@ -50,11 +50,50 @@ class PuffinExperiment(private val prefs: SharedPreferences) {
      *  [com.noop.analytics.SleepStagerV2] (the transparent cardiorespiratory recipe, reimplemented from
      *  contributor PR #600) instead of the default V1 [com.noop.analytics.SleepStager]. Pure analysis switch
      *  — it changes ONLY which staging engine runs over an already-detected sleep window; detection, scoring
-     *  and the default V1 path are untouched. Model-agnostic (works on WHOOP 4 and 5). Default false.
+     *  and the default V1 path are untouched. Model-agnostic (works on WHOOP 4 and 5). **Default true**:
+     *  V2 was promoted to the default staging engine after a 44-subject cross-subject benchmark (AAUWSS +
+     *  Walch sleep-accel, leave-one-subject-out) showed V2 strictly dominates V1 (kappa 0.35 vs 0.03, deep
+     *  recall 55% vs 1%) — the multi-subject validation this recipe originally lacked. V1 remains available.
      *  Mirrors the macOS `PuffinExperiment.experimentalSleepV2Key`. */
     var experimentalSleepV2: Boolean
-        get() = prefs.getBoolean(KEY_EXPERIMENTAL_SLEEP_V2, false)
+        get() = prefs.getBoolean(KEY_EXPERIMENTAL_SLEEP_V2, true)
         set(v) = prefs.edit().putBoolean(KEY_EXPERIMENTAL_SLEEP_V2, v).apply()
+
+    /** True if the user opted in to "HR-from-PPG sub-lag interpolation" (default false): the v26 optical-PPG
+     *  gap-fill HR estimator ([com.noop.protocol.PpgHr]) refines its integer autocorrelation lag with a
+     *  parabolic (Variant A) interpolation of the ACF peak, removing the ~+-8 bpm lag-quantization near a
+     *  high HR. Pure OPT-IN research variant: default OFF is byte-identical to the integer-lag estimate, and
+     *  it only ever fills seconds the strap never reported an HR for (it NEVER overrides a WHOOP-stored HR).
+     *  The pure [com.noop.protocol.PpgHr] package cannot read prefs, so this flag is read at the app-layer
+     *  call site (the Backfiller / archive replay / capture import) and threaded into the estimator. Mirrors
+     *  the macOS `PuffinExperiment.ppgHrSubLagInterpKey`. */
+    var ppgHrSubLagInterp: Boolean
+        get() = prefs.getBoolean(KEY_PPG_HR_SUBLAG_INTERP, false)
+        set(v) = prefs.edit().putBoolean(KEY_PPG_HR_SUBLAG_INTERP, v).apply()
+
+    /** True if the user opted in to the experimental "HRV readiness (Plews/Altini)" tier readout (default
+     *  false): a read-only Test Centre readout of the SWC log-HRV tier ([com.noop.analytics.HRVReadiness]).
+     *  It changes NOTHING downstream — the Charge ring stays byte-identical whether on or off; it only
+     *  surfaces the tier + baseline band in the Experimental algorithms card. Rough / early (n=1, not yet
+     *  validated against varying real data). Mirrors the macOS `PuffinExperiment.hrvReadinessKey`. */
+    var hrvReadiness: Boolean
+        get() = prefs.getBoolean(KEY_HRV_READINESS, false)
+        set(v) = prefs.edit().putBoolean(KEY_HRV_READINESS, v).apply()
+
+    /** True if the user opted in to "Motion-aware wake refinement" (default false, #364 "Proposal 2"
+     *  follow-up): a post-pass ([com.noop.analytics.WakeMotionRefinement]) over the already-staged
+     *  hypnogram that reclassifies a scored WAKE segment to `light` when its per-minute step-tick cadence
+     *  shows no locomotion AND its per-minute gravity posture stays stable outside a minority of isolated
+     *  "turn-over" burst minutes (which are kept as wake). Targets the HR-led wake call misreading a
+     *  hot-but-still/atonic stretch as an awakening. Self-gates on the OBSERVED gravity + step-sample
+     *  density (never on strap family/model, per #345): a WHOOP 4.0 night (sparse gravity, no step stream
+     *  at all) fails the gate and is left untouched every time; a WHOOP 5.0/MG night, which streams both
+     *  densely, is the expected beneficiary. Pure analysis switch — it only ever SHRINKS an already-scored
+     *  wake segment, never invents wake time; detection and the V1/V2 staging engines are untouched either
+     *  way. Mirrors the macOS `PuffinExperiment.motionAwareWakeKey`. */
+    var motionAwareWake: Boolean
+        get() = prefs.getBoolean(KEY_MOTION_AWARE_WAKE, false)
+        set(v) = prefs.edit().putBoolean(KEY_MOTION_AWARE_WAKE, v).apply()
 
     companion object {
         /** Persisted preferences file. */
@@ -74,6 +113,15 @@ class PuffinExperiment(private val prefs: SharedPreferences) {
 
         /** "Experimental sleep staging (V2)" opt-in (mirrors macOS `PuffinExperiment.experimentalSleepV2Key`). */
         const val KEY_EXPERIMENTAL_SLEEP_V2 = "noopExperimentalSleepV2"
+
+        /** "HR-from-PPG sub-lag interpolation" opt-in (mirrors macOS `PuffinExperiment.ppgHrSubLagInterpKey`). */
+        const val KEY_PPG_HR_SUBLAG_INTERP = "noopPpgHrSubLagInterp"
+
+        /** "HRV readiness (Plews/Altini)" readout opt-in (mirrors macOS `PuffinExperiment.hrvReadinessKey`). */
+        const val KEY_HRV_READINESS = "noopHrvReadiness"
+
+        /** "Motion-aware wake refinement" opt-in (mirrors macOS `PuffinExperiment.motionAwareWakeKey`). */
+        const val KEY_MOTION_AWARE_WAKE = "noopMotionAwareWake"
 
         fun from(context: Context): PuffinExperiment =
             PuffinExperiment(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE))

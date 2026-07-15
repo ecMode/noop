@@ -21,6 +21,8 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -31,6 +33,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
@@ -52,7 +55,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
+import android.content.Context
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.shadow
@@ -96,63 +101,68 @@ import kotlin.math.sin
  * near-neutral gold wash. Drawn with `drawBehind` so the animation/recomposition of the card's
  * content never reaches this surface subtree. Mirrors StrandDesign's FrostedCardSurface.
  */
+/** App-wide card-surface opacity (0f = fully see-through, 1f = solid), driven by the "Card transparency"
+ *  setting. Reactive (a mutableState) so the Settings slider live-previews; initialised from NoopPrefs at
+ *  app start via [init]. Only the card SURFACE (fill + border + wash) fades — the card's CONTENT is drawn
+ *  above and stays fully readable over the background. */
+object CardAppearance {
+    var opacity by mutableStateOf(1f)
+    fun init(context: Context) {
+        opacity = (NoopPrefs.cardOpacityPercent(context) / 100f).coerceIn(0f, 1f)
+    }
+}
+
 fun Modifier.frostedCardSurface(
     tint: Color? = null,
     cornerRadius: Dp = Metrics.cardRadius,
     washStrength: Float = 1f,
-): Modifier = this
-    // Elevation idiom: DARK is flat (the hairline + hue carry the edge). LIGHT raises the white card
-    // off the warm-paper canvas with a soft drop shadow — the hairline alone is too faint on paper.
-    .then(
-        if (Palette.isLight)
-            Modifier.shadow(elevation = 6.dp, shape = RoundedCornerShape(cornerRadius), clip = false)
-        else Modifier
-    )
-    .drawBehind {
-    val radiusPx = cornerRadius.toPx()
-    val corner = androidx.compose.ui.geometry.CornerRadius(radiusPx, radiusPx)
+): Modifier = composed {
+    // "Card transparency" setting: scale the whole glass surface (fill + border + wash) by the user's
+    // opacity so cards fade toward the background. Reading the reactive value here makes the slider
+    // live-preview. Content drawn above the surface is unaffected, so numbers/labels stay readable.
+    val op = CardAppearance.opacity
+    this
+        // Elevation idiom: DARK is flat (the hairline + hue carry the edge). LIGHT raises the white card
+        // off the warm-paper canvas with a soft drop shadow — the hairline alone is too faint on paper.
+        .then(
+            if (Palette.isLight)
+                Modifier.shadow(elevation = (6f * op).dp, shape = RoundedCornerShape(cornerRadius), clip = false)
+            else Modifier
+        )
+        .drawBehind {
+            val radiusPx = cornerRadius.toPx()
+            val corner = androidx.compose.ui.geometry.CornerRadius(radiusPx, radiusPx)
+            val fill = Palette.surfaceRaised.copy(alpha = Palette.surfaceRaised.alpha * op)
+            val border = Palette.hairline.copy(alpha = Palette.hairline.alpha * op)
 
-    if (tint == null) {
-        // NEUTRAL card (iOS FrostedCardSurface tint == nil): a FLAT raised surface — no vertical
-        // bevel gradient, no accent wash, and a PLAIN hairline border (no accent bias).
-        drawRoundRect(
-            color = Palette.surfaceRaised,
-            cornerRadius = corner,
-        )
-        drawRoundRect(
-            color = Palette.hairline,
-            cornerRadius = corner,
-            style = Stroke(width = 1.dp.toPx()),
-        )
-    } else {
-        // TINTED card (iOS parity, 2026-06-23 "synthesis has the old blue style"): a FLAT raised
-        // surface — the SAME WHOOP grey as the neutral card, NO navy bevel gradient — carrying only a
-        // whisper of the domain tint as a diagonal hue wash so it stays in the grey family.
-        // 1) Flat raised fill — identical to the neutral card.
-        drawRoundRect(
-            color = Palette.surfaceRaised,
-            cornerRadius = corner,
-        )
-        // 2) Faint diagonal accent hue wash over the flat fill (matches iOS FrostedCardSurface ~0.05).
-        drawRoundRect(
-            brush = Brush.linearGradient(
-                colorStops = arrayOf(
-                    0.0f to tint.copy(alpha = 0.05f * washStrength),
-                    0.5f to tint.copy(alpha = 0.015f * washStrength),
-                    1.0f to Color.Transparent,
-                ),
-                start = Offset(0f, 0f),
-                end = Offset(size.width, size.height),
-            ),
-            cornerRadius = corner,
-        )
-        // 3) Plain 1px hairline (no accent bias) — matches the neutral card.
-        drawRoundRect(
-            color = Palette.hairline,
-            cornerRadius = corner,
-            style = Stroke(width = 1.dp.toPx()),
-        )
-    }
+            if (tint == null) {
+                // NEUTRAL card (iOS FrostedCardSurface tint == nil): a FLAT raised surface — no vertical
+                // bevel gradient, no accent wash, and a PLAIN hairline border (no accent bias).
+                drawRoundRect(color = fill, cornerRadius = corner)
+                drawRoundRect(color = border, cornerRadius = corner, style = Stroke(width = 1.dp.toPx()))
+            } else {
+                // TINTED card (iOS parity, 2026-06-23 "synthesis has the old blue style"): a FLAT raised
+                // surface — the SAME WHOOP grey as the neutral card, NO navy bevel gradient — carrying only
+                // a whisper of the domain tint as a diagonal hue wash so it stays in the grey family.
+                // 1) Flat raised fill — identical to the neutral card.
+                drawRoundRect(color = fill, cornerRadius = corner)
+                // 2) Faint diagonal accent hue wash over the flat fill (matches iOS FrostedCardSurface ~0.05).
+                drawRoundRect(
+                    brush = Brush.linearGradient(
+                        colorStops = arrayOf(
+                            0.0f to tint.copy(alpha = 0.05f * washStrength * op),
+                            0.5f to tint.copy(alpha = 0.015f * washStrength * op),
+                            1.0f to Color.Transparent,
+                        ),
+                        start = Offset(0f, 0f),
+                        end = Offset(size.width, size.height),
+                    ),
+                    cornerRadius = corner,
+                )
+                // 3) Plain 1px hairline (no accent bias) — matches the neutral card.
+                drawRoundRect(color = border, cornerRadius = corner, style = Stroke(width = 1.dp.toPx()))
+            }
+        }
 }
 
 // MARK: - NoopCard — the one card surface (Titanium & Gold frosted card, 16dp radius)
@@ -389,11 +399,16 @@ fun SourceBadge(text: String, tint: Color = Palette.accent, modifier: Modifier =
         text = text.uppercase(),
         style = NoopType.overline.copy(fontSize = 10.sp, letterSpacing = 0.5.sp),
         color = tint,
+        maxLines = 1,                          // #74: e.g. "ON-DEVICE" stays on one line, never wraps the hero
+        overflow = TextOverflow.Ellipsis,
         modifier = modifier
+            // Preserve the canonical compact height at the default font scale, but grow instead of clipping
+            // when Android's font scaling makes the single-line label taller.
+            .heightIn(min = Metrics.sourceBadgeHeight)
             .clip(shape)
             .background(tint.copy(alpha = 0.14f))
             .border(1.dp, tint.copy(alpha = 0.30f), shape)
-            .padding(horizontal = 8.dp, vertical = 3.dp),
+            .padding(horizontal = Metrics.space8),
     )
 }
 
@@ -1131,6 +1146,12 @@ fun ScreenScaffold(
     // Mirrors the iOS ScreenScaffold `topBackground` slot — the scene is a SCREEN-level backdrop the
     // cards float OVER, not a card-clipped hero atmosphere.
     topBackground: (@Composable () -> Unit)? = null,
+    // When true, the [topBackground] fills the WHOLE viewport instead of the top band — the
+    // "sky behind cards" mode, identical to [LazyScreenScaffold]'s flag. The band container's
+    // status-bar offset would otherwise shift a full-height backdrop up and leave the bottom of
+    // the screen on plain canvas (the "sky doesn't reach the lower cards" report on the vital
+    // details). Defaulted, so every existing caller is byte-for-byte untouched.
+    fullBleedBackground: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     // The scrolling content column. Its OUTER modifier differs by path: with no topBackground it is the
@@ -1197,10 +1218,19 @@ fun ScreenScaffold(
         val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
         Box(modifier = modifier.fillMaxSize().background(Palette.surfaceBase)) {
             Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .align(Alignment.TopCenter)
-                    .offset(y = -statusBarTop)
+                modifier = (
+                    if (fullBleedBackground) {
+                        // Sky-behind-cards: the backdrop fills the whole viewport (no band offset), so
+                        // the transparent content scrolls OVER a full-height sky. Identical to the lazy
+                        // twin's fullBleedBackground container.
+                        Modifier.fillMaxSize()
+                    } else {
+                        Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.TopCenter)
+                            .offset(y = -statusBarTop)
+                    }
+                    )
                     // PERF (#scroll-jank): promote the static scene backdrop to its OWN compositing layer so
                     // its gradient + bitmap rasterise ONCE into a render node and are reused as a texture on
                     // every scroll frame, instead of the parent re-issuing the scene's `drawBehind` draw each
@@ -1249,6 +1279,13 @@ fun LazyScreenScaffold(
     // the scene paints in the wrapping Box (promoted to its own compositing layer) and the LazyColumn is
     // transparent so the scene shows through behind the rows. Mirrors the iOS scaffold's topBackground.
     topBackground: (@Composable () -> Unit)? = null,
+    // When true, the [topBackground] fills the WHOLE scaffold (viewport) instead of the top band — the
+    // "sky behind cards" mode, so a full-height backdrop shows behind every scrolling row.
+    fullBleedBackground: Boolean = false,
+    // #today-layout: the list state, hoisted so a caller can read item positions / scroll programmatically
+    // (Today's hold-to-drag section reorder needs layoutInfo + scrollBy). Defaulted, so every existing
+    // caller is byte-for-byte untouched.
+    listState: LazyListState = rememberLazyListState(),
     content: LazyListScope.() -> Unit,
 ) {
     // The header row: optional leading action, the title/subtitle, optional trailing action. Omitted
@@ -1293,6 +1330,7 @@ fun LazyScreenScaffold(
     val list: @Composable () -> Unit = {
         LazyColumn(
             modifier = listModifier,
+            state = listState,
             contentPadding = PaddingValues(start = 28.dp, top = topPadding, end = 28.dp, bottom = 28.dp),
             // #765: the shared inter-card spacing token by default (Today/Explore + the eager screens share
             // one uniform card rhythm); a caller may pass a tighter [rowSpacing] (the liquid Today does, for
@@ -1317,11 +1355,16 @@ fun LazyScreenScaffold(
         val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
         Box(modifier = modifier.fillMaxSize().background(Palette.surfaceBase)) {
             Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .align(Alignment.TopCenter)
-                    .offset(y = -statusBarTop)
-                    .graphicsLayer { },
+                modifier = (
+                    if (fullBleedBackground) {
+                        // Sky-behind-cards: the backdrop fills the whole viewport (covers under the status
+                        // bar already), so the transparent rows scroll OVER a full-height sky.
+                        Modifier.fillMaxSize()
+                    } else {
+                        // Default: a top-anchored band bled up behind the status bar.
+                        Modifier.fillMaxWidth().align(Alignment.TopCenter).offset(y = -statusBarTop)
+                    }
+                    ).graphicsLayer { },
             ) {
                 topBackground()
             }

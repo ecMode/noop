@@ -21,8 +21,22 @@ public final class FrameRouter {
     }
 
     /// Handle one complete frame (bytes including 0xAA SOF and the crc32 trailer).
+    /// Parse-then-forward shim (#47). Kept so existing callers/tests that pass raw bytes are unchanged;
+    /// the live BLE seam now parses ONCE and calls `handle(parsed:frame:)` directly.
     public func handle(frame: [UInt8]) {
-        let parsed = parseFrame(frame, family: family)
+        handle(parsed: parseFrame(frame, family: family), frame: frame)
+    }
+
+    /// #47: the caller parses the frame ONCE at the BLE seam and threads the result here, so a live
+    /// WHOOP4 frame is decoded once instead of 2–3× (router + clock-correlation + collector). `frame` is
+    /// still passed for the byte-level sub-decoders below.
+    public func handle(parsed: ParsedFrame, frame: [UInt8]) {
+        #if DEBUG
+        // Guard the "parse once == parse per consumer" invariant in dev/test builds only (assert is stripped
+        // from Release): a threading bug (wrong family / stale frame) trips here, never on a user's wrist.
+        assert(parsed == parseFrame(frame, family: family),
+               "FrameRouter.handle: threaded ParsedFrame != fresh parse (#47 parse-once invariant)")
+        #endif
         guard parsed.ok else { return }
         // Reject frames that failed their checksum — never let bad bytes drive state.
         if parsed.crcOK == false { return }
@@ -91,6 +105,18 @@ public final class FrameRouter {
             // cmdName carries a "(rawValue)" suffix (Schema.enumName appends it, e.g.
             // "GET_ALARM_TIME(67)"), so match by prefix like every other cmdName consumer in the
             // codebase - never by equality, which is silently dead.
+            // Reboot ack (#166): log the COMMAND_RESPONSE result for a user reboot on BOTH families. This is
+            // the accept/reject signal — the same one that exposed 5/MG haptics rejection (result=0x03) — so
+            // a 5/MG owner's strap log confirms whether the (unverified) puffin reboot frame is accepted
+            // (0x00) or rejected. Log-only. A reboot that's accepted may drop the link before/after this ack.
+            // POWER_CYCLE_STRAP is matched too: it's the 4.0 reboot probe's candidate B (#235), and its
+            // result byte is exactly what tells "opcode rejected (recognized, wrong args)" from "ignored".
+            if let cmd = parsed.cmdName, cmd.hasPrefix("REBOOT_STRAP") || cmd.hasPrefix("POWER_CYCLE_STRAP") {
+                let r = Self.commandResultByte(in: frame)
+                let rhex = r.map { String(format: "0x%02x", UInt8(truncatingIfNeeded: $0)) } ?? "none"
+                let verdict = r == nil ? "no result byte" : (r == 0 ? "accepted" : "REJECTED")
+                state.append(log: "reboot: strap acked result=\(rhex) (\(verdict))")
+            }
             if family == .whoop4, let cmd = parsed.cmdName {
                 if cmd.hasPrefix("GET_ADVERTISING_NAME_HARVARD") {
                     if let name = Self.advertisingName(in: frame), !name.isEmpty {
@@ -107,13 +133,50 @@ public final class FrameRouter {
                     // exactly as diagnostic. Labelled "strap reports", not "verified" (one firmware's
                     // answer format must never mislead a triage).
                     if let epoch = Self.armedAlarmEpoch(in: frame) {
-                        state.append(log: "Alarm: strap reports armed for \(Self.alarmLocalTime(epoch: epoch)) (epoch \(epoch))")
+                        // #34: log the RAW response bytes alongside the decoded epoch (previously only the
+                        // decode-FAILURE branch below carried them). A successful-but-mismatched decode — the
+                        // strap reporting a plausible epoch that never matches what we armed, the corrupted-
+                        // register signature — needs the raw frame to tell a genuinely-stored stale alarm from
+                        // a misdecode of a fixed response field. Log-only; the decode/behaviour is unchanged.
+                        let raw = Self.commandResponsePayloadHex(in: frame) ?? "empty"
+                        state.append(log: "Alarm: strap reports armed for \(Self.alarmLocalTime(epoch: epoch)) (epoch \(epoch)) [raw \(raw)]")
                         // #34: persist what the strap reports so the debug export can show sent-vs-reported.
-                        UserDefaults.standard.set(Int(epoch), forKey: "alarm.lastReportedEpoch")
-                        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "alarm.lastReportedAt")
+                        let d = UserDefaults.standard
+                        d.set(Int(epoch), forKey: "alarm.lastReportedEpoch")
+                        d.set(Date().timeIntervalSince1970, forKey: "alarm.lastReportedAt")
+                        // #34: count CONSECUTIVE rejections (reported ≠ what we last sent) — the signature of
+                        // a corrupted strap alarm register. A matching readback resets it, so a transient
+                        // (first read stale, then correct) never trips the warning; only a persistent refusal
+                        // climbs. SmartAlarmView surfaces the warning at ≥2; the debug export shows the count.
+                        // Observability only — never gates the BLE arm.
+                        if let sent = d.object(forKey: "alarm.lastArmSentEpoch") as? Int {
+                            d.set(abs(Int(epoch) - sent) > 120 ? d.integer(forKey: "alarm.rejectStreak") + 1 : 0,
+                                  forKey: "alarm.rejectStreak")
+                        }
+                    } else if Self.readbackReportsNoAlarm(in: frame) {
+                        // #34 (issue comment 2026-07-12): the strap's "nothing armed" sentinel — the epoch
+                        // field decodes to 0. This is NOT an undocumented layout; it's the strap telling us
+                        // it has no alarm stored, so an arm we just sent did NOT persist. Calling this
+                        // "unrecognised payload" (the old branch) hid the single most diagnostic signal in a
+                        // "didn't buzz" report: SET went out, strap kept nothing. Name it plainly. Log-only.
+                        let raw = Self.commandResponsePayloadHex(in: frame) ?? "empty"
+                        state.append(log: "Alarm: strap reports NO alarm currently stored (epoch 0) — the arm did not persist on the strap (raw \(raw))")
                     } else {
                         state.append(log: "Alarm: strap answered the alarm readback with an unrecognised payload (raw \(Self.commandResponsePayloadHex(in: frame) ?? "empty")) - layout undocumented, log-only")
                     }
+                } else if cmd.hasPrefix("SET_ALARM_TIME") {
+                    // #34 (issue comment 2026-07-12): the strap's OWN answer to the arm we just sent — the
+                    // accept/reject datum that was previously thrown away. armStrapAlarm logs "armed" the
+                    // instant the SET goes out, which only proves NOOP transmitted the frame; if the firmware
+                    // drops it the GET_ALARM_TIME readback then reads back epoch 0 (a silently-unpersisted
+                    // alarm — the exact signature in this report). Logging the raw result byte lets a future
+                    // report distinguish a strap that accepted the arm from one that rejected it. LOG-ONLY,
+                    // never gates behaviour. The WHOOP 4.0 result-code meaning is UNVERIFIED (the 5/MG puffin
+                    // table is 0=FAILURE 1=SUCCESS 2=PENDING 3=UNSUPPORTED, but the 4.0 reboot probe assumed
+                    // 0=accepted), so this claims NO verdict — it surfaces the byte, nothing more.
+                    let r = Self.commandResultByte(in: frame)
+                    let rhex = r.map { String(format: "0x%02x", UInt8(truncatingIfNeeded: $0)) } ?? "none"
+                    state.append(log: "Alarm: strap answered the arm (SET_ALARM_TIME) with result=\(rhex) — log-only, 4.0 result-code meaning unverified")
                 }
             }
 
@@ -242,6 +305,26 @@ public final class FrameRouter {
         return nil
     }
 
+    /// True when a GET_ALARM_TIME readback explicitly reports NO alarm stored — the epoch field decodes
+    /// to 0 in the same shapes `armedAlarmEpoch` reads (SET-mirror `[0x01][u32=0]` first, then a bare
+    /// leading `u32=0`). This is the strap's "nothing armed" sentinel, distinct from a genuinely
+    /// unparseable payload: an arm the strap silently dropped reads back as epoch 0, so labelling it
+    /// "unrecognised" hid the real signal (#34). Only consulted AFTER `armedAlarmEpoch` returns nil, so a
+    /// plausible armed epoch never reaches here. Pure/CoreBluetooth-free so AlarmReadbackDecodeTests pin it.
+    nonisolated static func readbackReportsNoAlarm(in frame: [UInt8]) -> Bool {
+        guard let payload = commandResponsePayload(in: frame) else { return false }
+        func u32le(at i: Int) -> UInt32? {
+            guard payload.count >= i + 4 else { return nil }
+            return UInt32(payload[i])
+                | (UInt32(payload[i + 1]) << 8)
+                | (UInt32(payload[i + 2]) << 16)
+                | (UInt32(payload[i + 3]) << 24)
+        }
+        if payload.first == 0x01, let e = u32le(at: 1) { return e == 0 }
+        if let e = u32le(at: 0) { return e == 0 }
+        return false
+    }
+
     /// Local wall-clock render for the readback log line, matching armStrapAlarm's "EEE HH:mm zzz"
     /// format so the armed + strap-reports lines read as one sequence.
     nonisolated static func alarmLocalTime(epoch: UInt32) -> String {
@@ -276,6 +359,12 @@ public final class FrameRouter {
     /// Deliberately does NOT touch lastEvent / sync trigger / bonded / battery — those stay on the normal
     /// handle(frame:) path, so backfill UI behaviour is otherwise unchanged.
     func dispatchLiveGestureIfFresh(frame: [UInt8], now: Int = Int(Date().timeIntervalSince1970)) {
+        // #47: this fires for EVERY frame on the OFFLOAD path (thousands of type-47 records over a
+        // multi-minute sync) purely to catch a rare EVENT gesture. Cheap type-only pre-check skips the full
+        // CRC + FieldBuilder decode for non-EVENT frames — byte-identical: an EVENT frame still gets the
+        // full parse + CRC guard below; a non-EVENT frame was discarded at the `typeName == "EVENT"` guard
+        // anyway. Family-aware (WHOOP4 type @[4], 5/MG @[8]).
+        guard frameTypeName(frame, family: family) == "EVENT" else { return }
         let parsed = parseFrame(frame, family: family)
         guard parsed.ok, parsed.crcOK != false else { return }
         guard parsed.typeName == "EVENT", let ev = parsed.parsed["event"]?.stringValue else { return }

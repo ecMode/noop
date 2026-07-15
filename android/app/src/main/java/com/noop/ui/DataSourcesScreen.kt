@@ -56,7 +56,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.PermissionController
 import com.noop.data.DataBackup
+import com.noop.data.DeviceStatus
 import com.noop.data.ImportSummary
+import com.noop.data.Metric
+import com.noop.data.PairedDeviceRow
+import com.noop.data.SourceKind
 import com.noop.ingest.AppleHealthImporter
 import com.noop.ingest.HealthConnectImporter
 import com.noop.ingest.HealthConnectWriter
@@ -134,89 +138,36 @@ fun DataSourcesScreen(vm: AppViewModel) {
     // Imported Oura / Fitbit / Garmin exports write daily metrics under their own per-brand source.
     var wearableDays by remember { mutableStateOf<Int?>(null) }
 
-    LaunchedEffect(Unit) {
-        val now = System.currentTimeMillis() / 1000
-        whoopDays = vm.repo.days("my-whoop").size
-        whoopWorkouts = vm.repo.workouts("my-whoop", 0L, now).size
-        whoopHasHr = vm.repo.latestHrSampleTs("my-whoop") != null
-        appleDays = vm.repo.appleDaily("apple-health", "0000-01-01", "9999-12-31").size
-        appleWorkouts = vm.repo.workouts("apple-health", 0L, now).size
-        hcDays = vm.repo.appleDaily("health-connect", "0000-01-01", "9999-12-31").size
-        hcWorkouts = vm.repo.workouts("health-connect", 0L, now).size
-        nutritionDays = vm.repo.metricSeries(NutritionCsvImporter.SOURCE_ID, "calories_in", "0000-01-01", "9999-12-31").size
-        nutritionWeighIns = vm.repo.metricSeries(NutritionCsvImporter.SOURCE_ID, "weight", "0000-01-01", "9999-12-31").size
-        xiaomiDays = vm.repo.metricSeries(XiaomiBandImporter.DEFAULT_DEVICE_ID, "steps", "0000-01-01", "9999-12-31").size
-        liftingWorkouts = vm.repo.workouts(LiftingImporter.SOURCE_ID, 0L, now).size
-        activityFiles = vm.repo.workouts(ActivityFileImporter.SOURCE_ID, 0L, now).size
-        wearableDays = WearableExportImporter.Brand.values().sumOf {
-            vm.repo.metricSeries(it.sourceId, "rhr", "0000-01-01", "9999-12-31").size +
-                vm.repo.metricSeries(it.sourceId, "sleep_total_min", "0000-01-01", "9999-12-31").size
-        }
-    }
-
-    // Whole-store backup: export to a user-created document; import from a picked one.
-    var busy by remember { mutableStateOf(false) }
-    var restartNeeded by remember { mutableStateOf(false) }
-    // ah-delete (#616): drives the "Remove Apple Health imported data" confirm dialog.
-    var confirmDeleteApple by remember { mutableStateOf(false) }
-
-    val exportLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/octet-stream"),
-    ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        busy = true
-        scope.launch {
-            val message = withContext(Dispatchers.IO) {
-                runCatching { DataBackup.exportTo(context, uri) }
-                    .fold({ "Backup saved." }, { "Backup failed: ${it.message}" })
-            }
-            busy = false
-            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-        }
-    }
-
-    val importLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument(),
-    ) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        busy = true
-        scope.launch {
-            val result = withContext(Dispatchers.IO) { DataBackup.importFrom(context, uri) }
-            busy = false
-            when (result) {
-                is DataBackup.ImportResult.NeedsRestart -> {
-                    restartNeeded = true
-                    Toast.makeText(
-                        context,
-                        "Imported. Fully close and reopen NOOP to load it.",
-                        Toast.LENGTH_LONG,
-                    ).show()
-                }
-                is DataBackup.ImportResult.Failed ->
-                    Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
-            }
-        }
-    }
-
+    // Count-badge refresh, shared by the initial load below and every importer's post-run refresh.
+    // PERF: scalar SQL COUNTs (and one LIMIT-1 existence probe), NOT materialized row lists — the old
+    // shape loaded every row of every source's history just to call `.size` on it, ~14 full-range
+    // reads per screen visit. Workout counts are now exact (the row read was capped at DEFAULT_LIMIT).
     suspend fun refreshCounts() {
         val nowS = System.currentTimeMillis() / 1000
-        whoopDays = vm.repo.days("my-whoop").size
-        whoopWorkouts = vm.repo.workouts("my-whoop", 0L, nowS).size
+        whoopDays = vm.repo.daysCount("my-whoop")
+        whoopWorkouts = vm.repo.workoutsCount("my-whoop", 0L, nowS)
         whoopHasHr = vm.repo.latestHrSampleTs("my-whoop") != null
-        appleDays = vm.repo.appleDaily("apple-health", "0000-01-01", "9999-12-31").size
-        appleWorkouts = vm.repo.workouts("apple-health", 0L, nowS).size
-        hcDays = vm.repo.appleDaily("health-connect", "0000-01-01", "9999-12-31").size
-        hcWorkouts = vm.repo.workouts("health-connect", 0L, nowS).size
-        nutritionDays = vm.repo.metricSeries(NutritionCsvImporter.SOURCE_ID, "calories_in", "0000-01-01", "9999-12-31").size
-        nutritionWeighIns = vm.repo.metricSeries(NutritionCsvImporter.SOURCE_ID, "weight", "0000-01-01", "9999-12-31").size
-        liftingWorkouts = vm.repo.workouts(LiftingImporter.SOURCE_ID, 0L, nowS).size
-        activityFiles = vm.repo.workouts(ActivityFileImporter.SOURCE_ID, 0L, nowS).size
-        xiaomiDays = vm.repo.metricSeries(XiaomiBandImporter.DEFAULT_DEVICE_ID, "steps", "0000-01-01", "9999-12-31").size
+        appleDays = vm.repo.appleDailyCount("apple-health", "0000-01-01", "9999-12-31")
+        appleWorkouts = vm.repo.workoutsCount("apple-health", 0L, nowS)
+        hcDays = vm.repo.appleDailyCount("health-connect", "0000-01-01", "9999-12-31")
+        hcWorkouts = vm.repo.workoutsCount("health-connect", 0L, nowS)
+        nutritionDays = vm.repo.metricSeriesKeyCount(NutritionCsvImporter.SOURCE_ID, "calories_in")
+        nutritionWeighIns = vm.repo.metricSeriesKeyCount(NutritionCsvImporter.SOURCE_ID, "weight")
+        liftingWorkouts = vm.repo.workoutsCount(LiftingImporter.SOURCE_ID, 0L, nowS)
+        activityFiles = vm.repo.workoutsCount(ActivityFileImporter.SOURCE_ID, 0L, nowS)
+        xiaomiDays = vm.repo.metricSeriesKeyCount(XiaomiBandImporter.DEFAULT_DEVICE_ID, "steps")
         wearableDays = WearableExportImporter.Brand.values().sumOf {
-            vm.repo.metricSeries(it.sourceId, "rhr", "0000-01-01", "9999-12-31").size +
-                vm.repo.metricSeries(it.sourceId, "sleep_total_min", "0000-01-01", "9999-12-31").size
+            vm.repo.metricSeriesKeyCount(it.sourceId, "rhr") +
+                vm.repo.metricSeriesKeyCount(it.sourceId, "sleep_total_min")
         }
     }
+
+    LaunchedEffect(Unit) { refreshCounts() }
+
+    // Busy flag shared by every importer's Export/Import buttons.
+    var busy by remember { mutableStateOf(false) }
+    // ah-delete (#616): drives the "Remove Apple Health imported data" confirm dialog.
+    var confirmDeleteApple by remember { mutableStateOf(false) }
 
     // Run an importer off the main thread, refresh the counts, then toast the result.
     fun runImport(block: suspend () -> ImportSummary) {
@@ -285,7 +236,36 @@ fun DataSourcesScreen(vm: AppViewModel) {
         ActivityResultContracts.OpenDocument(),
     ) { uri ->
         if (uri != null) runImport {
-            ActivityFileImporter.importExport(context, uri, vm.repo).also { vm.loadWorkouts() }
+            ActivityFileImporter.importExport(context, uri, vm.repo).also { summary ->
+                vm.loadWorkouts()
+                // #137 (B1): on a SUCCESSFUL import, register `activity-file` as an `activityFile` device
+                // so the per-day owner resolver can pick it as the day owner on a strap-less day (it
+                // iterates the registry's paired devices — an unregistered source is invisible to it). The
+                // distinct kind ranks it at priority 3 — below whole-day imports (2) — so a full-day WHOOP
+                // import always wins a day it has HR for. status `paired`, NEVER `active` (makeActive =
+                // false), so it can never displace the live strap; capability `hr` marks what the source
+                // CAN provide (per-day presence is still gated by an actual HR read in the resolver).
+                // Idempotent (OnConflict.REPLACE). Twin of the Swift DataSourcesView `model.registerDevice`
+                // call. See ActivityFileImporter (A) for the matching per-sample HR persist.
+                if (summary.totalRows > 0) {
+                    val now = System.currentTimeMillis() / 1000
+                    vm.registerDevice(
+                        PairedDeviceRow(
+                            id = ActivityFileImporter.SOURCE_ID,
+                            brand = "Workout files",
+                            model = "",
+                            nickname = null,
+                            peripheralId = null,
+                            sourceKind = SourceKind.activityFile.name,
+                            capabilities = Metric.hr.name,
+                            status = DeviceStatus.paired.name,
+                            addedAt = now,
+                            lastSeenAt = now,
+                        ),
+                        makeActive = false,
+                    )
+                }
+            }
         }
     }
 
@@ -712,7 +692,7 @@ fun DataSourcesScreen(vm: AppViewModel) {
         // --- Broadcast heart rate (NOOP as a standard BLE HR peripheral) ---
         item {
         SourceCard(
-            title = "Broadcast heart rate",
+            title = "Broadcast HR from this phone",
             icon = Icons.Filled.MonitorHeart,
             tint = DomainTheme.Effort.color,
             subtitle = "Re-share your live strap heart rate over Bluetooth as a standard heart-rate " +
@@ -748,7 +728,7 @@ fun DataSourcesScreen(vm: AppViewModel) {
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Broadcast heart rate", style = NoopType.subhead, color = Palette.textPrimary)
+                    Text("Broadcast HR from this phone", style = NoopType.subhead, color = Palette.textPrimary)
                     Text(
                         "Acts as a standard Bluetooth heart-rate strap. Pair NOOP from your treadmill, " +
                             "bike or app to see your strap's heart rate there.",
@@ -820,44 +800,6 @@ fun DataSourcesScreen(vm: AppViewModel) {
         }
         }
 
-        // --- Whole-store backup (the real Android migration path) ---
-        item {
-        SourceCard(
-            title = "Backup & Move",
-            icon = Icons.Filled.FileDownload,
-            subtitle = "Your whole history is one file on this phone. Export it to keep a copy " +
-                "or move to a new phone, then import it there. Nothing leaves the device " +
-                "except through the file you choose.",
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                BackupButton(
-                    label = "Export…",
-                    icon = Icons.Filled.FileDownload,
-                    enabled = !busy,
-                    modifier = Modifier.weight(1f),
-                ) { exportLauncher.launch("noop-backup-${java.time.LocalDate.now()}.noopbak") }
-                BackupButton(
-                    label = "Import…",
-                    icon = Icons.Filled.FileUpload,
-                    enabled = !busy,
-                    modifier = Modifier.weight(1f),
-                ) { importLauncher.launch(arrayOf("*/*")) }
-            }
-            if (busy) {
-                Text("Working…", style = NoopType.footnote, color = Palette.textTertiary)
-            }
-            if (restartNeeded) {
-                Text(
-                    "Import staged. Fully close and reopen NOOP to load the new data.",
-                    style = NoopType.subhead,
-                    color = Palette.statusWarning,
-                )
-            }
-        }
-        }
     }
 
     // ah-delete (#616): strongly-worded confirm before purging the "apple-health" source. On confirm,

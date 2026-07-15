@@ -269,9 +269,30 @@ final class HealthXMLDelegate: NSObject, XMLParserDelegate {
     // Depth of the current Correlation, if inside one. Records nested inside a
     // Correlation are skipped (they also appear top-level).
     private var correlationDepth = 0
+    // The <Workout> currently being assembled. Built at the `<Workout>` start tag from its legacy
+    // attributes, filled by any nested `<WorkoutStatistics>` children (iOS 16+), and appended to
+    // `workouts` at the `</Workout>` end tag. nil when not inside a workout. Workouts never nest and
+    // never appear inside a Correlation, so a single slot (not a stack) is sufficient.
+    private var pendingWorkout: HealthWorkout?
 
-    // Dedupe set over HealthSample dedupeKeys.
-    private var seenSampleKeys: Set<String> = []
+    // Dedupe set over HealthSample dedupeKeys — stored as the key's 64-bit HASH, not the full String
+    // (#183). A large Apple Health export has tens of millions of unique samples; retaining a ~50-100 B
+    // String each was ~1-2 GB of RAM, enough to push an import into sustained memory pressure and hang.
+    // A 64-bit hash is 8 B/entry (~10x less); a collision across even 20M samples is ~1e-5, and a rare
+    // one just drops a look-alike duplicate — the same effect dedup intends. Within one import run the
+    // hash is stable, so identical keys always dedupe.
+    private var seenSampleKeys: Set<Int> = []
+
+    /// 64-bit FNV-1a over `s`'s UTF-16 code units — byte-identical to the Android `hash64` (both iterate
+    /// UTF-16 units with the same offset basis + prime, wrapping at 64 bits), so the two platforms produce
+    /// the same dedupe hashes and drop the exact same look-alike duplicates (#183).
+    static func hash64(_ s: String) -> Int {
+        var h: UInt64 = 0xcbf29ce484222325   // FNV-1a 64-bit offset basis
+        for u in s.utf16 {
+            h = (h ^ UInt64(u)) &* 0x100000001b3   // xor code unit, ×= FNV prime (wraps, intended)
+        }
+        return Int(bitPattern: UInt(h))
+    }
 
     /// True once at least one usable record/workout/sleep row was parsed. Drives the tolerant-parse
     /// decision: a hard error AFTER real data was seen keeps the partial result instead of failing.
@@ -312,6 +333,10 @@ final class HealthXMLDelegate: NSObject, XMLParserDelegate {
             case "Workout":
                 handleWorkout(attributeDict)
 
+            case "WorkoutStatistics":
+                // iOS 16+ nests per-workout energy/distance/HR here (was <Workout> attributes on iOS <=15).
+                handleWorkoutStatistics(attributeDict)
+
             default:
                 break
             }
@@ -326,6 +351,10 @@ final class HealthXMLDelegate: NSObject, XMLParserDelegate {
     ) {
         if elementName == "Correlation", correlationDepth > 0 {
             correlationDepth -= 1
+        }
+        if elementName == "Workout" {
+            // The whole <Workout> sub-tree (including any <WorkoutStatistics>) has now been seen; commit it.
+            finishWorkout()
         }
         if stack.last == elementName {
             stack.removeLast()
@@ -439,9 +468,10 @@ final class HealthXMLDelegate: NSObject, XMLParserDelegate {
             tzOffsetMin: tzOffsetMin,
             sourceName: sourceName
         )
-        // Dedupe on type+start+end+source+value (correctness-critical; the
-        // dedupe set is the smaller, retained cost).
-        if seenSampleKeys.insert(sample.dedupeKey).inserted {
+        // Dedupe on type+start+end+source+value (correctness-critical). Retain only the key's 64-bit
+        // hash, not the String, so the set stays ~10x smaller on a huge export (#183). Uses the SAME
+        // FNV-1a as Android (NOT Swift's per-run-randomized hashValue) so both platforms dedupe identically.
+        if seenSampleKeys.insert(Self.hash64(sample.dedupeKey)).inserted {
             // Always fold into the bounded per-day accumulator.
             dailyAcc.add(sample)
             anyRecordSeen = true
@@ -483,20 +513,19 @@ final class HealthXMLDelegate: NSObject, XMLParserDelegate {
             }
         }
 
-        let distanceM = attrs["totalDistance"].flatMap { Double($0) }.map { meters -> Double in
-            let unit = (attrs["totalDistanceUnit"] ?? "km").lowercased()
-            switch unit {
-            case "km": return meters * 1000.0
-            case "mi": return meters * 1609.344
-            case "m":  return meters
-            default:   return meters * 1000.0
-            }
-        }
-
+        // iOS <=15 put per-workout totals on <Workout> as `totalDistance`/`totalEnergyBurned`; iOS 16+
+        // moved them into nested <WorkoutStatistics> children (folded in by `handleWorkoutStatistics`).
+        // Seed the pending workout from the legacy attributes; the children FILL any still absent — a
+        // modern export carries no legacy attributes, so nothing a legacy value set is clobbered.
+        let distanceM = attrs["totalDistance"].flatMap { Double($0) }
+            .map { Self.distanceMeters($0, unit: attrs["totalDistanceUnit"]) }
         let energyKcal = attrs["totalEnergyBurned"].flatMap { Double($0) }
         // Apple exports energy in kcal by default (totalEnergyBurnedUnit "kcal").
 
-        let workout = HealthWorkout(
+        // Defer the append / counts to `finishWorkout()` at `</Workout>`, once any statistics children
+        // have folded in. A truncated workout with no end tag is simply dropped (its tail is counted a
+        // skipped span upstream), never counted as a complete row.
+        pendingWorkout = HealthWorkout(
             activityType: activity,
             durationS: durationS,
             distanceM: distanceM,
@@ -506,13 +535,52 @@ final class HealthXMLDelegate: NSObject, XMLParserDelegate {
             tzOffsetMin: endOffset,
             sourceName: attrs["sourceName"]
         )
+    }
+
+    /// Fold one `<WorkoutStatistics>` child into the workout currently being assembled. iOS 16+ emits
+    /// per-metric totals here: energy/distance as `sum`, heart rate as `average`/`maximum`. Fills only a
+    /// field still absent, so a legacy attribute value already set is never overwritten.
+    private func handleWorkoutStatistics(_ attrs: [String: String]) {
+        guard var workout = pendingWorkout, let rawType = attrs["type"] else { return }
+        let type = Self.stripPrefix(rawType)
+        switch type {
+        case "ActiveEnergyBurned":
+            if workout.energyKcal == nil { workout.energyKcal = attrs["sum"].flatMap { Double($0) } }
+        case "HeartRate":
+            if workout.avgHr == nil { workout.avgHr = attrs["average"].flatMap { Double($0) } }
+            if workout.maxHr == nil { workout.maxHr = attrs["maximum"].flatMap { Double($0) } }
+        default:
+            if type.hasPrefix("Distance"), workout.distanceM == nil {
+                workout.distanceM = attrs["sum"].flatMap { Double($0) }
+                    .map { Self.distanceMeters($0, unit: attrs["unit"]) }
+            }
+        }
+        pendingWorkout = workout
+    }
+
+    /// Commit the assembled workout at `</Workout>`: append it and fold its start into the summary's
+    /// counts + date span (deferred here so any statistics children are already in). No-op when not in a
+    /// workout (a stray end tag) or when the start tag was rejected for bad dates.
+    private func finishWorkout() {
+        guard let workout = pendingWorkout else { return }
+        pendingWorkout = nil
         workouts.append(workout)
         countsByType["Workout", default: 0] += 1
         anyRecordSeen = true
         // Workouts don't go through appendSample, so track their start in the
         // incremental date span too (matches the prior summary).
-        if earliestDate == nil || start < earliestDate! { earliestDate = start }
-        if latestDate == nil || start > latestDate! { latestDate = start }
+        if earliestDate == nil || workout.start < earliestDate! { earliestDate = workout.start }
+        if latestDate == nil || workout.start > latestDate! { latestDate = workout.start }
+    }
+
+    /// Convert a distance value in `km` / `mi` / `m` to metres (defaulting to km, Apple's usual unit).
+    static func distanceMeters(_ value: Double, unit: String?) -> Double {
+        switch (unit ?? "km").lowercased() {
+        case "km": return value * 1000.0
+        case "mi": return value * 1609.344
+        case "m":  return value
+        default:   return value * 1000.0
+        }
     }
 
     // MARK: Result

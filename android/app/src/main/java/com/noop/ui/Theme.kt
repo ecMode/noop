@@ -67,6 +67,10 @@ object Palette {
     val textSecondary get() = active.textSecondary
     val textTertiary get() = active.textTertiary
 
+    // Text that always sits on a pinned-dark surface, independent of the app's active light/dark scheme.
+    // Mirrors StrandPalette.onDarkSecondary for the liquid hero's source badge.
+    val onDarkSecondary = Color(0xFFC8CFD8)
+
     // Glow.
     val glowAmbient get() = active.glowAmbient
 
@@ -370,6 +374,7 @@ object Metrics {
     val space16 = 16.dp
     val space18 = 18.dp
     val space24 = 24.dp
+    val sourceBadgeHeight = 18.dp
     val cardRadius = 18.dp   // Bevel continuous radius (18–22dp)
     val cornerXs = 2.dp
     val cornerSm = 12.dp
@@ -399,6 +404,14 @@ object Metrics {
     val sparkHeight = 22.dp
     val stageStripHeight = 34.dp
     val motionStripHeight = 40.dp   // #407 — the subordinate movement/restlessness trace under the hypnogram
+    // iOS #988 port — WHOOP-style per-stage sleep timeline rows (design 2026-07-10).
+    val stageRowTrackHeight = 20.dp  // hatched night track + solid stage segments
+    val stageRowCorner = 10.dp       // row background rounding
+    val stageRowPadH = 10.dp         // row inner horizontal padding — MotionStrip/axis share it so epochs align
+    val stageRowPadV = 8.dp          // row inner vertical padding
+    val stageSegMinWidth = 2.dp      // width floor so a brief fragment reads as a block, not a hairline
+    val stageSegCorner = 1.5.dp      // solid segment rounding
+    val stageInsightHeight = 36.dp   // fixed insight slot height — selection never reflows the card
     val trendStripHeight = 120.dp
     val sparklineHeight = 28.dp
     val segmentBarHeight = 18.dp

@@ -67,6 +67,17 @@ final class OuraDriverTests: XCTestCase {
         XCTAssertEqual(d.phase, .needsKeyInstall)
     }
 
+    func testIsPlausibleAnchorEpochBounds() {
+        // The anchor plausibility window is [2020-01-01, 2035-01-01] UTC. OuraLiveSource reads this same
+        // predicate to log WHY an anchor was rejected (#91), so the boundaries are pinned here.
+        XCTAssertTrue(OuraDriver.isPlausibleAnchorEpoch(1_577_836_800))   // 2020-01-01, inclusive min
+        XCTAssertTrue(OuraDriver.isPlausibleAnchorEpoch(2_051_222_400))   // 2035-01-01, inclusive max
+        XCTAssertTrue(OuraDriver.isPlausibleAnchorEpoch(1_700_000_000))   // ~2023, mid-window
+        XCTAssertFalse(OuraDriver.isPlausibleAnchorEpoch(1_577_836_799))  // one second before min
+        XCTAssertFalse(OuraDriver.isPlausibleAnchorEpoch(2_051_222_401))  // one second past max
+        XCTAssertFalse(OuraDriver.isPlausibleAnchorEpoch(0))              // epoch 0 — the ~1970 anchor #91 must avoid
+    }
+
     func testFactoryResetStatusDrivesNeedsKeyInstall() {
         let d = OuraDriver(ringGen: .gen3, authKey: key)
         _ = d.nextStep(after: .ready)
@@ -302,6 +313,59 @@ final class OuraDriverTests: XCTestCase {
         }
     }
 
+    // MARK: - #287: 0x71 green_ibi_and_amp demoted to Tier B (was corrupting HRV via the 0x60 decoder)
+
+    func testGreenIBIAmp0x71TierIsB() {
+        // tierA == corpus-verified; there is no captured 0x71 fixture, and §6.2 documents a different
+        // layout than the 0x60 decoder it was wired to — so it must NOT be Tier A.
+        XCTAssertEqual(OuraEventTag.greenIbiAmp.tier, .tierB)
+    }
+
+    func testGreenIBIAmp0x71GatedOutOfLiveEmission() {
+        // The SAME body the 0x60 decoder turns into IBIs, but tagged 0x71. Under the old Tier-A routing a
+        // 0x71 record fed fabricated R-R into HRV; now it is Tier B, so by default it yields NOTHING.
+        let d = OuraDriver(ringGen: .gen3, authKey: key)   // allowTierB defaults to false
+        let rec = OuraFraming.parseRecord(bytes("7112020001007d10000000000000000000000007"))!
+        XCTAssertEqual(d.ingest(record: rec), [], "0x71 must not emit IBIs — it is not corpus-verified (#287)")
+        // Control: the same bytes ARE otherwise decodable by the 0x60 decoder, so the [] above is the tier
+        // gate, not a short/garbage body that would have dropped anyway.
+        XCTAssertNotNil(OuraDecoders.decodeIBIAmplitude(rec), "0x60 decoder still yields IBIs for these bytes")
+    }
+
+    func testGreenIBIAmp0x71EmitsRawSummaryNotIBIUnderAllowTierB() {
+        // With Tier B explicitly allowed it surfaces as RAW BYTES for inspection — never a guessed IBI, and
+        // OuraStreamMapping never folds a .tierB into scoring.
+        let d = OuraDriver(ringGen: .gen3, authKey: key, allowTierB: true)
+        let rec = OuraFraming.parseRecord(bytes("7112020001007d10000000000000000000000007"))!
+        let events = d.ingest(record: rec)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertTrue(events[0].isTierB)
+        if case .tierB(let summary) = events[0] {
+            XCTAssertEqual(summary.tag, 0x71)
+            XCTAssertEqual(summary.kind, "green_ibi_amp")
+        } else {
+            XCTFail("expected a tierB raw-bytes summary, not a fabricated IBI")
+        }
+        for e in events { if case .ibi = e { XCTFail("0x71 must never emit .ibi (#287)") } }
+    }
+
+    func testSleepPhase0x4BReclassifiedAsTierAHypnogram() {
+        // 0x4B was previously a Tier-B "sleep summary" (dropped by default). It is actually a hypnogram
+        // alias (open_oura `0x4b | 0x4e | 0x5a => decode_sleep_phases`), so it now decodes with the SAME
+        // validated 2-bit phase decoder as 0x4E/0x5A and emits Tier-A sleep-phase events even when
+        // allowTierB == false. Same payload as the 0x4E golden -> light, deep, rem, awake.
+        XCTAssertEqual(OuraEventTag(rawValue: 0x4B), .sleepPhaseB)
+        XCTAssertEqual(OuraEventTag.sleepPhaseB.tier, .tierA)
+        let d = OuraDriver(ringGen: .gen3, authKey: key)   // allowTierB defaults to false
+        let rec = OuraFraming.parseRecord(bytes("4b0602000100006c"))!
+        XCTAssertEqual(d.ingest(record: rec), [
+            .sleepPhase(OuraSleepPhase(ringTimestamp: rt, index: 0, stage: .light)),
+            .sleepPhase(OuraSleepPhase(ringTimestamp: rt, index: 1, stage: .deep)),
+            .sleepPhase(OuraSleepPhase(ringTimestamp: rt, index: 2, stage: .rem)),
+            .sleepPhase(OuraSleepPhase(ringTimestamp: rt, index: 3, stage: .awake)),
+        ])
+    }
+
     // MARK: - Activity info (0x50, Tier B, third-party formula) - real Gen 3 captures (PR #960)
     //
     // The six payloads below are byte-for-byte what a real Gen 3 ring sent across the PR #960
@@ -436,19 +500,31 @@ final class OuraDriverTests: XCTestCase {
         ])
     }
 
-    // MARK: - Notification-level ingest via reassembler
+    // MARK: - Notification-level ingest (open_oura: one record per notification)
 
-    func testIngestNotificationReassemblesAndDecodes() {
+    func testIngestDecodesOneRecordPerNotification() {
         let d = OuraDriver(ringGen: .gen3, authKey: key)
         let reassembler = OuraReassembler()
-        // Two records packed together: 0x7B SpO2 then 0x46 temp.
-        let value = bytes("7b060200010003ca" + "460802000100420e470e")
-        let events = d.ingest(notification: value, reassembler: reassembler)
-        XCTAssertEqual(events, [
-            .spo2(OuraSpO2(ringTimestamp: rt, value: 970)),
+        // The ring streams one event per notification; feed them separately, not packed. A 0x7B SpO2
+        // notification, then a 0x46 temp notification (whose payload holds two int16 samples).
+        let spo2 = d.ingest(notification: bytes("7b060200010003ca"), reassembler: reassembler)
+        XCTAssertEqual(spo2, [.spo2(OuraSpO2(ringTimestamp: rt, value: 970))])
+        let temp = d.ingest(notification: bytes("460802000100420e470e"), reassembler: reassembler)
+        XCTAssertEqual(temp, [
             .temp(OuraTemp(ringTimestamp: rt, celsius: 36.50)),
             .temp(OuraTemp(ringTimestamp: rt, celsius: 36.55)),
         ])
+    }
+
+    func testIngestNotificationDecodesOnlyFirstPacketWhenBytesLookPacked() {
+        // Defensive: if a notification ever carries bytes that LOOK like two packed records, only the
+        // first is decoded (one lenient packet per notification) — the trailing bytes are ignored, never
+        // walked into phantom records. Documents the open_oura contract.
+        let d = OuraDriver(ringGen: .gen3, authKey: key)
+        let reassembler = OuraReassembler()
+        let value = bytes("7b060200010003ca" + "460802000100420e470e")
+        let events = d.ingest(notification: value, reassembler: reassembler)
+        XCTAssertEqual(events, [.spo2(OuraSpO2(ringTimestamp: rt, value: 970))])
     }
 
     // MARK: - Generation-driven command set / MTU

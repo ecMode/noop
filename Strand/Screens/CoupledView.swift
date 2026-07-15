@@ -41,6 +41,11 @@ struct CoupledView: View {
     /// (the #819 pattern), reading drivers derived from the same displayed row the ring shows.
     @State private var showChargeBreakdown = false
 
+    /// The learned habitual midsleep (local time-of-day seconds), loaded once so the bed→wake span
+    /// resolves the SAME main-night pick the Sleep tab hero and the daily total use (#294). nil under
+    /// the cold-start threshold, which keeps the broad overnight-band bonus.
+    @State private var habitualMidsleepSec: Int? = nil
+
     /// The day the coupled read describes, today's resolved row (the same `resolveToday` #304/#144 boundary
     /// Today anchors on), never a second store read.
     private var day: DailyMetric? { repo.today }
@@ -52,6 +57,7 @@ struct CoupledView: View {
     /// exists. The SAME pure helper Today's ring reads, so the two screens can't disagree.
     private var calibrationNights: Int? {
         RecoveryScorer.calibrationNights(nightlyHrv: repo.days.map(\.avgHrv),
+                                         dayKeys: repo.days.map(\.day),
                                          hasRecovery: day?.recovery != nil)
     }
 
@@ -133,6 +139,11 @@ struct CoupledView: View {
             footerCaption
         }
         .sheet(isPresented: $showChargeBreakdown) { chargeBreakdownSheet }
+        // Loads the SAME learned habitual the Sleep tab hero threads into its main-night pick, so the
+        // bed→wake span below resolves identically (#294). Re-runs on a sync/import refresh.
+        .task(id: repo.refreshSeq) {
+            habitualMidsleepSec = await repo.habitualMidsleepSec()
+        }
     }
 
     // MARK: Header subtitle, "Today, d MMM"
@@ -297,10 +308,13 @@ struct CoupledView: View {
                     // Right: the coupled stat stack, OPTIMAL range (with a liquid tube band), calories, workouts.
                     VStack(alignment: .leading, spacing: 14) {
                         optimalStat
-                        heroStat("Calories",
+                        // heroStat renders `Text(title.uppercased())`, so `title` is a plain String and
+                        // a bare literal would NOT localize — pass the resolved localized value (the
+                        // catalog already carries Calories/Workouts) so German shows KALORIEN, not CALORIES.
+                        heroStat(String(localized: "Calories"),
                                  caloriesText,
                                  tint: StrandPalette.metricAmber)
-                        heroStat("Workouts",
+                        heroStat(String(localized: "Workouts"),
                                  (day?.exerciseCount).map { "\($0)" } ?? "0",
                                  tint: StrandPalette.textPrimary)
                     }
@@ -452,15 +466,19 @@ struct CoupledView: View {
         return Swift.max(450, mean ?? 450)   // 450 min = 7.5h
     }
 
-    /// Last night's bed → wake span, e.g. "23:41 – 07:23", from the freshest banked sleep session, only
-    /// when that session actually touches today's window (a days-old import is not "last night").
+    /// Last night's bed → wake span, e.g. "23:41 – 07:23", from the day's bridged MAIN-night span
+    /// (`SleepView.mainNightSpan`, the SAME resolver the Sleep tab hero and the daily total use), only
+    /// when that night actually touches today's window (a days-old import is not "last night"). Was
+    /// previously the screen's own "freshest-ending session" pick, which could name a different block —
+    /// and so a different span — than the Sleep tab and Today's HR graph for a night stored as more than
+    /// one block (#294).
     private var bedWakeSpanText: String? {
         let dayStart = Calendar.current.startOfDay(for: Repository.logicalDay(Date()))
         let windowStart = Int(dayStart.timeIntervalSince1970)
-        guard let s = repo.sleeps.filter({ $0.endTs > windowStart }).max(by: { $0.endTs < $1.endTs }) else {
-            return nil
-        }
-        return "\(clockString(s.effectiveStartTs)) - \(clockString(s.endTs))"
+        let candidates = repo.sleeps.filter { $0.endTs > windowStart }
+        guard let span = SleepView.mainNightSpan(candidates, habitualMidsleepSec: habitualMidsleepSec)
+        else { return nil }
+        return "\(clockString(span.start)) - \(clockString(span.end))"
     }
 
     // MARK: Footer
@@ -491,24 +509,28 @@ struct CoupledView: View {
         return carriedRecoveryDay
     }
 
-    /// The ordered Charge drivers for the displayed ring, the exact TodayView derivation (pure engine
-    /// scoring against the folded personal baselines). Empty for a calibrating / cold-start night, which
-    /// gates the sheet through to the countdown instead.
-    private var chargeDrivers: [ChargeDriver] {
-        guard let row = breakdownRow, let hrv = row.avgHrv, let rhr = row.restingHr else { return [] }
+    /// The ordered Charge drivers for the displayed ring PLUS the confidence tier from the SAME folded HRV
+    /// baseline — the exact TodayView derivation (pure engine scoring against the folded personal
+    /// baselines). nil for a calibrating / cold-start night, which gates the sheet through to the countdown
+    /// instead. PERF: mirrors TodayView.chargeBreakdown() — the old `chargeDrivers` property plus the
+    /// sheet's inline confidence fold re-folded the full `repo.days` history four times per body eval of
+    /// the open sheet; one call now folds each series exactly once, guards before any fold.
+    private func chargeBreakdown() -> (drivers: [ChargeDriver], confidence: ScoreConfidence)? {
+        guard let row = breakdownRow, let hrv = row.avgHrv, let rhr = row.restingHr else { return nil }
         let hrvBase = Baselines.foldHistory(repo.days.map(\.avgHrv), cfg: Baselines.hrvCfg)
-        guard hrvBase.usable else { return [] }
+        guard hrvBase.usable else { return nil }
         let rhrBase = Baselines.foldHistory(repo.days.map { $0.restingHr.map(Double.init) },
                                             cfg: Baselines.restingHRCfg)
         let respBase = Baselines.foldHistory(repo.days.map(\.respRateBpm), cfg: Baselines.respCfg)
         // Rest-quality term = the same sleep performance the sleep row shows, ÷100 (AnalyticsEngine's form).
         let sleepPerf = sleepPerformance.map { $0 / 100.0 }
-        return RecoveryScorer.chargeDrivers(
+        let drivers = RecoveryScorer.chargeDrivers(
             hrv: hrv, rhr: Double(rhr), resp: row.respRateBpm,
             hrvBaseline: hrvBase,
             rhrBaseline: rhrBase.usable ? rhrBase : nil,
             respBaseline: respBase.usable ? respBase : nil,
             sleepPerf: sleepPerf, skinTempDev: row.skinTempDevC)
+        return (drivers, ScoreConfidence.charge(recovery: row.recovery, hrvBaseline: hrvBase))
     }
 
     @ViewBuilder
@@ -516,8 +538,17 @@ struct CoupledView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
-                    let drivers = chargeDrivers
-                    if drivers.isEmpty {
+                    // One chargeBreakdown() call per sheet body eval: drivers + confidence share the same
+                    // baseline folds (see chargeBreakdown's PERF note).
+                    let breakdown = chargeBreakdown()
+                    if let breakdown, !breakdown.drivers.isEmpty {
+                        NoopCard(padding: 18, tint: StrandPalette.chargeColor) {
+                            ChargeBreakdownSection(
+                                drivers: breakdown.drivers,
+                                confidence: breakdown.confidence,
+                                skinTempRel: RecoveryScorer.skinTempRelative(deviationC: breakdownRow?.skinTempDevC))
+                        }
+                    } else {
                         if let banked = calibrationNights {
                             calibrationCard(banked: banked)
                         } else {
@@ -532,15 +563,6 @@ struct CoupledView: View {
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
                             }
-                        }
-                    } else {
-                        let hrvBase = Baselines.foldHistory(repo.days.map(\.avgHrv), cfg: Baselines.hrvCfg)
-                        NoopCard(padding: 18, tint: StrandPalette.chargeColor) {
-                            ChargeBreakdownSection(
-                                drivers: drivers,
-                                confidence: ScoreConfidence.charge(recovery: breakdownRow?.recovery,
-                                                                   hrvBaseline: hrvBase),
-                                skinTempRel: RecoveryScorer.skinTempRelative(deviationC: breakdownRow?.skinTempDevC))
                         }
                     }
 

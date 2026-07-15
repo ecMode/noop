@@ -56,6 +56,7 @@ class RegistryDayOwnerSourceTest {
         override suspend fun deleteGravityFor(deviceId: String) {}
         override suspend fun deleteStepsFor(deviceId: String) {}
         override suspend fun deletePpgHrFor(deviceId: String) {}
+        override suspend fun deletePpgWaveformFor(deviceId: String) {}
         override suspend fun deleteEventsFor(deviceId: String) {}
         override suspend fun deleteBatteryFor(deviceId: String) {}
         override suspend fun deleteDailyMetricsFor(deviceId: String) {}
@@ -65,6 +66,11 @@ class RegistryDayOwnerSourceTest {
         override suspend fun deleteAppleDailyFor(deviceId: String) {}
         override suspend fun deleteMetricSeriesFor(deviceId: String) {}
         override suspend fun deleteDayOwnershipFor(deviceId: String) {}
+        override suspend fun deleteSleepStatesFor(deviceId: String) {}
+        override suspend fun deleteLabMarkersFor(deviceId: String) {}
+        override suspend fun deleteLiveSessionsFor(deviceId: String) {}
+        override suspend fun deleteDismissedWorkoutsFor(deviceId: String) {}
+        override suspend fun deleteDismissedSleepsFor(deviceId: String) {}
     }
 
     private fun registry(dao: FakeDao) = DeviceRegistry(
@@ -123,6 +129,28 @@ class RegistryDayOwnerSourceTest {
         // Strap collected nothing this day → the import (only candidate with data) owns it.
         val owner = resolveWith(src, "2026-06-15", mapOf("my-whoop" to false, "oura" to true))
         assertEquals("oura", owner)
+    }
+
+    @Test
+    fun activityFileRideRanksBelowWholeDayImport() = runBlocking {
+        // #137: a whole-day WHOOP import (priority 2) and an activity-file ride (priority 3) both have HR
+        // for the same strap-less day. The whole-day import must OWN it — a 90-minute ride can never
+        // displace a full-day source. Parity with the Swift DayOwnerReadIntegrationTests tie-break test.
+        val dao = FakeDao().apply {
+            devices["my-whoop"] = device("my-whoop", "WHOOP", SourceKind.liveBLE, DeviceStatus.active)
+            devices["whoop-import"] = device("whoop-import", "WHOOP", SourceKind.fileImport, DeviceStatus.paired)
+            devices["activity-file"] = device("activity-file", "Workout files", SourceKind.activityFile, DeviceStatus.paired)
+        }
+        val src = RegistryDayOwnerSource(registry(dao))
+
+        val priorities = src.candidatePriorities().toMap()
+        assertEquals(2, priorities["whoop-import"])   // whole-day import
+        assertEquals(3, priorities["activity-file"])  // partial ride, ranked below
+
+        // Strap-less day, both imports have data → the whole-day import wins, not the ride.
+        val owner = resolveWith(src, "2026-06-15",
+            mapOf("my-whoop" to false, "whoop-import" to true, "activity-file" to true))
+        assertEquals("whoop-import", owner)
     }
 
     @Test

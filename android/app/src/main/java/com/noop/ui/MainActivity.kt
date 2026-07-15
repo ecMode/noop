@@ -48,6 +48,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        // Load the saved "Card transparency" so every frosted card renders at the chosen opacity from launch.
+        CardAppearance.init(this)
 
         // Demo build only: preload a full synthetic dataset so every screen is populated
         // out of the box (no strap, no import). No-op once seeded; never runs on the full app.
@@ -201,8 +203,46 @@ object NoopPrefs {
 
     const val KEY_ANALYZE_WATERMARK = "noop.analyzeWatermark"
 
+    /** "Power saving" (#477): when on, NOOP stretches its periodic strap-sync cadence (15 → 45 min) while
+     *  the phone is discharging at/below [KEY_POWER_SAVING_BATTERY_PCT] OR the OS Battery Saver is on.
+     *  Benign — the strap banks to flash meanwhile, so sync just batches; no data loss, no link risk.
+     *  Default OFF. Drives [com.noop.ble.WhoopBleClient.setLowBatteryOffloadThrottle] via [AppViewModel]. */
+    const val KEY_POWER_SAVING = "noop.powerSaving"
+    /** Battery-% threshold for [KEY_POWER_SAVING] (10/15/20/25/30). Default 20. */
+    const val KEY_POWER_SAVING_BATTERY_PCT = "noop.powerSavingBatteryPct"
+    /** "Pause HRV capture in Battery Saver" (#477): when on, NOOP releases the held-open background
+     *  continuous-HRV stream while the OS Battery Saver is on (a Live screen still arms it on demand).
+     *  A sub-option of [KEY_POWER_SAVING] — only effective while the master is on. Default ON (so enabling
+     *  Power saving pauses capture by default; the user can turn it off). Drives
+     *  [com.noop.ble.WhoopBleClient.setPauseCaptureOnPowerSave] via [AppViewModel]. */
+    const val KEY_PAUSE_HRV_ON_POWER_SAVE = "noop.pauseHrvOnPowerSave"
+
     fun of(context: Context): SharedPreferences =
         context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
+
+    /** "Power saving" master (battery-adaptive sync cadence). Default off. */
+    fun powerSaving(context: Context): Boolean =
+        of(context).getBoolean(KEY_POWER_SAVING, false)
+
+    fun setPowerSaving(context: Context, enabled: Boolean) {
+        of(context).edit().putBoolean(KEY_POWER_SAVING, enabled).apply()
+    }
+
+    /** Battery-% threshold for power saving (default 20). */
+    fun powerSavingBatteryPct(context: Context): Int =
+        of(context).getInt(KEY_POWER_SAVING_BATTERY_PCT, 20)
+
+    fun setPowerSavingBatteryPct(context: Context, pct: Int) {
+        of(context).edit().putInt(KEY_POWER_SAVING_BATTERY_PCT, pct).apply()
+    }
+
+    /** Pause continuous-HRV capture while Battery Saver is on (sub-option of Power saving). Default ON. */
+    fun pauseHrvOnPowerSave(context: Context): Boolean =
+        of(context).getBoolean(KEY_PAUSE_HRV_ON_POWER_SAVE, true)
+
+    fun setPauseHrvOnPowerSave(context: Context, enabled: Boolean) {
+        of(context).edit().putBoolean(KEY_PAUSE_HRV_ON_POWER_SAVE, enabled).apply()
+    }
 
     /** #836, the raw-HR fingerprint ("count:maxTs") the last COMPLETED idle rescore scored against. The
      *  15-min backstop tick skips when the current fingerprint equals this; cleared implicitly by any HR
@@ -475,6 +515,30 @@ object NoopPrefs {
         of(context).edit().putBoolean(KEY_SHOW_DAY_CYCLE_BACKGROUND, enabled).apply()
     }
 
+    /** Card-surface opacity as a PERCENT (0 = fully see-through, 100 = solid; default 100). Drives the
+     *  "Card transparency" setting — every frosted card (Heart Rate, Key Metrics, Recovery Vitals, …)
+     *  reads it via [CardAppearance]. Only the glass surface fades; the card content stays readable. */
+    const val KEY_CARD_OPACITY = "noop.cardOpacityPercent"
+
+    fun cardOpacityPercent(context: Context): Int =
+        of(context).getInt(KEY_CARD_OPACITY, 100).coerceIn(0, 100)
+
+    fun setCardOpacityPercent(context: Context, percent: Int) {
+        of(context).edit().putInt(KEY_CARD_OPACITY, percent.coerceIn(0, 100)).apply()
+    }
+
+    /** "Sky behind cards" (opt-in, default OFF): extend the day-cycle sky behind the WHOLE Today scroll
+     *  (not just the top band) so the Card-transparency slider reveals it under every card. Pairs with
+     *  [showDayCycleBackground] — no effect when the scene is off. Read once on Today entry. */
+    const val KEY_SKY_BEHIND_CARDS = "noop.skyBehindCards"
+
+    fun skyBehindCards(context: Context): Boolean =
+        of(context).getBoolean(KEY_SKY_BEHIND_CARDS, false)
+
+    fun setSkyBehindCards(context: Context, enabled: Boolean) {
+        of(context).edit().putBoolean(KEY_SKY_BEHIND_CARDS, enabled).apply()
+    }
+
     /** Coach on-device signals (v5): when ON, the opt-in BYO-key Coach's grounding context may include a
      *  SUMMARY-ONLY line of on-device correlations + Lab Book markers (no raw egress). A SECOND opt-in on
      *  top of the existing "let the coach use my data" consent. Default OFF, keeps the anonymity posture. */
@@ -538,6 +602,18 @@ object NoopPrefs {
         of(context).edit().putBoolean(KEY_BATTERY_ALERTS, enabled).apply()
     }
 
+    /** Predictive "recharge tonight" warning at ~24h of estimated runtime left. Sub-gate under
+     *  KEY_BATTERY_ALERTS (both must be on). Default ON so pre-toggle behavior is unchanged.
+     *  iOS/macOS twin key: behavior.batteryPredictiveAlerts. */
+    const val KEY_BATTERY_PREDICTIVE_ALERTS = "noop.batteryPredictiveAlerts"
+
+    fun predictiveBatteryAlerts(context: Context): Boolean =
+        of(context).getBoolean(KEY_BATTERY_PREDICTIVE_ALERTS, true)
+
+    fun setPredictiveBatteryAlerts(context: Context, enabled: Boolean) {
+        of(context).edit().putBoolean(KEY_BATTERY_PREDICTIVE_ALERTS, enabled).apply()
+    }
+
     /** Persisted once-per-crossing flags behind BatteryAlertPolicy, they survive process death so a
      *  battery hovering near a threshold fires exactly once per cycle (low re-arms above 25%, full
      *  re-arms below 100%). */
@@ -556,6 +632,18 @@ object NoopPrefs {
 
     fun setBatteryFullAlerted(context: Context, alerted: Boolean) {
         of(context).edit().putBoolean(KEY_BATTERY_FULL_ALERTED, alerted).apply()
+    }
+
+    /** Persisted once-per-discharge gate behind BatteryEstimator.runtimeAlert (the predictive
+     *  "~X left" alert; fires ≤24 h, re-arms ≥36 h). Same survive-process-death contract as the
+     *  SoC flags above. */
+    const val KEY_BATTERY_RUNTIME_ALERTED = "noop.batteryRuntimeAlerted"
+
+    fun batteryRuntimeAlerted(context: Context): Boolean =
+        of(context).getBoolean(KEY_BATTERY_RUNTIME_ALERTED, false)
+
+    fun setBatteryRuntimeAlerted(context: Context, alerted: Boolean) {
+        of(context).edit().putBoolean(KEY_BATTERY_RUNTIME_ALERTED, alerted).apply()
     }
 
     /** Scheduled report notifications (#517), opt-in, default OFF, no AI. Two independent toggles:
@@ -697,6 +785,18 @@ object NoopPrefs {
     fun setLastSyncAt(context: Context, epochSec: Long) {
         of(context).edit().putLong(KEY_LAST_SYNC_AT, epochSec).apply()
     }
+
+    /** Last-known strap firmware string, persisted on connect so the debug export can name it OFFLINE
+     *  (LiveState.strapFirmware is cleared on disconnect and gone in the scheduled/background export). */
+    const val KEY_LAST_FIRMWARE = "noop.lastFirmware"
+
+    fun lastFirmware(context: Context): String? = of(context).getString(KEY_LAST_FIRMWARE, null)
+
+    fun setLastFirmware(context: Context, fw: String?) {
+        of(context).edit().apply {
+            if (fw.isNullOrBlank()) remove(KEY_LAST_FIRMWARE) else putString(KEY_LAST_FIRMWARE, fw)
+        }.apply()
+    }
 }
 
 /**
@@ -709,6 +809,20 @@ fun NoopRoot() {
     val context = LocalContext.current
     val prefs = remember { NoopPrefs.of(context) }
     val appViewModel: AppViewModel = viewModel()
+
+    // #267: app-wide "came to foreground" hook, mirrors the iOS/macOS scenePhase == .active trigger.
+    // requestSync(FOREGROUND) is a safe no-op when nothing's connected/bonded yet (e.g. during
+    // onboarding), so this is placed above the onboarding/terms gates rather than duplicated below them.
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner, appViewModel) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                appViewModel.ble.onForeground()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     var onboarded by remember {
         mutableStateOf(prefs.getBoolean(NoopPrefs.KEY_ONBOARDED, false))

@@ -1,7 +1,7 @@
 # WHOOP 5.0 / MG deep data — the "R22" unlock
 
 **Status:** experimental, opt-in, awaiting on-hardware confirmation.
-**Tracking:** [#174](https://github.com/NoopApp/noop/issues/174).
+**Tracking:** [#103](https://github.com/ryanbr/noop/issues/103) (raw HCI captures + new deep-record layouts).
 
 ## The problem
 
@@ -23,7 +23,7 @@ This was reached independently three ways, which is why we trust it:
 |---|---|---|
 | [judes.club — "Cracking the WHOOP 5 Bluetooth Protocol"](https://judes.club/writing/cracking-the-whoop-5-bluetooth-protocol/) + [interactive spec](https://judes.club/experiments/whoop5/) | iOS HCI capture of the official app | The full frame format + the exact 15-flag enable sequence **with values**. Our `Whoop5Config` golden test is validated byte-for-byte against its frame-builder. |
 | [Asherlc/dofek](https://github.com/Asherlc/dofek/blob/main/docs/whoop-ble-protocol.md) | Android APK decompilation | The config opcodes (`0x73 START_DEVICE_CONFIG_KEY_EXCHANGE`, `0x78 SET_FF_VALUE`) and the same key names/values. |
-| A community BTSnoop capture (#174) | Bluetooth HCI log of the official app on a real strap | Independently surfaced the same `enable_r22_*` console report + the channel layout. |
+| A community BTSnoop capture ([#103](https://github.com/ryanbr/noop/issues/103)) | Bluetooth HCI log of the official app on a real strap | Independently surfaced the same `enable_r22_*` console report + the channel layout. |
 
 ## Channel layout (5.0 / MG)
 
@@ -60,7 +60,9 @@ bytes, the value byte (an ASCII `'1'`/`'2'`) at offset 32, then 7 zeros. The exa
 values, is in [`Whoop5Config.swift`](../Packages/WhoopProtocol/Sources/WhoopProtocol/Whoop5Config.swift)
 and [`Whoop5Config.kt`](../android/app/src/main/java/com/noop/protocol/Whoop5Config.kt), golden-tested on
 both platforms. `enable_r22_packets` is the one that opens the type-`0x2F` biometric stream; the rest
-tune channel selection, wear detection and sleep behaviour.
+tune channel selection, wear detection and sleep behaviour. Flags 1–15 come from judes.club's
+frame-builder; the 16th, `enable_sig12`, was added from a real on-strap HCI capture ([#103](https://github.com/ryanbr/noop/issues/103))
+that otherwise reproduced flags 1–15 byte-for-byte in this order.
 
 ## How NOOP uses it (opt-in, reversible)
 
@@ -68,7 +70,7 @@ tune channel selection, wear detection and sleep behaviour.
   *writes* to the strap.
 - A manual **"Send enable sequence to strap"** button (not auto-run on connect), enabled only when a
   5/MG is **bonded and worn** (the R22 stream is on-wrist gated).
-- The 15 flags are written with-response, ~80 ms apart.
+- The 16 flags are written with-response, ~80 ms apart.
 - It's **reversible** — it only changes which data the strap chooses to emit — and is the same thing the
   official app does on every connect.
 - **iOS / Android only on real hardware:** macOS CoreBluetooth can't complete the authenticated SMP bond
@@ -88,14 +90,40 @@ tune channel selection, wear detection and sleep behaviour.
   we map the type-`0x2F` layout (documented as HR @ byte 14, accel x/y/z float32 @ 37/41/45) and feed the
   motion into NOOP's existing v25-style sleep stager.
 
+## Mapping the layout — ground-truth correlation
+
+An HCI capture on its own is a pile of un-labelled bytes. The fast way to label them is *known
+plaintext*: a tester's own **WHOOP data export** (app.whoop.com → Data Export) lists the official
+per-night values — HRV, resting HR, skin temperature, SpO₂, respiratory rate — for exactly the nights
+in the capture. Searching each record type for the byte offset + encoding that reproduces those known
+values across every night pins the field without guesswork.
+
+Two stdlib tools in [`Tools/linux-capture/`](../Tools/linux-capture/) do this:
+
+- **`hci_extract.py`** converts a phone HCI log (iOS `.pklg` / Android `btsnoop_hci.log`) of the
+  official app into the project's `capture.json` frame format — so an official-app full-sync capture
+  feeds the same decoder as a Linux capture. It keeps only CRC-valid WHOOP frames.
+- **`correlate_ground_truth.py`** cross-references those frames against the CSV export and reports
+  candidate `(record type, offset, encoding, scale)` tuples, requiring both breadth and a
+  distribution match so constants and coincidences don't score.
+
+Crucially this is **privacy-preserving**: both tools run locally and the correlation output is only
+offsets/encodings, never health values — so a 5/MG owner can contribute a confirmed field mapping to
+[#103](https://github.com/ryanbr/noop/issues/103) without posting their capture or their data export.
+A mapped offset still follows the project rule — *real captures, never invented offsets* — before it
+lands in `parseFrameWhoop5` / `whoop_protocol.json`.
+
 ## How to help (5.0 / MG owners)
 
 1. Update to the latest NOOP, **Settings → Experimental → "Unlock WHOOP 5/MG deep data (R22)"**.
 2. With the strap **on and bonded**, tap **Send enable sequence to strap**.
-3. Keep wearing it, let it sync, then **share your strap log** on #174 — we're looking for new deep
+3. Keep wearing it, let it sync, then **share your strap log** on [#103](https://github.com/ryanbr/noop/issues/103) — we're looking for new deep
    records (type `0x2F`) to start arriving.
-4. Even better: a Bluetooth HCI capture of the **official app syncing a night's history** shows the deep
-   packets actually flowing and their layout. See the capture guide in the wiki.
+4. Even better: a Bluetooth HCI capture of the **official app syncing a full night's history** shows the deep
+   packets actually flowing and their layout. Method: iOS **PacketLogger** (Bluetooth diagnostic profile → `.pklg`)
+   or Android **Developer Options → Bluetooth HCI snoop log** → `btsnoop_hci.log`, opened in Wireshark — the
+   same iOS-HCI approach the [judes.club write-up](https://judes.club/writing/cracking-the-whoop-5-bluetooth-protocol/)
+   used. Filter to just the WHOOP peripheral and attach it to [#103](https://github.com/ryanbr/noop/issues/103).
 
 Credit to **judes.club**, **Asherlc/dofek**, and **b-nnett/goose** for the public protocol work this
 builds on.

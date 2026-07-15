@@ -13,8 +13,9 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /*
- * SleepStagerV2.kt — an OPT-IN, EXPERIMENTAL alternative sleep-staging recipe, offered ALONGSIDE the
- * shipped [SleepStager] (V1) rather than replacing it. V1 stays the default and is UNTOUCHED.
+ * SleepStagerV2.kt — the DEFAULT sleep-staging recipe. It became the default over the older percentile-band
+ * stager [SleepStager] (V1) after a 44-subject cross-subject benchmark; V1 stays available behind the
+ * PuffinExperiment flag.
  *
  * Byte-identical-logic Kotlin twin of StrandAnalytics/SleepStagerV2.swift, itself reimplemented clean from
  * the contributor recipe in NoopApp/noop PR #600 (sunny-noop). We took only the per-session STAGING engine,
@@ -22,11 +23,11 @@ import kotlin.math.sqrt
  * entirely from V1 — this file only re-stages a window someone already decided is sleep, so it is a true
  * drop-in for [SleepStager.stageSession]: SAME signature, SAME List<StageSegment> return shape.
  *
- * HONEST HEDGING (same spirit as V1, plus the PR's own caveat): these stages are APPROXIMATIONS, not
- * PSG-validated, not medical advice. The recipe was validated by its author on a SINGLE subject (n=1, 7
- * nights) — it recovered deep/REM noticeably better than V1 there, but the window sizes / weights may be
- * subject-specific and need multi-subject validation before they can be trusted as general. That is exactly
- * why this is opt-in and labelled experimental.
+ * HONEST HEDGING (same spirit as V1): these stages are APPROXIMATIONS, not PSG-validated, not medical
+ * advice. The recipe first shipped with only its author's n=1 validation; it is now the default because a
+ * 44-subject leave-one-subject-out benchmark (AAUWSS + Walch sleep-accel) showed it strictly dominates V1
+ * (kappa 0.35 vs 0.03, deep recall 55% vs 1%). The per-epoch coefficients are still fixed a-priori from
+ * sleep physiology + population base rates, not fit to labels.
  *
  * Recipe (per 30 s epoch, all coefficients fixed a-priori from sleep physiology + population base rates,
  * NOT fit to labels):
@@ -162,8 +163,10 @@ object SleepStagerV2 {
     private val baseLogPrior: Map<String, Double> = mapOf(
         "light" to ln(0.50), "deep" to ln(0.18), "rem" to ln(0.22), "awake" to ln(0.10))
 
-    /** Deep is eligible only in the night's lowest ~20 % HR-flatness epochs (≈ deep base rate + margin). */
-    private const val deepGateThresh = 0.20
+    /** Deep is eligible only in the night's lowest ~25 % HR-flatness epochs (≈ deep base rate + margin).
+     *  Widened 0.20 -> 0.25 by the multi-subject (AAUWSS + sleep-accel LOSO) deep-boundary tune, which
+     *  recovers the deep recall the other deep-tightening edits shed while keeping precision up. */
+    internal const val deepGateThresh = 0.25
     private const val deepGateSlope = 5.0
 
     /** Motion thresholds are RELATIVE to each night's own quiescent jerk floor (median per-second jerk over
@@ -172,20 +175,37 @@ object SleepStagerV2 {
     private const val jerkFloorGateMult = 55.0  // wake-boost when an epoch's peak jerk exceeds floor × this
     private const val motionGateBoost = 2.0
 
+    /**
+     * Motion-corroborated wake (elevated-but-flat-HR nights, #462). An epoch is MOTION-QUIESCENT when it shows
+     * no observed movement (`moveFrac == 0`) AND its peak per-second jerk sits at/below the night's own
+     * quiescent floor × [jerkFloorGateMult] — i.e. the wrist did not move this epoch, on the same
+     * night-relative scale the wake jerk-gate uses. On such epochs the AWAKE emission keeps any wake-SUPPRESSING
+     * cardiac evidence (a low, flat HR) but discards the wake-PROMOTING half: a raised HR / HR-variability with
+     * the wrist motionless is a supplement / fever / hot-room / alcohol artefact, not wakefulness, and must not
+     * vote the epoch awake on its own. Never invents wake and never removes pro-sleep cardiac evidence, so a
+     * genuinely still low-HR sleep epoch is byte-identical; only a still epoch whose ELEVATED HR was about to
+     * push it awake is held. Motion (`zmvv`) and the jerk gate — which by construction cannot fire on a
+     * quiescent epoch (`jerkMax ≤ floor × gateMult`) — still drive wake on any epoch that actually moved.
+     * Internal so the predicate test can call it, matching the Swift `motionQuiescent` visibility.
+     */
+    internal fun motionQuiescent(f: Epoch): Boolean =
+        f.moveFrac <= 0.0 && f.jerkMax <= f.jerkScale * jerkFloorGateMult
+
     /** Weight of the RSA respiration-regularity term (regular → deep, irregular → REM). */
     private const val respWeight = 0.6
 
     /** Transition matrix (rows = from, cols = to). Self-transitions dominate; deep↔rem rare; wake mostly
      *  to/from light. A priori, not fit. */
-    private val transition: Map<String, Map<String, Double>> = mapOf(
-        "deep" to mapOf("deep" to 0.90, "rem" to 0.005, "light" to 0.09, "awake" to 0.005),
+    internal val transition: Map<String, Map<String, Double>> = mapOf(
+        "deep" to mapOf("deep" to 0.86, "rem" to 0.007, "light" to 0.126, "awake" to 0.007),
         "rem" to mapOf("deep" to 0.005, "rem" to 0.88, "light" to 0.10, "awake" to 0.015),
         "light" to mapOf("deep" to 0.06, "rem" to 0.06, "light" to 0.85, "awake" to 0.03),
         "awake" to mapOf("deep" to 0.01, "rem" to 0.02, "light" to 0.27, "awake" to 0.70))
 
     /** One 30 s epoch's recipe features. Nullable means "no measurement"; the z-score / percentile treat a
-     *  missing value as the neutral centre so a sparse channel never blocks a stage. */
-    private data class Epoch(
+     *  missing value as the neutral centre so a sparse channel never blocks a stage. Internal (not private) so
+     *  the motion-corroborated-wake predicate test can construct one, matching the Swift `Epoch` visibility. */
+    internal data class Epoch(
         val start: Long,        // epoch start (unix seconds, multiple of 30)
         val hr: Double?,        // epoch-mean HR (bpm)
         val hrVar: Double?,     // std of per-second HR over a centred 5-min window
@@ -408,7 +428,9 @@ object SleepStagerV2 {
      *  uniform start. Ties resolve to the earlier stage in [stageNames]. */
     private fun viterbi(emSeq: List<Map<String, Double>>): List<String> {
         if (emSeq.isEmpty()) return emptyList()
-        val logT = transition.mapValues { (_, row) -> row.mapValues { (_, v) -> ln(v) } }
+        // Floor before ln so a zeroed transition entry (a legal hand-edit) can never hit ln(0) = -Inf
+        // and poison the lattice. Inert for the current matrix (no zero entries). Kept from #348.
+        val logT = transition.mapValues { (_, row) -> row.mapValues { (_, v) -> ln(maxOf(v, 1e-9)) } }
         var v = emSeq[0]   // uniform start
         val back = ArrayList<Map<String, String>>()
         for (t in 1 until emSeq.size) {
@@ -465,11 +487,18 @@ object SleepStagerV2 {
         for (f in feats) {
             val zhrv = zhr(f.hr); val zhvv = zhv(f.hrVar); val zmvv = zmv(f.moveFrac)
             val gate = deepGateSlope * maxOf(0.0, fpct(f.hrFlat11) - deepGateThresh)
+            // Cardiac contribution to the AWAKE emission. On a motion-quiescent epoch the wrist did not move,
+            // so a raised HR / HR-variability alone must NOT promote wake — clamp the cardiac term to ≤ 0,
+            // keeping only its wake-SUPPRESSING (pro-sleep) half. Non-quiescent epochs are unchanged and use
+            // the same cardiac coefficients verbatim, so a night with any motion stages byte-identical; the
+            // correction only ever holds a still, elevated-HR epoch. Mirrors Swift `awakeCardiac`.
+            val awakeCardiac0 = 0.8 * zhvv + 0.4 * zhrv
+            val awakeCardiac = if (motionQuiescent(f)) minOf(0.0, awakeCardiac0) else awakeCardiac0
             val em = HashMap<String, Double>()
-            em["deep"] = -1.4 * zhvv - 0.2 * zhrv - 0.3 * zmvv - gate + baseLogPrior["deep"]!!
+            em["deep"] = -1.1 * zhvv - 0.5 * zmvv - gate + baseLogPrior["deep"]!!
             em["rem"] = 0.6 * zhvv - 0.6 * zmvv + 0.4 * zhrv + baseLogPrior["rem"]!!
             em["light"] = baseLogPrior["light"]!!
-            em["awake"] = 1.0 * zmvv + 0.8 * zhvv + 0.4 * zhrv + baseLogPrior["awake"]!!
+            em["awake"] = 1.0 * zmvv + awakeCardiac + baseLogPrior["awake"]!!
             val pr = cyclePrior(f.clock)
             for (s in stageNames) em[s] = em[s]!! + pr[s]!!
             if (f.jerkMax > f.jerkScale * jerkFloorGateMult) em["awake"] = em["awake"]!! + motionGateBoost

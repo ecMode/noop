@@ -70,6 +70,7 @@ class SourceCoordinatorAdoptionTest {
         override suspend fun deleteGravityFor(deviceId: String) {}
         override suspend fun deleteStepsFor(deviceId: String) {}
         override suspend fun deletePpgHrFor(deviceId: String) {}
+        override suspend fun deletePpgWaveformFor(deviceId: String) {}
         override suspend fun deleteEventsFor(deviceId: String) {}
         override suspend fun deleteBatteryFor(deviceId: String) {}
         override suspend fun deleteDailyMetricsFor(deviceId: String) {}
@@ -78,6 +79,11 @@ class SourceCoordinatorAdoptionTest {
         override suspend fun deleteWorkoutsFor(deviceId: String) {}
         override suspend fun deleteAppleDailyFor(deviceId: String) {}
         override suspend fun deleteMetricSeriesFor(deviceId: String) {}
+        override suspend fun deleteSleepStatesFor(deviceId: String) {}
+        override suspend fun deleteLabMarkersFor(deviceId: String) {}
+        override suspend fun deleteLiveSessionsFor(deviceId: String) {}
+        override suspend fun deleteDismissedWorkoutsFor(deviceId: String) {}
+        override suspend fun deleteDismissedSleepsFor(deviceId: String) {}
         override suspend fun deleteDayOwnershipFor(deviceId: String) {
             owners.entries.removeIf { it.value.deviceId == deviceId }
         }

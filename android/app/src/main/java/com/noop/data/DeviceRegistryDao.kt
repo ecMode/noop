@@ -70,6 +70,7 @@ interface DeviceRegistryDao {
     @Query("DELETE FROM gravitySample WHERE deviceId = :deviceId") suspend fun deleteGravityFor(deviceId: String)
     @Query("DELETE FROM stepSample WHERE deviceId = :deviceId") suspend fun deleteStepsFor(deviceId: String)
     @Query("DELETE FROM ppgHrSample WHERE deviceId = :deviceId") suspend fun deletePpgHrFor(deviceId: String)
+    @Query("DELETE FROM ppgWaveformSample WHERE deviceId = :deviceId") suspend fun deletePpgWaveformFor(deviceId: String)
     @Query("DELETE FROM event WHERE deviceId = :deviceId") suspend fun deleteEventsFor(deviceId: String)
     @Query("DELETE FROM battery WHERE deviceId = :deviceId") suspend fun deleteBatteryFor(deviceId: String)
     @Query("DELETE FROM dailyMetric WHERE deviceId = :deviceId") suspend fun deleteDailyMetricsFor(deviceId: String)
@@ -79,6 +80,16 @@ interface DeviceRegistryDao {
     @Query("DELETE FROM appleDaily WHERE deviceId = :deviceId") suspend fun deleteAppleDailyFor(deviceId: String)
     @Query("DELETE FROM metricSeries WHERE deviceId = :deviceId") suspend fun deleteMetricSeriesFor(deviceId: String)
     @Query("DELETE FROM dayOwnership WHERE deviceId = :deviceId") suspend fun deleteDayOwnershipFor(deviceId: String)
+    // Added (audit finding): device-keyed tables the delete set previously missed, so "delete all data"
+    // left raw band sleep-state (sleepStateSample), user-entered lab/blood markers (labMarker), live
+    // coaching sessions (liveSession) and dismissed workout/sleep markers behind — a privacy defect for a
+    // delete-means-gone app. DeviceRegistryTest.deleteDeviceDataCallsEveryDaoDeleteMethod asserts every
+    // delete*For DAO method is wired into deleteDeviceData so a future migration can't reintroduce the gap.
+    @Query("DELETE FROM sleepStateSample WHERE deviceId = :deviceId") suspend fun deleteSleepStatesFor(deviceId: String)
+    @Query("DELETE FROM labMarker WHERE deviceId = :deviceId") suspend fun deleteLabMarkersFor(deviceId: String)
+    @Query("DELETE FROM liveSession WHERE deviceId = :deviceId") suspend fun deleteLiveSessionsFor(deviceId: String)
+    @Query("DELETE FROM dismissedWorkout WHERE deviceId = :deviceId") suspend fun deleteDismissedWorkoutsFor(deviceId: String)
+    @Query("DELETE FROM dismissedSleep WHERE deviceId = :deviceId") suspend fun deleteDismissedSleepsFor(deviceId: String)
 
     /** Set the owner override for a day (insert-or-replace by the day PK). */
     @Insert(onConflict = OnConflictStrategy.REPLACE)

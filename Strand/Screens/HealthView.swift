@@ -648,6 +648,8 @@ private struct ContributorBar: View {
 private struct FitnessAgeSection: View {
     @EnvironmentObject var repo: Repository
     @EnvironmentObject var profile: ProfileStore
+    /// Drives the not-ready card's "refresh Fitness Age" button (force an immediate recompute).
+    @EnvironmentObject var intelligence: IntelligenceEngine
 
     /// Latest weekly Fitness Age (years) read from the "fitness_age" metricSeries, nil until loaded/computed.
     @State private var fitnessAge: Double?
@@ -658,6 +660,8 @@ private struct FitnessAgeSection: View {
     /// Recent run-derived VO₂max values for the card's trend sparkline (oldest→newest).
     @State private var vo2Series: [Double] = []
     @State private var loaded = false
+    /// True while a manual "refresh Fitness Age" recompute is running (spinner in the readiness card).
+    @State private var refreshing = false
 
     /// Reveal the readiness checklist (the "ⓘ How accurate is this?" disclosure under a shown value).
     @State private var showReadiness = false
@@ -692,6 +696,14 @@ private struct FitnessAgeSection: View {
             hasWaist: profile.waistCm > 0)
     }
 
+    /// The not-ready card's lead — delegates to the file-scope `fitnessReadyLeadCopy(rhrDays:hasAge:hasSex:)`,
+    /// shared with the Today card's `MetricDetailView` tap-through so both surfaces show the SAME countdown.
+    private func fitnessReadyLead() -> String {
+        fitnessReadyLeadCopy(
+            rhrDays: repo.days.suffix(7).compactMap { $0.restingHr }.count,
+            hasAge: profile.age > 0, hasSex: !profile.sex.isEmpty)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             SectionHeader("Fitness Age", overline: "Weekly",
@@ -724,13 +736,22 @@ private struct FitnessAgeSection: View {
                     .transition(.opacity)
             }
         } else if loaded {
-            // No value yet: lead with the checklist so the user sees exactly what's still needed.
+            // No value yet: lead with a concrete countdown ("N more nights of wear…") so the user knows
+            // how far off it is, then the checklist shows exactly what's still needed.
             ReadinessChecklistCard(
                 readiness: readiness,
-                lead: readiness.canCompute
-                    ? "A few more days and we can show your Fitness Age."
-                    : "A few more days of wear, plus the basics below, and we can show your Fitness Age.",
-                onFix: { fitnessSheet = .settings })
+                lead: fitnessReadyLead(),
+                onFix: { fitnessSheet = .settings },
+                onRefresh: {
+                    guard !refreshing else { return }
+                    refreshing = true
+                    Task {
+                        _ = await intelligence.recomputeFitnessAgeOnly()
+                        await load()
+                        refreshing = false
+                    }
+                },
+                refreshing: refreshing)
         } else {
             // Brief read of the weekly value; honest placeholder rather than an empty gap.
             ComingSoon(what: "Reading your Fitness Age…", symbol: "figure.run")
@@ -888,6 +909,24 @@ private struct FitnessAgeSection: View {
     }
 }
 
+/// The Fitness Age not-ready lead: a concrete countdown of nights-of-wear still needed (from the shared
+/// `nightsUntilReady`), noting the profile basics only when they're actually missing. File-scope (not a
+/// view method) so BOTH the Health hub's `FitnessAgeCard` and the Today card's `MetricDetailView`
+/// tap-through render the SAME copy from one source. Kept WORD-FOR-WORD identical to the Android
+/// `fitnessReadyLead` so the two platforms match.
+func fitnessReadyLeadCopy(rhrDays: Int, hasAge: Bool, hasSex: Bool) -> String {
+    let remaining = FitnessAgeEngine.nightsUntilReady(rhrDays: rhrDays)
+    let needsBasics = !hasAge || !hasSex
+    switch (remaining, needsBasics) {
+    case (0, false): return String(localized: "A few more days and we can show your Fitness Age.")
+    case (0, true):  return String(localized: "Add your age and sex below and we can show your Fitness Age.")
+    case (1, false): return String(localized: "1 more night of wear and we can show your Fitness Age.")
+    case (1, true):  return String(localized: "1 more night of wear, plus your age and sex below, and we can show your Fitness Age.")
+    case (let n, false): return String(localized: "\(n) more nights of wear and we can show your Fitness Age.")
+    case (let n, true):  return String(localized: "\(n) more nights of wear, plus your age and sex below, and we can show your Fitness Age.")
+    }
+}
+
 /// The readiness checklist card: an optional lead line, then the engine's `items` as ✓/⚠/○ rows with
 /// their `detail` text, GROUPED by `.role` into "Drives your Fitness Age" and "Unlocks your VO₂max".
 /// A required-but-missing input shows a "Fix in Settings" affordance (the engine's required+missing
@@ -895,9 +934,15 @@ private struct FitnessAgeSection: View {
 private struct ReadinessChecklistCard: View {
     let readiness: FitnessAgeReadiness
     /// Optional intro line shown above the groups (e.g. the "a few more days" no-value message).
-    let lead: LocalizedStringKey?
+    /// Already-localized text (from `fitnessReadyLead()`, which returns `String(localized:)`), so it's a
+    /// plain `String` rendered verbatim — not a `LocalizedStringKey` (which would re-key a resolved string).
+    let lead: String?
     /// Invoked when the user taps a required-missing row's "Fix in Settings".
     let onFix: () -> Void
+    /// Optional force-recompute action (the "refresh Fitness Age" button, not-ready state only);
+    /// `refreshing` swaps it for a spinner while the recompute runs. nil = no button.
+    var onRefresh: (() -> Void)? = nil
+    var refreshing: Bool = false
 
     private var drivesAge: [FitnessReadinessItem] { readiness.items.filter { $0.role == .drivesAge } }
     private var unlocksVO2: [FitnessReadinessItem] { readiness.items.filter { $0.role == .unlocksVO2max } }
@@ -908,6 +953,21 @@ private struct ReadinessChecklistCard: View {
                 HStack(spacing: NoopMetrics.rowSpacing) {
                     confidencePill
                     Spacer(minLength: 0)
+                    // Force-recompute affordance: NOOP scores Fitness Age weekly, so this applies it NOW
+                    // from stored data. Spinner while it runs.
+                    if let onRefresh {
+                        if refreshing {
+                            ProgressView().controlSize(.small).tint(StrandPalette.accent)
+                        } else {
+                            Button(action: onRefresh) {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(StrandFont.subhead)
+                                    .foregroundStyle(StrandPalette.accent)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Refresh Fitness Age now")
+                        }
+                    }
                 }
                 if let lead {
                     Text(lead)
@@ -1254,6 +1314,7 @@ private struct LiquidVitalTile: View {
         case "rhr":        return over(100)
         case "resp_rate":  return over(24)
         case "spo2":       return across(90, 100)
+        case "spo2raw":    return across(0, 65535)   // raw PPG ADC mean over the u16 sensor span (#93)
         case "skin_temp":
             // Absolute skin temp (>= 20 °C) maps across a plausible wrist band; a small ±deviation
             // maps around a half-full centre so a normal night reads mid-gauge, not empty.
@@ -1412,6 +1473,7 @@ private struct HealthHubLinksSection: View {
         .environmentObject(ProfileStore())
         .environmentObject(AppModel())
         .environmentObject(NavRouter())
+        .environmentObject(IntelligenceEngine(repo: repo, profile: ProfileStore(), deviceId: "preview"))
         .frame(width: 900, height: 760)
         .preferredColorScheme(.dark)
 }

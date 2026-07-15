@@ -2,6 +2,7 @@ import SwiftUI
 import StrandDesign
 import StrandAnalytics
 import StrandImport
+import WhoopStore
 
 /// Settings -> Test Centre. The single home for every diagnostic, log and test control (spec section 7).
 ///
@@ -31,17 +32,14 @@ struct TestCentreView: View {
     @State private var debugExportOn = ScheduledDebugExport.isEnabled
     @State private var debugExportMinutes = ScheduledDebugExport.timeMinutes
 
-    // Section 4: the experimental toggles, on the SAME @AppStorage keys as SettingsView (preserved per
-    // spec section 10), so toggling here and there is one and the same setting.
-    @AppStorage(PuffinExperiment.experimentalSleepV2Key) private var experimentalSleepV2Enabled = false
-    @AppStorage(PuffinExperiment.keepRealtimeForDataKey) private var continuousHrvEnabled = false
-    @AppStorage(PuffinExperiment.defaultsKey) private var puffinExperiments = false
-    @AppStorage(PuffinExperiment.deepDataKey) private var deepDataEnabled = false
-    @AppStorage(PuffinExperiment.broadcastHrKey) private var broadcastHrEnabled = false
-    @AppStorage(PuffinFrameRecorder.enabledKey) private var puffinCapture = false
-
     /// The strap model the user last picked, the same key SettingsView's showFiveMGControls gate reads.
     @AppStorage("selectedWhoopModel") private var selectedWhoopModelRaw = WhoopModel.whoop4.rawValue
+
+    // Section 4: Experimental algorithms. Bound to the SAME PuffinExperiment keys the Android card writes, so
+    // the platforms stay in lockstep. The PPG-HR sub-lag interpolation variant and the HRV-readiness readout,
+    // both default OFF.
+    @AppStorage(PuffinExperiment.ppgHrSubLagInterpKey) private var ppgHrSubLagInterpEnabled = false
+    @AppStorage(PuffinExperiment.hrvReadinessKey) private var hrvReadinessEnabled = false
 
     /// True when the connected strap is a 5/MG, so the 5/MG experimental block shows. Mirrors the
     /// SettingsView gate (#22): a confident 4.0 owner never sees controls that cannot touch their strap.
@@ -61,7 +59,7 @@ struct TestCentreView: View {
                 domainModesCard.staggeredAppear(index: 0)
                 diagnosticToolsCard.staggeredAppear(index: 1)
                 exportCard.staggeredAppear(index: 2)
-                advancedCard.staggeredAppear(index: 3)
+                experimentalAlgorithmsCard.staggeredAppear(index: 3)
             }
         }
         .id(refreshToken)
@@ -226,65 +224,95 @@ struct TestCentreView: View {
         }
     }
 
-    // MARK: - Section 4: Advanced / experimental
+    // MARK: - Section 4: Experimental algorithms (opt-in, off-by-default research variants)
 
-    @ViewBuilder private var advancedCard: some View {
+    /// The single home for OPT-IN, non-clinical research variants that swap which model computes a metric
+    /// (never detection, never a stored WHOOP value). Each toggle writes the SAME PuffinExperiment key its
+    /// Android twin reads. Hosts the HR-from-PPG sub-lag interpolation variant. Twin of the Android
+    /// ExperimentalAlgorithmsCard.
+    @ViewBuilder private var experimentalAlgorithmsCard: some View {
         NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                Text("ADVANCED")
+                Text("EXPERIMENTAL ALGORITHMS")
                     .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
                     .foregroundStyle(StrandPalette.textSecondary)
-
-                // Model-agnostic advanced toggles (shown on every strap), same @AppStorage keys as Settings.
-                Toggle(isOn: $experimentalSleepV2Enabled) {
-                    Text("Experimental sleep staging (V2)")
-                        .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
-                }
-                .toggleStyle(.switch).tint(StrandPalette.accent)
-
-                Toggle(isOn: $continuousHrvEnabled) {
-                    Text("Continuous HRV capture")
-                        .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
-                }
-                .toggleStyle(.switch).tint(StrandPalette.accent)
-                .onChangeCompat(of: continuousHrvEnabled) { on in model.ble.setKeepRealtimeForData(on) }
-
-                // 5/MG-only probes, hidden off a 4.0 strap (the #22 gate, same as SettingsView).
-                if is5MG {
-                    Divider().overlay(StrandPalette.hairline)
-                    Text("WHOOP 5 / MG").font(StrandFont.overline).tracking(StrandFont.overlineTracking)
-                        .foregroundStyle(StrandPalette.textSecondary)
-
-                    Toggle(isOn: $puffinExperiments) {
-                        Text("Try WHOOP 5/MG protocol probes")
-                            .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
-                    }
-                    .toggleStyle(.switch).tint(StrandPalette.accent)
-
-                    Toggle(isOn: $deepDataEnabled) {
-                        Text("Unlock WHOOP 5/MG deep data (R22)")
-                            .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
-                    }
-                    .toggleStyle(.switch).tint(StrandPalette.accent)
-
-                    Toggle(isOn: $broadcastHrEnabled) {
-                        Text("Broadcast heart rate (Garmin/ANT)")
-                            .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
-                    }
-                    .toggleStyle(.switch).tint(StrandPalette.accent)
-                    .onChangeCompat(of: broadcastHrEnabled) { on in model.ble.setBroadcastHr(on) }
-
-                    Toggle(isOn: $puffinCapture) {
-                        Text("Record puffin frames to a file")
-                            .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
-                    }
-                    .toggleStyle(.switch).tint(StrandPalette.accent)
-                }
-
-                Text("These are experimental probes, off by default. The fuller WHOOP 5/MG controls and the raw-sensor CSV export still live in Settings under Diagnostics.")
+                Text("Research-grade alternatives / precision tweaks. Opt-in, off by default, non-clinical.")
                     .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                Toggle(isOn: $ppgHrSubLagInterpEnabled) {
+                    Text("HR-from-PPG sub-lag interpolation (v26 gap-fill)")
+                        .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
+                }
+                .toggleStyle(.switch).tint(StrandPalette.accent)
+                Text("When NOOP reconstructs heart rate from the WHOOP 5/MG v26 optical waveform (the seconds the strap stored no HR), refine the autocorrelation peak with a parabolic sub-lag fit so the estimate is not quantized to roughly 16 bpm steps near a high HR. It only fills seconds the strap never reported; it never overrides a stored HR. 5/MG only, off by default.")
+                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Divider().overlay(StrandPalette.hairline)
+
+                Toggle(isOn: $hrvReadinessEnabled) {
+                    Text("HRV readiness (Plews/Altini)")
+                        .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
+                }
+                .toggleStyle(.switch).tint(StrandPalette.accent)
+                Text("A read-only Plews/Altini smallest-worthwhile-change reading of your nightly HRV: it shows whether your 7-night HRV baseline sits above, inside, or below your personal normal band. It changes nothing else - the Charge ring is identical whether this is on or off. This is rough / early testing, not yet validated against varying real data (n=1).")
+                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // The toggle's OWN effect, shown in place: when on, the live Plews/Altini reading. Nothing
+                // renders when off, so the flag off is zero behaviour change and feeds no downstream gate.
+                if hrvReadinessEnabled { hrvReadinessReadout }
             }
+        }
+    }
+
+    /// The inline, opt-in HRV-readiness reading rendered under the "HRV readiness (Plews/Altini)" toggle when
+    /// the flag is on, so the toggle's own effect is visible in place. Reads the SAME repo-merged nightly
+    /// `DailyMetric.avgHrv` series (oldest-first) the recovery UI has and runs it through the pure
+    /// `HRVReadiness` engine; it never touches the default Charge ring or analyzeDay. Below
+    /// `HRVReadiness.minNights` valid nights it shows the honest calibrating count, never a fabricated tier.
+    /// Twin of the Android `HrvReadinessReadoutTC`.
+    @ViewBuilder private var hrvReadinessReadout: some View {
+        let result = HRVReadiness.evaluate(avgHrv: model.repo.days.map { $0.avgHrv })
+        VStack(alignment: .leading, spacing: 2) {
+            if let r = result {
+                let label = hrvTierLabel(r.tier)
+                Text("HRV readiness (experimental): \(label.word)")
+                    .font(StrandFont.subhead).foregroundStyle(label.color)
+                let base = Int(r.baseline7Ms.rounded())
+                let lo = Int(r.normalLowMs.rounded())
+                let hi = Int(r.normalHighMs.rounded())
+                let watch = r.overreachingWatch ? ", overreaching watch" : ""
+                Text("7-night baseline \(base) ms, normal \(lo) to \(hi) ms\(watch)")
+                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("HRV readiness (experimental)")
+                    .font(StrandFont.subhead).foregroundStyle(StrandPalette.textTertiary)
+                Text("Calibrating (\(hrvValidNightCount)/\(HRVReadiness.minNights) nights)")
+                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+            }
+        }
+    }
+
+    /// Tier -> (label word, colour). A plain function (NOT a result-builder switch) so the readiness switch
+    /// never lands inside the `@ViewBuilder` body above. Twin of the Android `when (result.tier)` mapping.
+    private func hrvTierLabel(_ tier: ReadinessTier) -> (word: String, color: Color) {
+        switch tier {
+        case .primed:     return ("primed", StrandPalette.statusPositive)
+        case .normal:     return ("normal", StrandPalette.textPrimary)
+        case .suppressed: return ("suppressed", StrandPalette.statusWarning)
+        }
+    }
+
+    /// Valid-night count for the calibrating readout, counted the same way the engine's gate does (the shared
+    /// `Baselines.hrvCfg` bounds) so the "N/minNights" it shows matches when a reading will first appear.
+    private var hrvValidNightCount: Int {
+        let cfg = Baselines.hrvCfg
+        return model.repo.days.reduce(0) { acc, d in
+            if let v = d.avgHrv, cfg.minVal <= v && v <= cfg.maxVal { return acc + 1 }
+            return acc
         }
     }
 
@@ -536,7 +564,8 @@ private struct ConnectionReadoutPanel: View {
                        value: sessionRows.map(String.init) ?? String(localized: "no offload yet"))
             ReadoutRow(label: String(localized: "Rows drained (all time)"), value: String(allTimeRows))
             ReadoutRow(label: String(localized: "Clock latched"),
-                       value: ConnectionReadout.clockLatchedLabel(deviceClockUnix: deviceClock))
+                       value: ConnectionReadout.clockLatchedLabel(deviceClockUnix: deviceClock,
+                                                                  strapNewestUnix: live.strapRange?.newestUnix))
             ReadoutRow(label: String(localized: "Last frame"),
                        value: ConnectionReadout.lastFrameLabel(lastFrameUnix: live.lastFrameAtUnix, nowUnix: now))
             if let rtcWarning {

@@ -7,7 +7,7 @@ enum AppChangelog {
 
     /// Bump this when you add a release below. The "What's New" sheet shows automatically when the
     /// stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
-    static let currentVersion = "7.9.0"
+    static let currentVersion = "9.0.0"
 
     struct Release: Identifiable {
         let version: String
@@ -19,6 +19,174 @@ enum AppChangelog {
 
     /// Newest first.
     static let releases: [Release] = [
+        Release(
+            version: "9.0.0",
+            title: "Power saving that protects your strap, a Gemini-powered coach on Android, and richer metric detail",
+            date: "July 2026",
+            items: [
+                "**Power saving that looks after your strap (#477).** A new Settings → Power saving section eases how hard NOOP works your WHOOP when the strap's own battery is running low: it syncs less often and pauses the always-on background HRV stream, so the band lasts longer until you can charge it. You pick the strap-battery level it kicks in at; it's off by default and never runs while the strap is charging. iPhone, Mac and Android.",
+                "**The AI Coach now runs Google Gemini on Android too (#400).** Android gains the native Gemini coach that iPhone and Mac already had, so your model choice and coaching work the same on every platform. On-device and opt-in as before — nothing is sent anywhere unless you turn it on and add your own key.",
+                "**Richer metric detail (#430, #432, #433, #435).** Key Metrics gains a Detailed-tiles option with tap-to-open trend detail, and every metric's detail timeline gets selectable windows — 1 day, 2 days, up to 3 months, a year, or All — matched across iPhone, Mac and Android.",
+                "**Keep NOOP running overnight on Android (#386).** An opt-in toggle that guides you through exempting NOOP from your phone maker's aggressive background-kill, so an overnight re-score isn't silently stopped. NOOP also now catches up a killed overnight score the moment you open it.",
+                "**More accurate sleep.** Elevated heart rate on a motionless wrist no longer scores as awake (#462), split nights report the whole night's Asleep total and hypnogram (#345), and a sleep-staging tune that was over-calling \"awake\" for healthy sleepers in the field is reverted (#431).",
+                "**WHOOP 5.0 / MG motion, decoded (#423).** For research, NOOP now decodes the strap's 100 Hz 6-axis motion buffer and can capture the high-rate sensor buffers behind the scenes — the groundwork for real activity detection on the 5.0/MG. Thanks vishk23 and tanarchytan.",
+            ]
+        ),
+        Release(
+            version: "8.7.0",
+            title: "A sync chip on Today, clearer strap-clock warnings, and complete German",
+            date: "July 2026",
+            items: [
+                "**See your strap syncing at a glance (#245).** The Today screen now shows a small sync chip for everyone — a spinner with a live count while your strap's history downloads, and when it last synced the rest of the time — so you can tell it's working without opening the Live screen. iPhone, Mac and Android.",
+                "**A clear warning when your strap's clock is wrong (#324).** A strap whose clock is set far in the future had NOOP quietly importing nothing from it; NOOP now says plainly that the clock is off and how to fix it — fully charge the strap to 100%, then power-cycle it. iPhone, Mac and Android.",
+                "**Smart wake alarm arms more reliably (#34).** On WHOOP 4.0 the firmware wake alarm is now set only once the strap connection has fully settled, so the alarm time reliably reaches the strap instead of being sent before the link was ready. Thanks digitalerdude.",
+                "**Tidier menus (#336).** Removed settings that appeared in two places at once, renamed the two \"Broadcast heart rate\" toggles so you can tell them apart (strap broadcast for Garmin/ANT vs. broadcasting from your phone), and moved developer-only controls into the Test Centre. Nothing lost its home. Thanks tanarchytan.",
+                "**Complete German translation (#326).** German text that was missing across charts, shared screens and the Apple Watch app is filled in, so German users no longer see English fragments mid-screen. Thanks digitalerdude.",
+            ]
+        ),
+        Release(
+            version: "8.6.2",
+            title: "Apple Health export, sleep nights recovered, and imported-ride Effort",
+            date: "July 2026",
+            items: [
+                "**Your data in Apple Health (iPhone) (#249).** Sleep stages, minute-by-minute heart rate, and your workouts now write to Apple Health, so other apps can read them. Thanks vishk23.",
+                "**Sleep nights no longer go missing (#268).** Nights with a few brief heart-rate spikes were being dropped as \"no sleep recorded\" — those nights are recovered now. Thanks tanarchytan.",
+                "**Sleep times and totals read right after an edit (#259).** A corrected bedtime no longer shows the wrong hour on the Sleep tab, and a night can never read as more sleep than time in bed.",
+                "**Imported rides count toward Effort (#137).** On a day you didn't wear the strap, an imported GPX / TCX / FIT ride's real heart rate now lights that day's Effort ring instead of being ignored.",
+                "**Low-battery heads-up (#250).** NOOP warns you when your strap has roughly a day of charge left, on iPhone, Mac and Android. Thanks vishk23.",
+                "**Automatic sync no longer stalls (#266).** A strap whose clock briefly read ahead could stop syncing and freeze the battery reading until you reconnected; it now recovers on its own. Thanks digitalerdude.",
+            ]
+        ),
+        Release(
+            version: "8.6.1",
+            title: "Restart your strap, lighter on battery, and Health Connect on Android 13",
+            date: "July 2026",
+            items: [
+                "**Restart your strap from NOOP (#166).** A new *Restart strap* option on the connected band in Devices — a clean way to reboot a misbehaving strap without the official app. Confirmation-gated, keeps your data, and shows a *Reconnecting…* state while it comes back. iPhone, Mac and Android.",
+                "**Lighter on battery (Android) (#228).** NOOP stops re-polling the strap on a fixed cadence once it keeps banking nothing, and backs off the reconnect churn when another app is holding the band — so the strap and phone last longer. Thanks tanarchytan.",
+                "**Health Connect works on Android 13 (#226).** NOOP now appears in Health Connect's app-permissions list on Android 13, so you can grant access and import your data. Android 14+ was already fine.",
+                "**Auto-detected workouts save now (Android) (#214).** Tapping *Save* on a \"looks like a workout\" suggestion was silently dropped mid-save; it now saves, shows up in your workouts, and stops re-prompting the same window.",
+            ]
+        ),
+        Release(
+            version: "8.6.0",
+            title: "HRV that reads true, and a tidier workout list",
+            date: "July 2026",
+            items: [
+                "**Overnight HRV reads true, not roughly twice as high (#195).** When cleaning drops a single noisy heartbeat, its neighbours no longer splice together into a phantom spike — the flaw that had some nights reading HRV about 2× too high, and skewing the recovery built on it. iPhone, Mac and Android.",
+                "**The deep-sleep HRV setting takes effect right away (#201).** Switching between whole-night and deep-sleep no longer drops Charge back to \"calibrating\" for several nights — with a few nights of history behind you, the change applies immediately. Thanks digitalerdude.",
+                "**Latest Workouts, tidied up (#200).** The Today workout section shows your true most-recent sessions in one clean list, drops the duplicate that appeared when a workout came from more than one source, keeps up when you re-pair your strap, and names more sports. Thanks TheBoroer.",
+            ]
+        ),
+        Release(
+            version: "8.5.2",
+            title: "Your WHOOP journal in Insights, clearer metric taps",
+            date: "July 2026",
+            items: [
+                "**Imported WHOOP journal now shows up in Insights (#136).** Journal entries from a WHOOP export were landing one day early, so Insights read every historic day as \"without\" the behaviour. They now line up with the night they belong to. Already-imported history: remove and re-add your WHOOP import to correct it.",
+                "**Tapping Fitness Age or Vitality shows the value, not \"Not enough history yet\" (#139/#146).** When a card shows a score from a single reading, tapping it now shows that value with a \"trend to follow\" note, instead of a dead-end that contradicted the card.",
+                "**HRV settings are together now (#155).** The HRV window (whole-night vs deep-sleep) moved from Units into the Strap section, next to the Continuous / Overnight HRV toggles.",
+                "**More of the app is translated.** Appearance settings (Sky behind cards, Card transparency) now show in your language.",
+            ]
+        ),
+        Release(
+            version: "8.5.1",
+            title: "WHOOP-style HRV, warm-ups counted, and clearer cards",
+            date: "July 2026",
+            items: [
+                "**HRV, the WHOOP way (#141).** A new Settings option computes your nightly HRV over the deep-sleep window — the same slow-wave window WHOOP uses — so the number lines up with what your WHOOP app shows. Whole-night stays the default; switching re-learns your Charge baseline over a few nights.",
+                "**Workouts catch the warm-up (#148).** Auto-detected walks and rides no longer lose their first 10–15 minutes while your heart rate is still climbing — the start now reaches back over the warm-up to when you actually got moving.",
+                "**Fitness Age stops getting stuck on \"No Data\" (#139/#140).** When all your readiness inputs are in, Fitness Age now scores instead of showing an empty gauge, there's a refresh button to recompute on demand, and the card shows how many more nights it needs rather than a dead end.",
+                "**Trends can draw bars (#134).** A new Settings toggle renders the Trends graphs as bar charts, zero-anchored, instead of lines.",
+                "**Clearer Home cards (#150).** Hydration no longer shares an identical icon with Blood Oxygen.",
+            ]
+        ),
+        Release(
+            version: "8.5.0",
+            title: "Raw SpO₂, honest units, and a lighter app",
+            date: "July 2026",
+            items: [
+                "**See your raw blood-oxygen signal (WHOOP 4.0).** The Health screen now surfaces the strap's raw red/IR SpO₂ sensor reading natively — honest, uncalibrated data, no export needed. It's not a clinical %, which needs WHOOP's own calibration.",
+                "**Skin temperature and Effort now respect your settings.** The Deep Timeline shows skin temp in °F when you've chosen Fahrenheit, and the Today \"Effort\" ring finally follows your 0–100 vs WHOOP 0–21 scale (with a decimal on the 21 scale).",
+                "**The \"workout in progress\" card is back on Home.** The Liquid redesign dropped it; an active manual workout is once again visible on the Home screen and taps straight through to Live.",
+                "**Apple Health steps count again.** Steps imported from an Apple Health export now reach your daily totals instead of quietly going missing.",
+                "**Steadier battery alerts and fresher widgets.** The low-battery alert no longer re-fires while you're charging, and the home-screen widget shows your current battery instead of a stale value.",
+                "**Lighter and faster.** A snappier Sleep screen, fewer per-frame allocations on Today, and export imports that can't balloon memory.",
+            ]
+        ),
+        Release(
+            version: "8.4.0",
+            title: "Faster, and fewer sharp edges",
+            date: "July 2026",
+            items: [
+                "**NOOP runs natively on Intel Macs again.** The macOS build is a true universal binary, so it launches and runs at full speed on both Apple-silicon and Intel Macs.",
+                "**Back up on iPhone without fighting the folder picker.** Backup & Sync now offers *Use NOOP's own folder* — a one-tap backup saved inside NOOP and visible in the Files app, for when iOS won't let you pick a folder.",
+                "**The Settings screen fits your screen again.** A control that could push Settings off the edge (most visibly in German, or at larger text sizes) is fixed.",
+                "**Snappier sleep and recovery analysis.** The nightly re-score reads your data in far fewer database round-trips, and the app carries lighter scene art.",
+                "**Your phone backup alarm no longer depends on wrist alerts.** If you set a smart alarm, the backup notification is scheduled even if you never turned wrist alerts on — and NOOP now warns you when a strap keeps refusing the alarm time.",
+            ]
+        ),
+        Release(
+            version: "8.3.4",
+            title: "Clearer sync status",
+            date: "July 2026",
+            items: [
+                "**A finished sync no longer looks like a failure.** After your strap hands over its history, NOOP could flash a \"no banked history — charge to 100%\" warning even though it had just offloaded hundreds of records. That false alarm is gone — a caught-up sync now reads as caught up.",
+            ]
+        ),
+        Release(
+            version: "8.3.3",
+            title: "Your macOS data is back — and full French",
+            date: "July 2026",
+            items: [
+                "**macOS: your history is back.** Upgrading the Mac app could open an empty database — your data was never lost, just looked for in the wrong place. It now finds your existing store and imports it on first launch (the original is left untouched).",
+                "**Full French.** The app is now completely translated into French, alongside German and Spanish.",
+                "**Sleep stages read right.** On nights with fine-grained staging the stage graphic no longer collapses into a single row of dots — it draws as a continuous timeline again.",
+            ]
+        ),
+        Release(
+            version: "8.3.2",
+            title: "Workout display fixes",
+            date: "July 2026",
+            items: [
+                "**Imported workout files show up.** A FIT / GPX / TCX file you import now appears in Workouts — it was saved and counted, but the list wasn't reading that source.",
+                "**Workouts return after re-pairing your strap.** Re-adding a strap could hide workouts recorded before it; the Workouts screen now finds them again.",
+            ]
+        ),
+        Release(
+            version: "8.3.1",
+            title: "Backup restore fixed, plus appearance controls",
+            date: "July 2026",
+            items: [
+                "**Restoring a backup works again.** A good backup could fail to restore with a database error; NOOP now reads it correctly during its safety check, so your snapshots restore.",
+                "**Card transparency.** Settings → Appearance now lets you dial how see-through the cards are — solid to clear, saved and applied live.",
+                "**Sky behind cards.** An optional setting extends the day-cycle sky behind the whole Today screen, so it shows through transparent cards.",
+                "**More useful bug reports.** The shared strap log now includes your strap + data state and the sleep-analysis funnels, so a report arrives with the detail to fix it.",
+            ]
+        ),
+        Release(
+            version: "8.3.0",
+            title: "Backup controls, and a lighter app",
+            date: "July 2026",
+            items: [
+                "**Choose how many backups to keep.** Automatic backups now lets you pick how many daily snapshots to keep (a week by default); older ones are pruned oldest-first.",
+                "**A set backup time.** The daily auto-backup runs around 1 am, so a fresh dated snapshot is waiting overnight without opening the app.",
+                "**Easier to find.** Settings → Backup & restore now links straight to Automatic backups.",
+                "**Lighter.** The donation prompts and the Support screen have been removed.",
+            ]
+        ),
+        Release(
+            version: "8.2.2",
+            title: "Steadier connections, fixes, and a nicer sleep view",
+            date: "July 2026",
+            items: [
+                "**Steadier Bluetooth.** A dropped strap reconnects without tearing down a live one, and the HR re-broadcast survives a Bluetooth toggle.",
+                "**Sharper HRV.** R-R intervals are rounded to match the other paths, and HRV windows need a few clean beats before they count.",
+                "**No more crash loops.** A corrupt local database sets the bad file aside and rebuilds a clean one instead of crashing on every launch.",
+                "**Fresh-install fix.** Your WHOOP shows up in the Devices list on a brand-new install.",
+                "**Readable in light mode.** Charge / Effort / Rest labels stay legible in both themes, and more of the app is translated.",
+            ]
+        ),
         Release(
             version: "7.9.0",
             title: "Coupled view, workouts rebuilt, journal numbers",
@@ -1234,7 +1402,7 @@ enum AppChangelog {
             items: [
                 "Fixed (Mac): the download was accidentally an Apple-Silicon-only build, so it could not launch on Intel Macs at all. It now ships as a true universal binary that runs natively on both Intel and Apple Silicon. Thanks @stnnnts (#177, #165).",
                 "Fixed (iPhone): importing a WHOOP export or Apple Health .zip on a sideloaded build - the file picker was greying out the .zip so nothing could be selected. iOS now offers only the file types it can actually open, so the .zip is selectable again. Thanks @adrnxq (#179).",
-                "New (iPhone): an AltStore / SideStore source for one-tap updates on sideloaded installs - add https://raw.githubusercontent.com/NoopApp/noop/main/altstore-source.json as a source in AltStore or SideStore. Reimplemented from @RazvanRex (#178).",
+                "New (iPhone): an AltStore / SideStore source for one-tap updates on sideloaded installs - add https://raw.githubusercontent.com/ryanbr/noop/main/altstore-source.json as a source in AltStore or SideStore. Reimplemented from @RazvanRex (#178).",
             ]),
         Release(
             version: "2.6.2",

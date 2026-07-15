@@ -55,8 +55,11 @@ public func isPlausibleHistoricalUnix(_ ts: Int, wallNow: Int,
 ///
 /// Console (type-50, `frame[typeIndex] == 0x32`) frames are strap-side debug-log text that decode to
 /// zero rows BY DESIGN and are never returned. 5/MG v26 (raw PPG block, hist_version 26) is also
-/// skipped: it is known-and-unstored by design, not lost biometric data. Only genuine type-47
-/// record frames whose payload would otherwise be silently dropped are returned.
+/// skipped unconditionally (even on a CRC failure): a v26 record's payload is the optical waveform,
+/// which `extractHistoricalStreams` now persists durably in its OWN stream (`Streams.ppgWaveform` /
+/// WhoopStore's `ppgWaveformSample` table, issue #156 follow-up) whenever it decodes — this reject
+/// archive exists for genuinely-undecodable records, and a decoded v26 record was never one of those.
+/// Only genuine type-47 record frames whose payload would otherwise be silently dropped are returned.
 ///
 /// Used by the Backfiller/BLEManager to archive undecodable history BEFORE acking the trim. Mirrors
 /// the Android rejectedHistoricalRecords so one mapping toolchain re-ingests both archives.
@@ -70,7 +73,7 @@ public func rejectedHistoricalRecords(_ rawFrames: [[UInt8]], family: DeviceFami
         // Only genuine HISTORICAL_DATA records (47). Console (50) and METADATA frames have a
         // different type byte, so they never pass this gate — they are excluded by construction.
         guard f.count > typeIndex, Int(f[typeIndex]) == 47 else { return false }
-        if family == .whoop5, f.count > versionIndex, Int(f[versionIndex]) == 26 { return false }  // v26 PPG: skipped by design
+        if family == .whoop5, f.count > versionIndex, Int(f[versionIndex]) == 26 { return false }  // v26 PPG: has its own durable stream (ppgWaveform), not this reject archive
         let p = parseFrame(f, family: family)
         // Envelope/CRC reject: parse failed outright or the CRC32 trailer mismatched.
         if !p.ok || p.crcOK == false { return true }
@@ -96,7 +99,13 @@ public func extractHistoricalStreams(_ parsed: [ParsedFrame],
                                      // oldest/newest markers for THIS sync. nil on the replay/import/no-range
                                      // paths — the gate then falls back to the absolute-only floor (unchanged).
                                      sessionOldestUnix: Int? = nil,
-                                     sessionNewestUnix: Int? = nil) -> Streams {
+                                     sessionNewestUnix: Int? = nil,
+                                     // Opt-in "HR-from-PPG sub-lag interpolation" (Test Centre → Experimental
+                                     // algorithms, default false): threaded into the v26 PPG-HR estimator below.
+                                     // The pure package can't read prefs, so the app-layer caller (Backfiller /
+                                     // archive replay) reads PuffinExperiment.ppgHrSubLagInterpEnabled and passes
+                                     // it. Default false = byte-identical to today. Mirrors the Android arg.
+                                     subLagInterp: Bool = false) -> Streams {
     func wall(_ deviceTs: Int?) -> Int? {
         guard let d = deviceTs else { return nil }
         return wallClockRef + (d - deviceClockRef)
@@ -152,6 +161,10 @@ public func extractHistoricalStreams(_ parsed: [ParsedFrame],
                                         sessionOldestUnix: sessionOldestUnix,
                                         sessionNewestUnix: sessionNewestUnix) else {
             droppedImplausible += 1
+            // #324: track the epoch SPAN of the dropped (bad-clock) records — the strap's OWN dated value,
+            // so the Backfiller can log whether the whole poisoned range is future-dated or mixed.
+            droppedOldest = min(droppedOldest ?? candidate, candidate)
+            droppedNewest = max(droppedNewest ?? candidate, candidate)
             return nil
         }
         return candidate
@@ -159,10 +172,15 @@ public func extractHistoricalStreams(_ parsed: [ParsedFrame],
     // #547: how many records this chunk dropped for an implausible ts. Surfaced to the Backfiller via
     // `Streams.droppedImplausible` so the strap log can show a bad-clock strap (observability only).
     var droppedImplausible = 0
+    // #324: oldest/newest own-timestamp among the dropped records (the poisoned-range epoch span).
+    var droppedOldest: Int? = nil
+    var droppedNewest: Int? = nil
     var out = Streams()
     // v26 optical-PPG records (issue #156): no measured HR/motion, just the 24 Hz waveform. Collect
     // (corrected-wall ts, samples) here and derive a per-second HR after the loop (PpgHr.derivePpgHr),
     // so the timeline stays continuous through the v26-heavy stretches that have no v18 HR summary.
+    // The SAME (ts, samples) are also appended to `out.ppgWaveform` below (issue #156 follow-up) so the
+    // raw waveform is durable too, not just the derived estimate this local buffer exists to produce.
     var ppgRecords: [(ts: Int, samples: [Int])] = []
     for r in parsed {
         if !r.ok || r.crcOK == false { continue }
@@ -174,10 +192,13 @@ public func extractHistoricalStreams(_ parsed: [ParsedFrame],
             // `correctedWall` returns nil for an implausible ts (covers the v26 PPG baseTs too, since the
             // v26 waveform rides this same `unix`) — skip the whole record so no garbage-ts row is banked.
             guard let rawTs = p["unix"]?.intValue, let ts = correctedWall(rawTs) else { continue }
-            // v26 PPG buffer: stash the waveform for the post-loop HR estimator. A v26 record carries
-            // no heart_rate/spo2/gravity, so it adds nothing to the branches below — handled here only.
+            // v26 PPG buffer: stash the waveform for the post-loop HR estimator AND persist the raw
+            // samples themselves (issue #156 follow-up — previously ONLY the derived estimate survived,
+            // the waveform that produced it was discarded here). A v26 record carries no
+            // heart_rate/spo2/gravity, so it adds nothing to the branches below — handled here only.
             if let samples = p["ppg_waveform"]?.intArrayValue, !samples.isEmpty {
                 ppgRecords.append((ts: ts, samples: samples))
+                out.ppgWaveform.append(PpgWaveformSample(ts: ts, samples: samples))
             }
             if let bpm = p["heart_rate"]?.intValue, bpm != 0 {  // skip startup hr=0
                 out.hr.append(HRSample(ts: ts, bpm: bpm))
@@ -231,8 +252,18 @@ public func extractHistoricalStreams(_ parsed: [ParsedFrame],
             // EVENT carries the strap RTC's real-unix seconds. Correct for a grossly-stale RTC
             // (FIX #72); a normal strap is unchanged (offset < threshold). #547 gate: skip the event
             // when `correctedWall` rejects an implausible ts so no future/far-past event is banked.
-            guard let rawTs = p["event_timestamp"]?.intValue, let ts = correctedWall(rawTs) else { continue }
+            guard let rawTs = p["event_timestamp"]?.intValue else { continue }
             let kind = p["event"]?.stringValue ?? ""
+            guard let ts = correctedWall(rawTs) else {
+                // #324: the #547 gate just dropped this event for an implausible ts. If it's an RTC-STATE
+                // event (RTC_LOST / BOOT / SET_RTC), that IS the ground truth that the clock reset — capture
+                // (kind, rawTs) for the strap log before discarding, so a future-dated strap's cause isn't
+                // silently swallowed by the very gate the bad clock trips.
+                if DroppedRtcEvent.isRtcStateKind(kind) {
+                    out.droppedRtcEvents.append(DroppedRtcEvent(kind: kind, rawTs: rawTs))
+                }
+                continue
+            }
             if kind.hasPrefix("BATTERY_LEVEL") { appendBattery(&out, ts: ts, p: p) }  // "BATTERY_LEVEL(3)"
             var payload = p
             payload.removeValue(forKey: "event")
@@ -247,7 +278,9 @@ public func extractHistoricalStreams(_ parsed: [ParsedFrame],
     }
     // Derive per-second HR from the collected v26 PPG bursts (issue #156). Empty when there were no v26
     // records (the WHOOP 4 / v18-only common case), so this is a no-op cost there.
-    out.ppgHr = PpgHr.derivePpgHr(records: ppgRecords)
+    out.ppgHr = PpgHr.derivePpgHr(records: ppgRecords, subLagInterp: subLagInterp)
     out.droppedImplausible = droppedImplausible   // #547 diag count (not persisted, not encoded)
+    out.droppedImplausibleOldestTs = droppedOldest   // #324 poisoned-range epoch span (diag only)
+    out.droppedImplausibleNewestTs = droppedNewest
     return out
 }

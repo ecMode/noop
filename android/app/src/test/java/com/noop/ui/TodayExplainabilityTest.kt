@@ -293,4 +293,74 @@ class TodayExplainabilityTest {
         assertEquals("Whoop", provenanceDisplayLabel("strap-42", deviceId = "strap-42"))
         assertEquals("Whoop", provenanceDisplayLabel("my-whoop", deviceId = "strap-42"))
     }
+
+    @Test
+    fun perMetric_crossStrapComputedSibling_stillReadsOnDevice() {
+        // A "-noop" sibling banked under a DIFFERENT strap id (the user re-paired straps) is still a
+        // score NOOP computed on-device. The resolver matches the "-noop" suffix, not the exact
+        // "$deviceId-noop" — otherwise these rows would fall through to the raw id verbatim.
+        assertEquals("On-device", provenanceDisplayLabel("whoop5-C0FF-noop", deviceId = "my-whoop"))
+        assertEquals("On-device", provenanceDisplayLabel("my-whoop-noop", deviceId = "strap-42"))
+    }
+
+    @Test
+    fun liquidHeroSourceLabel_deduplicatesOneWinner() {
+        assertEquals(
+            "On-device",
+            heroSourceLabel(listOf("my-whoop-noop", "my-whoop-noop", "my-whoop-noop")),
+        )
+    }
+
+    @Test
+    fun liquidHeroSourceLabel_capsMixedWinnersAtTwoInScoreOrder() {
+        assertEquals(
+            "Whoop + On-device",
+            heroSourceLabel(listOf("my-whoop", "my-whoop-noop", "health-connect")),
+        )
+    }
+
+    @Test
+    fun liquidHeroSourceLabel_usesAudienceFacingAppleWatchName() {
+        assertEquals("Apple Watch", heroSourceLabel(listOf("apple-health")))
+    }
+
+    @Test
+    fun liquidHeroSourceLabel_hidesWhenNoScoreHasAResolvedSource() {
+        assertNull(heroSourceLabel(emptyList()))
+    }
+
+    @Test
+    fun liquidHeroSourceLabel_usesCarriedChargeSourceWhenTodayRecoveryIsAbsent() {
+        assertEquals(
+            "On-device",
+            scoreHeroSourceLabel(
+                provenanceByMetric = emptyMap(),
+                carriedRecoverySource = "my-whoop-noop",
+                usesCarriedRecovery = true,
+            ),
+        )
+    }
+
+    @Test
+    fun liquidHeroSourceLabel_keepsCurrentDayRecoveryAheadOfCarriedFallback() {
+        assertEquals(
+            "Whoop",
+            scoreHeroSourceLabel(
+                provenanceByMetric = mapOf("recovery" to "my-whoop"),
+                carriedRecoverySource = "my-whoop-noop",
+                usesCarriedRecovery = true,
+            ),
+        )
+    }
+
+    @Test
+    fun liquidHeroSourceLabel_ignoresCarriedSourceWhenChargeIsNotCarried() {
+        assertNull(
+            scoreHeroSourceLabel(
+                provenanceByMetric = emptyMap(),
+                carriedRecoverySource = "my-whoop-noop",
+                usesCarriedRecovery = false,
+            ),
+        )
+    }
 }

@@ -1,5 +1,6 @@
 import SwiftUI
 import StrandDesign
+import UserNotifications
 
 @main
 struct StrandApp: App {
@@ -11,18 +12,22 @@ struct StrandApp: App {
         // Release is unaffected (whole harness is `#if DEBUG`). See DemoDayHarness.swift.
         DemoDayHarness.applyLaunchArgsIfNeeded()
         #endif
+        // Foreground presentation: without a delegate, macOS suppresses a notification's banner while the
+        // app is frontmost, so a reminder tested with NOOP open would show nothing. Mirrors iOS.
+        UNUserNotificationCenter.current().delegate = NotificationPresenter.shared
     }
 
     @StateObject private var model = AppModel()
     /// Shared cross-screen navigation hook (e.g. Live → Devices). The macOS shell (`RootView`)
     /// observes it and drives the sidebar selection.
     @StateObject private var router = NavRouter()
+    /// #267: drives a foreground sync kick when the window becomes active (no scenePhase hook
+    /// existed on macOS before this).
+    @Environment(\.scenePhase) private var scenePhase
     /// Appearance preference (System/Light/Dark). Default follows the OS; the Settings picker writes it.
     @AppStorage(AppearanceMode.storageKey) private var appearanceRaw = AppearanceMode.system.rawValue
     /// Chart data-colour style (Titanium / Classic throwback). Re-colours gauges + charts.
     @AppStorage(ChartStyle.storageKey) private var chartStyleRaw = ChartStyle.titanium.rawValue
-    /// Foreground trigger for the CloudKit pull (macOS has no scenePhase-free lifecycle hook otherwise).
-    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -46,8 +51,18 @@ struct StrandApp: App {
                 // fixed-geometry tiles/gauges stay legible at the largest accessibility sizes rather than
                 // clipping; the common Larger-Text range still scales fully.
                 .dynamicTypeSize(...DynamicTypeSize.accessibility1)
-                .onChange(of: scenePhase) { _, phase in
-                    if phase == .active { CloudSync.shared.fetchChangesInBackground() }
+                // #267: pull a reasonably fresh sync when the window comes to the foreground rather than
+                // waiting for the 900s periodic timer or an incidental reconnect. Floored at 90s and never
+                // clock/empty-streak-suppressed (BackfillPolicy.shouldRun's .foreground case), so this is
+                // a safe no-op on rapid re-focusing. Mirrors the iOS scenePhase == .active handler.
+                // Single-param form (not the two-param `{ _, phase in }`) — that overload needs macOS 14,
+                // this target is macOS 13. Also fetches any CloudKit changes synced from iOS.
+                .onChange(of: scenePhase) { phase in
+                    if phase == .active {
+                        CloudSync.shared.fetchChangesInBackground()
+                        model.ble.requestSync(.foreground)
+                    }
+
                 }
         }
         .windowStyle(.hiddenTitleBar)

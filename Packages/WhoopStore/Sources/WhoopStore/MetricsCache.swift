@@ -61,17 +61,26 @@ public struct DailyMetric: Equatable, Codable {
     // imported/cloud rows that never carry them stay nil and old call sites are unaffected.
     public let steps: Int?             // daily step total from the cumulative @57 counter
     public let activeKcalEst: Double?  // whole-day HR-only calorie estimate (kcal)
+    // WHOOP 4.0 raw SpO2 PPG ADC means over detected sleep (v23 columns, #93). These are the RAW
+    // red/IR optical channels banked on the v24 historical layout (spo2_red@68 / spo2_ir@70), NOT a
+    // calibrated blood-oxygen % — that needs WHOOP's proprietary curve. Both nullable and on-device
+    // only (imports/cloud never carry them), so old rows + non-4.0 nights stay nil and every existing
+    // call site is unaffected.
+    public let spo2Red: Int?           // mean raw red PPG ADC during detected sleep
+    public let spo2Ir: Int?            // mean raw IR PPG ADC during detected sleep
     public init(day: String, totalSleepMin: Double?, efficiency: Double?, deepMin: Double?,
                 remMin: Double?, lightMin: Double?, disturbances: Int?, restingHr: Int?,
                 avgHrv: Double?, recovery: Double?, strain: Double?, exerciseCount: Int?,
                 spo2Pct: Double? = nil, skinTempDevC: Double? = nil, respRateBpm: Double? = nil,
-                steps: Int? = nil, activeKcalEst: Double? = nil) {
+                steps: Int? = nil, activeKcalEst: Double? = nil,
+                spo2Red: Int? = nil, spo2Ir: Int? = nil) {
         self.day = day; self.totalSleepMin = totalSleepMin; self.efficiency = efficiency
         self.deepMin = deepMin; self.remMin = remMin; self.lightMin = lightMin
         self.disturbances = disturbances; self.restingHr = restingHr; self.avgHrv = avgHrv
         self.recovery = recovery; self.strain = strain; self.exerciseCount = exerciseCount
         self.spo2Pct = spo2Pct; self.skinTempDevC = skinTempDevC; self.respRateBpm = respRateBpm
         self.steps = steps; self.activeKcalEst = activeKcalEst
+        self.spo2Red = spo2Red; self.spo2Ir = spo2Ir
     }
 
     /// The freshest STRICTLY-PRIOR day that carries at least one overnight vital (HRV / resting HR /
@@ -87,6 +96,22 @@ public struct DailyMetric: Equatable, Codable {
     /// stray future-dated row (a bad-clock strap) can never be picked up as "last night's" vitals.
     public nonisolated static func lastVitalsDay(days: [DailyMetric], todayKey: String) -> DailyMetric? {
         days.last(where: { ($0.avgHrv != nil || $0.restingHr != nil || $0.respRateBpm != nil) && $0.day < todayKey })
+    }
+
+    /// PER-FIELD twin of `lastVitalsDay` for SpO₂: the freshest STRICTLY-PRIOR day with a non-nil `spo2Pct`.
+    /// `lastVitalsDay`'s predicate only checks HRV / resting-HR / respiratory, so it can land on a row whose
+    /// `spo2Pct` is nil (the on-device engine writes `spo2Pct = nil` — it banks only raw `spo2Red`/`spo2Ir`;
+    /// only imported rows carry a percentage) while an OLDER imported row holds a real reading. Resolving
+    /// SpO₂ per field keeps the Blood Oxygen card honest instead of "No Data". Same `$0.day < todayKey`
+    /// future-clock guard as `lastVitalsDay`; `days` is oldest→newest. Byte-twin of the Android `lastSpo2Row`.
+    public nonisolated static func lastSpo2Day(days: [DailyMetric], todayKey: String) -> DailyMetric? {
+        days.last(where: { $0.spo2Pct != nil && $0.day < todayKey })
+    }
+
+    /// PER-FIELD twin of `lastVitalsDay` for skin-temperature deviation. See `lastSpo2Day`. Byte-twin of the
+    /// Android `lastSkinTempRow`.
+    public nonisolated static func lastSkinTempDay(days: [DailyMetric], todayKey: String) -> DailyMetric? {
+        days.last(where: { $0.skinTempDevC != nil && $0.day < todayKey })
     }
 }
 
@@ -280,6 +305,66 @@ extension WhoopStore {
         }
     }
 
+    /// Batched twin of `sessionMotion` for a SET of session starts: the persisted per-epoch motion series
+    /// for each of `sessionStarts` that HAS one, in a SINGLE query, keyed by startTs. Same contract as the
+    /// single-key accessor — a start whose column is NULL/absent (or an empty series) is simply omitted from
+    /// the result (absent stays absent, never a fabricated zero array) — but without the per-session
+    /// round-trip the Sleep tab's main-night group used to pay (N single-row reads → one). The `IN (…)` list
+    /// is de-duplicated and chunked to stay well under SQLite's bound-parameter ceiling.
+    public func sessionMotions(deviceId: String, sessionStarts: [Int]) async throws -> [Int: [Double]] {
+        guard !sessionStarts.isEmpty else { return [:] }
+        return try syncRead { db in
+            var out: [Int: [Double]] = [:]
+            let uniq = Array(Set(sessionStarts))
+            var lo = 0
+            while lo < uniq.count {
+                let chunk = Array(uniq[lo ..< min(lo + Self.inClauseChunk, uniq.count)])
+                lo += Self.inClauseChunk
+                let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+                var args: [DatabaseValueConvertible] = [deviceId]
+                args.append(contentsOf: chunk)
+                let rows = try Row.fetchAll(db, sql: """
+                    SELECT startTs, motionJSON FROM sleepSession
+                    WHERE deviceId = ? AND startTs IN (\(placeholders)) AND motionJSON IS NOT NULL
+                    """, arguments: StatementArguments(args))
+                for row in rows {
+                    let startTs: Int = row["startTs"]
+                    guard let json: String = row["motionJSON"],
+                          let arr = Self.decodeDoubleArray(json), !arr.isEmpty else { continue }
+                    out[startTs] = arr
+                }
+            }
+            return out
+        }
+    }
+
+    /// Batched twin of `sessionSleepState` over a RANGE: every session in `[from, to]` (by startTs) that has
+    /// banked per-epoch band sleep_state, in ONE query, keyed by startTs. The H7 re-onset guard reads the
+    /// SAME `[from, to]` window as its `sleepSessions` call, so a single range scan replaces the per-session
+    /// round-trip (N single-row reads → one); the caller looks each kept (deduped) session up by startTs.
+    /// NULL/absent columns are omitted (absent stays absent), identical to the single-key accessor.
+    public func sessionSleepStates(deviceId: String, from: Int, to: Int) async throws -> [Int: [Int]] {
+        try syncRead { db in
+            var out: [Int: [Int]] = [:]
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT startTs, sleepStateJSON FROM sleepSession
+                WHERE deviceId = ? AND startTs >= ? AND startTs <= ? AND sleepStateJSON IS NOT NULL
+                """, arguments: [deviceId, from, to])
+            for row in rows {
+                let startTs: Int = row["startTs"]
+                guard let json: String = row["sleepStateJSON"],
+                      let arr = Self.decodeIntArray(json), !arr.isEmpty else { continue }
+                out[startTs] = arr
+            }
+            return out
+        }
+    }
+
+    /// SQLite caps the number of bound `?` parameters per statement (SQLITE_MAX_VARIABLE_NUMBER — 999 on the
+    /// system SQLite iOS ships). Chunk `IN (…)` lists comfortably under it, leaving room for the leading
+    /// `deviceId` bind.
+    static let inClauseChunk = 900
+
     /// Compact JSON encoders/decoders for the per-epoch series — a bare `[Double]`/`[Int]` array (no
     /// pretty-printing) so the column stays small and round-trips byte-for-byte with the Android port.
     static func encodeDoubleArray(_ xs: [Double]) -> String? {
@@ -305,8 +390,9 @@ extension WhoopStore {
                     INSERT INTO dailyMetric
                         (deviceId, day, totalSleepMin, efficiency, deepMin, remMin, lightMin,
                          disturbances, restingHr, avgHrv, recovery, strain, exerciseCount,
-                         spo2Pct, skinTempDevC, respRateBpm, steps, activeKcalEst)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         spo2Pct, skinTempDevC, respRateBpm, steps, activeKcalEst,
+                         spo2Red, spo2Ir)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(deviceId, day) DO UPDATE SET
                         totalSleepMin = excluded.totalSleepMin,
                         efficiency = excluded.efficiency,
@@ -323,12 +409,15 @@ extension WhoopStore {
                         skinTempDevC = excluded.skinTempDevC,
                         respRateBpm = excluded.respRateBpm,
                         steps = excluded.steps,
-                        activeKcalEst = excluded.activeKcalEst
+                        activeKcalEst = excluded.activeKcalEst,
+                        spo2Red = excluded.spo2Red,
+                        spo2Ir = excluded.spo2Ir
                     """, arguments: [deviceId, d.day, d.totalSleepMin, d.efficiency, d.deepMin,
                                      d.remMin, d.lightMin, d.disturbances, d.restingHr, d.avgHrv,
                                      d.recovery, d.strain, d.exerciseCount,
                                      d.spo2Pct, d.skinTempDevC, d.respRateBpm,
-                                     d.steps, d.activeKcalEst])
+                                     d.steps, d.activeKcalEst,
+                                     d.spo2Red, d.spo2Ir])
                 n += db.changesCount
             }
             return n
@@ -380,7 +469,8 @@ extension WhoopStore {
             try Row.fetchAll(db, sql: """
                 SELECT day, totalSleepMin, efficiency, deepMin, remMin, lightMin, disturbances,
                        restingHr, avgHrv, recovery, strain, exerciseCount,
-                       spo2Pct, skinTempDevC, respRateBpm, steps, activeKcalEst FROM dailyMetric
+                       spo2Pct, skinTempDevC, respRateBpm, steps, activeKcalEst,
+                       spo2Red, spo2Ir FROM dailyMetric
                 WHERE deviceId = ? AND day >= ? AND day <= ?
                 ORDER BY day ASC
                 """, arguments: [deviceId, from, to])
@@ -393,7 +483,8 @@ extension WhoopStore {
                                 strain: $0["strain"], exerciseCount: $0["exerciseCount"],
                                 spo2Pct: $0["spo2Pct"], skinTempDevC: $0["skinTempDevC"],
                                 respRateBpm: $0["respRateBpm"],
-                                steps: $0["steps"], activeKcalEst: $0["activeKcalEst"])
+                                steps: $0["steps"], activeKcalEst: $0["activeKcalEst"],
+                                spo2Red: $0["spo2Red"], spo2Ir: $0["spo2Ir"])
                 }
         }
     }
