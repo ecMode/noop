@@ -36,6 +36,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
@@ -386,7 +387,7 @@ private fun WeekNavBar(weekOffset: Int, minWeekOffset: Int, onStep: (Int) -> Uni
     val label = when {
         weekOffset == 0 -> stringResource(R.string.trends_this_week)
         weekOffset == -1 -> stringResource(R.string.trends_last_week)
-        else -> stringResource(R.string.trends_weeks_ago, -weekOffset)
+        else -> pluralStringResource(R.plurals.trends_weeks_ago, -weekOffset, -weekOffset)
     }
     // liquidPress on the two week-step chevrons (the screen's tappable controls): each settles inward on
     // press, wired to the SAME interactionSource the IconButton uses for its own ripple, matching the pilot.
@@ -750,7 +751,7 @@ private fun ChangeChip(change: Double?, higherIsBetter: Boolean?, fmt: (Double) 
         null -> Palette.textTertiary
         else -> if ((change > 0) == higherIsBetter) Palette.statusPositive else Palette.metricRose
     }
-    TrendChip(text = "$sign${fmt(kotlin.math.abs(change))}", color = color)
+    TrendChip(text = uiString(R.string.l10n_trends_screen_sign_fmt_kotlin_math_abs_change_9ad2f71e, sign, fmt(kotlin.math.abs(change))), color = color)
 }
 
 /**
@@ -826,6 +827,7 @@ private fun ChartWithAxes(
                             // #463: the pinpoint label goes through the SAME formatter as the axis column,
                             // so a tapped Effort day can't print the stored 0-100 value beside a 0-21 axis.
                             formatValue = formatY,
+                            selectionLabels = dates.map(::prettyAxisDate),
                         )
                         GlowEndCap(values = values, tipColor = tipColor)
                     }

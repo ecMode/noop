@@ -20,6 +20,11 @@ struct LiquidTodayView: View {
     @EnvironmentObject var repo: Repository
     @EnvironmentObject var router: NavRouter
     @EnvironmentObject var profile: ProfileStore
+    // For the pull-to-sync gesture (#334): a pull kicks a manual strap history offload via ble.syncNow().
+    // Observe BLEManager, NOT AppModel — AppModel @Publishes `bpm` on the ~1 Hz HR tick, so observing it
+    // would re-render all of Today every second (the exact churn the LiveState leaves isolate). BLEManager
+    // only publishes connect/discovery state, never HR. Injected at the app roots beside .environmentObject(model).
+    @EnvironmentObject var ble: BLEManager
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Shared with the real Today's card-customise editor so the two stay in sync.
@@ -34,6 +39,7 @@ struct LiquidTodayView: View {
     @State private var fitnessAge: Double?         // exploreSeries("fitness_age").last
     @State private var vitality: Double?           // exploreSeries("vitality").last
     @State private var stepsEst: Double?           // steps_est, day-keyed to the selected day (fallback)
+    @State private var importedStepsDay: Int?      // Apple Health steps for the selected day (middle tier)
     @State private var hrValues: [Double] = []     // hrBuckets since midnight → 5-min means
     @State private var workouts: [WorkoutRow] = [] // newest-first
 
@@ -102,9 +108,9 @@ struct LiquidTodayView: View {
     /// Content sits above the surface so it stays readable. Mirrors Kotlin `NoopPrefs.cardOpacityPercent`.
     @AppStorage(CardAppearancePrefs.opacityKey) private var cardOpacityPercent = CardAppearancePrefs.defaultPercent
     private var cardOpacity: Double { max(0, min(1, Double(cardOpacityPercent) / 100)) }
-    /// "Sky behind cards" (opt-in, default OFF): extend the day-cycle sky behind the WHOLE scroll so the
-    /// Card-transparency slider reveals it under every card. Mirrors Kotlin `NoopPrefs.skyBehindCards`.
-    @AppStorage(SkyBehindCardsPrefs.enabledKey) private var skyBehindCards = false
+    /// "Sky behind cards" (default ON): extend the day-cycle sky behind the WHOLE scroll so the
+    /// Card-transparency slider reveals it under every card. User-toggleable. Mirrors Kotlin `NoopPrefs.skyBehindCards`.
+    @AppStorage(SkyBehindCardsPrefs.enabledKey) private var skyBehindCards = true
     /// Day-cycle scene backdrop (#698). Default ON. When off, the liquid Today drops the sky for the plain
     /// dark canvas — parity with Android and the classic TodayView, which already honour this pref. Mirrors
     /// Kotlin `NoopPrefs.showDayCycleBackground`.
@@ -343,23 +349,12 @@ struct LiquidTodayView: View {
     static let pullSpace = "liqTodayScroll"
 
     /// Reserves the revealed space at the top and shows a vessel that fills with the pull, then sloshes
-    /// while the refresh runs.
+    /// while the refresh runs. A plain computed property (not a LiveState-isolated leaf) — it doesn't read
+    /// LiveState itself, so it's cheap to re-evaluate as part of the main body. It hands the actual
+    /// visibility decision to `LiquidRefreshIndicator` below, which DOES own LiveState.
     private var liquidRefreshIndicator: some View {
-        let progress = min(1, max(0, pullY / pullThreshold))
-        return ZStack {
-            if refreshing {
-                LiquidVessel(value: 0.6, tint: liquidHeart, animated: true)
-                    .frame(width: 34, height: 34)
-            } else if pullY > 2 {
-                LiquidVessel(value: progress, tint: liquidHeart, animated: false)
-                    .frame(width: 30, height: 30)
-                    .opacity(progress)
-                    .scaleEffect(0.7 + 0.3 * progress)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .frame(height: refreshing ? 64 : min(pullY, pullThreshold * 1.15))
-        .animation(.easeOut(duration: 0.22), value: refreshing)
+        LiquidRefreshIndicator(pullY: pullY, pullThreshold: pullThreshold, refreshing: refreshing,
+                               liquidHeart: liquidHeart)
     }
 
     /// Arm the refresh once the pull passes the threshold; FIRE it when the finger releases (the pull
@@ -375,6 +370,11 @@ struct LiquidTodayView: View {
             refreshArmed = false
             refreshing = true
             Task {
+                // #334 (iOS twin of Android #426): a pull requests a fresh strap history offload, not just
+                // a UI reload. syncNow() is internally gated (connected + bonded + not-already-backfilling),
+                // so a pull while disconnected or mid-offload safely no-ops. The sync status chip owns the
+                // ongoing offload progress; the pull spinner stays short (the reload below).
+                ble.syncNow()
                 await repo.refresh()
                 await load()
                 try? await Task.sleep(nanoseconds: 350_000_000)   // let the fill read as "done"
@@ -504,11 +504,14 @@ struct LiquidTodayView: View {
                 .overlay(alignment: .top) {
                     if let sourceLabel = heroSourceLabel {
                         SourceBadge("\(sourceLabel)", tint: StrandPalette.onDarkSecondary)
-                            // Match the badge's trailing edge to the fixed-width Rest vessel on every
-                            // card width, then lift its centre onto the card's top border.
+                            // Match the badge's trailing edge to the fixed-width Rest vessel on every card
+                            // width, then lift by the space4 gap above the cells so the badge's TOP sits on
+                            // the card's top edge — tucked into the top-right corner. (#486: the old
+                            // "+ half the badge height" centred it ON the border, reading as a pill floating
+                            // detached above the card; two users flagged it. Twin of Android TodayScreen.)
                             .fixedSize()
                             .frame(width: HeroScoreCell.vesselDiameter, alignment: .trailing)
-                            .offset(y: -(NoopMetrics.space4 + NoopMetrics.sourceBadgeHeight / 2))
+                            .offset(y: -NoopMetrics.space4)
                             .allowsHitTesting(false)
                             .accessibilityLabel(Text("Source: \(sourceLabel)"))
                     }
@@ -610,7 +613,10 @@ struct LiquidTodayView: View {
                      value: unitText(displayDay?.respRateBpm, card.unit, decimals: 1),
                      tint: StrandPalette.accent, frac: fracOver(displayDay?.respRateBpm, 24))
         case .steps:
-            cardLink(.metric("steps_est"), title: card.title, sub: card.subtitle,
+            // Route by the EXACT (key, source) the tile chose to display — measured my-whoop, imported
+            // apple-health, or the my-whoop estimate — NOT by bare key (bare "steps" resolves to
+            // apple-health and would mismatch a WHOOP-measured value). Order-independent.
+            cardLink(.metricSourced(key: stepsDetailKey, source: stepsDetailSource), title: card.title, sub: card.subtitle,
                      value: stepsText, tint: StrandPalette.metricCyan, frac: fracOver(stepCount, 10000))
         case .bloodOxygen:
             // Not wired to a real read yet — render EMPTY (not half-full) so it doesn't imply a reading.
@@ -844,7 +850,8 @@ struct LiquidTodayView: View {
             let resp = displayDay?.respRateBpm ?? vitalsDay?.respRateBpm
             ktile(String(localized: "Respiratory"), resp.map { String(format: "%.1f", $0) } ?? "—", "rpm", StrandPalette.accent, fracOver(resp, 24), key: "resp_rate")
         case .steps:
-            ktile(String(localized: "Steps"), stepsText, "", StrandPalette.chargeColor, fracOver(stepCount, 10000), key: "steps")
+            ktile(String(localized: "Steps"), stepsText, "", StrandPalette.chargeColor,
+                  fracOver(stepCount, 10000), key: stepsDetailKey, detailMetric: stepsDetailMetric)
         case .weight:
             ktile(String(localized: "Weight"), "—", "", StrandPalette.metricAmber, nil, key: "weight")
         case .calories:
@@ -853,7 +860,7 @@ struct LiquidTodayView: View {
     }
 
     private func ktile(_ label: String, _ value: String, _ unit: String, _ tint: Color, _ frac: Double?,
-                       key: String? = nil) -> some View {
+                       key: String? = nil, detailMetric: MetricDescriptor? = nil) -> some View {
         let tile = VStack(alignment: .leading, spacing: 6) {
             Text(label.uppercased()).font(StrandFont.overlineScaled(9)).tracking(1.2)
                 .foregroundStyle(StrandPalette.textTertiary)
@@ -893,7 +900,9 @@ struct LiquidTodayView: View {
         // #430 parity: tap -> the metric's trend detail (the same Explore dossier its MetricRow pushes,
         // closure-based NavigationLink per #38). A metric with no catalog entry stays inert.
         return Group {
-            if let key, let metric = MetricCatalog.all.first(where: { $0.key == key }) {
+            if let metric = detailMetric ?? key.flatMap({ key in
+                MetricCatalog.all.first(where: { $0.key == key })
+            }) {
                 NavigationLink { MetricDetailView(metric: metric) } label: { tile }
                     .buttonStyle(.plain)
             } else {
@@ -1016,6 +1025,7 @@ struct LiquidTodayView: View {
         async let fitA = repo.exploreSeries(key: "fitness_age", source: "my-whoop")
         async let vitA = repo.exploreSeries(key: "vitality", source: "my-whoop")
         async let stepsA = repo.exploreSeries(key: "steps_est", source: "my-whoop")
+        async let appleA = repo.appleDailyRows()
         async let hrA = repo.hrBuckets(from: from, to: to, bucketSeconds: 300)
         async let wkA = repo.workoutRows()
         // Ask the same cross-source resolver the Classic Today view uses which source actually won each
@@ -1030,6 +1040,7 @@ struct LiquidTodayView: View {
                                                     days: sourceLookback)
 
         let restSeries = await restA
+        let stepsSeries = await stepsA
         let restByDay = Dictionary(restSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
         // Selected day's Rest; tail fallback only at offset 0 (a past day with no row shows nothing) AND
         // only when the tail night is still fresh. #977: a live 5.0 whose sleep never scores (no overnight
@@ -1060,6 +1071,9 @@ struct LiquidTodayView: View {
             "rhr": sparkRows.compactMap { r in r.restingHr.map { (r.day, Double($0)) } },
             "spo2": sparkRows.compactMap { r in r.spo2Pct.map { (r.day, $0) } },
             "resp_rate": sparkRows.compactMap { r in r.respRateBpm.map { (r.day, $0) } },
+            "steps": sparkRows.compactMap { r in r.steps.map { (r.day, Double($0)) } },
+            "steps_est": stepsSeries.filter { $0.day >= sparkCutoff && $0.day <= selectedDayKey }
+                .map { ($0.day, $0.value) },
             "sleep_performance": restSeries.filter { $0.day >= sparkCutoff && $0.day <= selectedDayKey }
                 .map { ($0.day, $0.value) },
         ]
@@ -1071,9 +1085,12 @@ struct LiquidTodayView: View {
         // Steps is a DAILY metric, so key it to the SELECTED day (like restScore above), not the history-wide
         // latest. Without this, swiping to a past day with no strap step count showed today's estimate (the
         // `.last` value) instead of that day's. Mirrors the classic Today's stepsEstByDay[selectedDayKey].
-        let stepsSeries = await stepsA
         let stepsByDay = Dictionary(stepsSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
         stepsEst = stepsByDay[selectedDayKey] ?? (selectedDayOffset == 0 ? stepsSeries.last?.value : nil)
+        // Imported Apple Health steps for the SELECTED day (max across rows), the middle tier between the
+        // measured strap count and the motion estimate. Health Connect is Android-only, so apple-health is
+        // the sole import source on iOS. Mirrors Android `stepsForDay` (#377).
+        importedStepsDay = (await appleA).filter { $0.day == selectedDayKey }.compactMap { $0.steps }.max()
         hrValues = (await hrA).map { $0.bpm }
         workouts = await wkA
 
@@ -1152,7 +1169,19 @@ struct LiquidTodayView: View {
             : String(localized: "Good evening")
     }
 
-    private var stepCount: Double? { displayDay?.steps.map(Double.init) ?? stepsEst }
+    // Measured strap count ?: imported Apple Health count ?: motion estimate — the same precedence the
+    // detail routing follows below, so the tapped-through source always matches the number shown (#377).
+    private var stepCount: Double? {
+        displayDay?.steps.map(Double.init) ?? importedStepsDay.map(Double.init) ?? stepsEst
+    }
+
+    private var stepsDetailMetric: MetricDescriptor? {
+        MetricCatalog.todayStepsMetric(hasMeasuredSteps: displayDay?.steps != nil,
+                                       hasImportedSteps: importedStepsDay != nil)
+    }
+
+    private var stepsDetailKey: String { stepsDetailMetric?.key ?? "steps_est" }
+    private var stepsDetailSource: String { stepsDetailMetric?.source ?? "my-whoop" }
 
     private var liveHour: Double {
         let c = Calendar.current.dateComponents([.hour, .minute], from: Date())
@@ -1368,6 +1397,75 @@ private struct HeroScoreCell: View {
 
 
 // MARK: - Scene controls (LiveState-isolated leaves)
+
+/// The liquid pull-to-refresh vessel + a "Syncing…" label. Owns LiveState (isolated leaf, per the file's
+/// convention — see `LiquidLiveHR`) so a live-HR notify doesn't re-render the whole Today, but the vessel
+/// still knows about an ONGOING strap backfill.
+///
+/// Visibility used to be driven only by the local `refreshing` flag, which flips false ~350ms after the
+/// pull releases (once the local repo reload + a short "let the fill read as done" delay complete) — but
+/// `ble.syncNow()` kicks off a real BLE history offload that can run far longer than that. The vessel was
+/// disappearing while the strap was still mid-sync, with no feedback beyond the easy-to-miss header
+/// `SyncStatusChip`. `syncing` now also holds it (and the label) up while `live.backfilling` is true, so
+/// releasing the pull and watching it go away actually means the sync finished.
+private struct LiquidRefreshIndicator: View {
+    let pullY: CGFloat
+    let pullThreshold: CGFloat
+    let refreshing: Bool
+    let liquidHeart: Color
+
+    @EnvironmentObject private var live: LiveState
+
+    private var progress: CGFloat { min(1, max(0, pullY / pullThreshold)) }
+
+    /// The RAW "a sync is happening" signal. `live.backfilling` toggles false→true between EVERY offload
+    /// chunk (`exitBackfilling` at each HISTORY_END → auto-continue re-kick → `beginBackfill`), with a real
+    /// BLE round-trip gap in between. A deep backlog is now up to ~24 chunks in ONE connection (#594 raised
+    /// the auto-continue cap 6→24), so binding the vessel straight to this strobes it in/out on every chunk
+    /// boundary. The MenuBar header pins a constant height for exactly this reason (see MenuBarContent).
+    private var syncingRaw: Bool { refreshing || live.backfilling }
+
+    /// Debounced visibility that drives the body: goes true INSTANTLY, but only goes false after riding out
+    /// [hideDelay] with no new chunk — so a brief per-chunk `backfilling` gap can't flicker the vessel.
+    @State private var syncing = false
+    @State private var hideTask: Task<Void, Never>?
+    private static let hideDelaySeconds: UInt64 = 3   // comfortably longer than an inter-chunk gap
+
+    var body: some View {
+        ZStack {
+            if syncing {
+                VStack(spacing: 6) {
+                    LiquidVessel(value: 0.6, tint: liquidHeart, animated: true)
+                        .frame(width: 34, height: 34)
+                    Text("Syncing…")
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                }
+            } else if pullY > 2 {
+                LiquidVessel(value: progress, tint: liquidHeart, animated: false)
+                    .frame(width: 30, height: 30)
+                    .opacity(progress)
+                    .scaleEffect(0.7 + 0.3 * progress)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: syncing ? 64 : min(pullY, pullThreshold * 1.15))
+        .animation(.easeOut(duration: 0.22), value: syncing)
+        .onAppear { syncing = syncingRaw }
+        .onChangeCompat(of: syncingRaw) { raw in
+            hideTask?.cancel()
+            if raw {
+                syncing = true                       // a sync (or pull) is active — show at once
+            } else {
+                // Might just be the gap between two chunks — wait it out; a new chunk cancels this.
+                hideTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: Self.hideDelaySeconds * 1_000_000_000)
+                    if !Task.isCancelled { syncing = false }
+                }
+            }
+        }
+    }
+}
 
 /// Quick-actions "+" button. Tap → the shell's quick-action menu.
 /// #today-layout: the Arrange sheet — reorder the Today sections by dragging rows (SwiftUI's native
