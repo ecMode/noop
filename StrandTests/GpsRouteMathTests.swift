@@ -1,6 +1,8 @@
 import XCTest
 import Foundation
+import CloudKit
 import WhoopProtocol
+import WhoopStore
 @testable import Strand
 
 /// Pins the Apple GPS workout recorder's pure pieces (#524): distance accumulation, the precision-5
@@ -247,6 +249,52 @@ final class GpsRouteMathTests: XCTestCase {
         // Removal leaves no orphan.
         TrackTimeStore.remove(startTs: 1_700_000_000, sport: "Running", from: defaults)
         XCTAssertNil(TrackTimeStore.load(startTs: 1_700_000_000, sport: "Running", from: defaults))
+    }
+
+    // MARK: - HRTrackStore (synced per-run HR track round-trip)
+
+    func testHRTrackStoreRoundTripAndKeying() {
+        let defaults = freshDefaults()
+        XCTAssertNil(HRTrackStore.load(startTs: 1_700_000_000, sport: "Running", from: defaults))
+        let track = [HRSample(ts: 1_700_000_000, bpm: 120),
+                     HRSample(ts: 1_700_000_006, bpm: 132),
+                     HRSample(ts: 1_700_000_012, bpm: 145)]
+        HRTrackStore.store(track, startTs: 1_700_000_000, sport: "Running", into: defaults)
+        XCTAssertEqual(HRTrackStore.load(startTs: 1_700_000_000, sport: "Running", from: defaults), track)
+        // Same start second, different sport — must NOT collide (matches RouteStore's keying).
+        let cyc = [HRSample(ts: 1_700_000_000, bpm: 90)]
+        HRTrackStore.store(cyc, startTs: 1_700_000_000, sport: "Cycling", into: defaults)
+        XCTAssertEqual(HRTrackStore.load(startTs: 1_700_000_000, sport: "Cycling", from: defaults), cyc)
+        XCTAssertEqual(HRTrackStore.load(startTs: 1_700_000_000, sport: "Running", from: defaults), track)
+        // An empty track is an honest "no HR" — never stored as a placeholder.
+        HRTrackStore.store([], startTs: 42, sport: "Running", into: defaults)
+        XCTAssertNil(HRTrackStore.load(startTs: 42, sport: "Running", from: defaults))
+        // Removal leaves no orphan.
+        HRTrackStore.remove(startTs: 1_700_000_000, sport: "Running", from: defaults)
+        XCTAssertNil(HRTrackStore.load(startTs: 1_700_000_000, sport: "Running", from: defaults))
+    }
+
+    // MARK: - WorkoutRecord CKRecord round-trip (HR track rides along)
+
+    func testWorkoutRecordCarriesHRTrackThroughCKRecord() {
+        let row = WorkoutRow(startTs: 1_700_000_000, endTs: 1_700_003_600, sport: "Running", source: "whoop",
+                             durationS: 3600, energyKcal: 500, avgHr: 136, maxHr: 165, strain: 12.3,
+                             distanceM: 10_000, zonesJSON: nil, notes: nil)
+        let route = WorkoutRoute(polyline: RouteMath.encode([a, b]), distanceM: RouteMath.totalMeters([a, b]))
+        let track = [HRSample(ts: 1_700_000_000, bpm: 120), HRSample(ts: 1_700_000_060, bpm: 150)]
+        let base = CKRecord(recordType: WorkoutRecord.recordType,
+                            recordID: WorkoutRecord.recordID(deviceId: "my-whoop", startTs: row.startTs, sport: row.sport))
+        let rec = WorkoutRecord.make(row: row, deviceId: "my-whoop", route: route, hrTrack: track, base: base)
+        let decoded = WorkoutRecord.decode(rec)
+        XCTAssertEqual(decoded?.deviceId, "my-whoop")
+        XCTAssertEqual(decoded?.row, row)
+        XCTAssertEqual(decoded?.route, route)
+        XCTAssertEqual(decoded?.hrTrack, track)
+        // A record with no HR track decodes to nil (older records / indoor HR-less runs) — no crash.
+        let noHR = WorkoutRecord.make(row: row, deviceId: "my-whoop", route: route, hrTrack: nil, base: CKRecord(
+            recordType: WorkoutRecord.recordType,
+            recordID: WorkoutRecord.recordID(deviceId: "my-whoop", startTs: row.startTs, sport: row.sport)))
+        XCTAssertNil(WorkoutRecord.decode(noHR)?.hrTrack)
     }
 
     // MARK: - RunSplits (per-mile/km split math)

@@ -254,7 +254,11 @@ final class CloudSync {
                 guard let (startTs, sport) = WorkoutRecord.parseKey(key),
                       let row = try? await store.workout(deviceId: deviceId, startTs: startTs, sport: sport) else { continue }
                 let route = RouteStore.load(startTs: startTs, sport: sport)
-                out[id] = WorkoutRecord.make(row: row, deviceId: deviceId, route: route, base: base)
+                // The run's per-second HR rides along so a receiving device (which never got the raw
+                // hrSample stream — not synced) can export a TCX with HR. Capped so a long session's track
+                // stays well under the CKRecord size ceiling; empty on an HR-less run → field omitted.
+                let hrTrack = try? await store.hrSamples(deviceId: deviceId, from: startTs, to: row.endTs, limit: 6000)
+                out[id] = WorkoutRecord.make(row: row, deviceId: deviceId, route: route, hrTrack: hrTrack, base: base)
             case .sleep:
                 guard let startTs = Int(key),
                       let row = try? await store.sleepSession(deviceId: deviceId, startTs: startTs) else { continue }
@@ -298,12 +302,16 @@ final class CloudSync {
             guard let (kind, deviceId, key) = SyncSchema.decodeRecordName(record.recordID.recordName) else { continue }
             switch kind {
             case .workout:
-                guard let (dev, row, route) = WorkoutRecord.decode(record) else { continue }
+                guard let (dev, row, route, hrTrack) = WorkoutRecord.decode(record) else { continue }
                 // Don't resurrect a detected workout the user dismissed on this device.
                 if WorkoutSource.classify(row.source) == .detected,
                    isWorkoutTombstoned(startTs: row.startTs, endTs: row.endTs) { continue }
                 await store.applyingRemoteChanges { _ = try? await store.upsertWorkouts([row], deviceId: dev) }
                 if let route { RouteStore.store(route, startTs: row.startTs, sport: row.sport) }
+                // Bank the run's HR track locally so this device can export a TCX with HR even though it
+                // never received the raw hrSample stream (not synced). Kept in the side-store, NOT written
+                // into hrSample, so it can't perturb this device's daily-HR aggregates or baselines.
+                if let hrTrack { HRTrackStore.store(hrTrack, startTs: row.startTs, sport: row.sport) }
             case .sleep:
                 guard let row = Payload.decode(CachedSleepSession.self, from: record) else { continue }
                 if isSleepTombstoned(row.startTs) { continue }   // dismissed here → don't resurrect
@@ -335,6 +343,7 @@ final class CloudSync {
                 guard let (startTs, sport) = WorkoutRecord.parseKey(key) else { continue }
                 await store.applyingRemoteChanges { _ = try? await store.deleteWorkouts(deviceId: deviceId, sport: sport, from: startTs, to: startTs) }
                 RouteStore.remove(startTs: startTs, sport: sport)
+                HRTrackStore.remove(startTs: startTs, sport: sport)
             case .sleep:
                 guard let startTs = Int(key) else { continue }
                 await store.applyingRemoteChanges { _ = try? await store.deleteSleepSession(deviceId: deviceId, startTs: startTs) }

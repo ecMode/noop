@@ -130,8 +130,12 @@ struct WorkoutDetailView: View {
         // times, then cut splits for the current unit and average HR into each. Only runs recorded with
         // timing have times stored, so older runs yield no splits (honest — the card stays hidden). `zip`
         // truncates to the shorter of the two arrays, so a length mismatch degrades safely.
-        // Fetch the session HR once: it feeds both the split averages and the TCX export below.
-        let hr = await repo.hrSamples(from: row.startTs, to: row.endTs)
+        // Fetch the session HR once: it feeds the split averages, the HR curve, and the TCX export below.
+        // When there are no raw per-second samples on THIS device (a run recorded on the phone and received
+        // here only via CloudKit — the raw hrSample stream isn't synced), fall back to the HR track that
+        // rode along with the workout record (HRTrackStore), so the Mac can still draw + export HR.
+        let rawHR = await repo.hrSamples(from: row.startTs, to: row.endTs)
+        let hr = rawHR.isEmpty ? (HRTrackStore.load(startTs: row.startTs, sport: row.sport) ?? []) : rawHR
         // The persisted per-point capture times (unix SECONDS), parallel to the polyline, when this run
         // recorded timing. Shared by the split cutter and the TCX export.
         let times = TrackTimeStore.load(startTs: row.startTs, sport: row.sport)
@@ -146,7 +150,11 @@ struct WorkoutDetailView: View {
         // HR curve over the exact session window — a finer bucket than the 24h chart so a short run
         // still reads as a curve, not a handful of points.
         let buckets = await repo.workoutHrBuckets(from: row.startTs, to: row.endTs)
-        let points = buckets.map { TrendPoint(date: Date(timeIntervalSince1970: TimeInterval($0.ts)), value: $0.bpm) }
+        // Prefer the DB-bucketed curve; when this device has no raw samples (CloudKit-only run) fall back to
+        // the synced HR track so the curve still draws instead of showing an empty chart.
+        let points = !buckets.isEmpty
+            ? buckets.map { TrendPoint(date: Date(timeIntervalSince1970: TimeInterval($0.ts)), value: $0.bpm) }
+            : hr.map { TrendPoint(date: Date(timeIntervalSince1970: TimeInterval($0.ts)), value: Double($0.bpm)) }
 
         // Build a shareable TCX for a credential-free Strava upload. Reuses the auto-uploader's exact
         // point-merge + writer (`StravaService.buildPoints` + `TCXBuilder.build`), so a manually-uploaded

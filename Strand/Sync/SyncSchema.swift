@@ -1,6 +1,7 @@
 import Foundation
 import CloudKit
 import WhoopStore
+import WhoopProtocol   // HRSample — the per-run HR track that rides along with the workout record
 
 /// Maps the store's natural-keyed rows to CloudKit records and back. Two design choices keep this small
 /// and robust (see CLOUDKIT_SYNC_DESIGN.md):
@@ -151,7 +152,11 @@ enum WorkoutRecord {
     }
 
     /// Build the CKRecord onto `base` (which carries the last-known server change tag when we have it).
-    static func make(row: WorkoutRow, deviceId: String, route: WorkoutRoute?, base: CKRecord) -> CKRecord {
+    /// `hrTrack` is the run's per-second HR (from the recording device's `hrSample` rows); it rides along
+    /// so the receiving device — which never got the raw stream (not synced) — can still export a TCX with
+    /// HR. nil / empty leaves the field absent (an HR-less or indoor run just carries no track).
+    static func make(row: WorkoutRow, deviceId: String, route: WorkoutRoute?, hrTrack: [HRSample]? = nil,
+                     base: CKRecord) -> CKRecord {
         base["deviceId"] = deviceId as CKRecordValue
         if let json = try? JSONEncoder().encode(row) {
             base["payload"] = String(decoding: json, as: UTF8.self) as CKRecordValue
@@ -163,10 +168,15 @@ enum WorkoutRecord {
             base["routePolyline"] = nil
             base["routeDistanceM"] = nil
         }
+        if let hrTrack, !hrTrack.isEmpty, let json = try? JSONEncoder().encode(hrTrack) {
+            base["hrTrack"] = String(decoding: json, as: UTF8.self) as CKRecordValue
+        } else {
+            base["hrTrack"] = nil
+        }
         return base
     }
 
-    static func decode(_ record: CKRecord) -> (deviceId: String, row: WorkoutRow, route: WorkoutRoute?)? {
+    static func decode(_ record: CKRecord) -> (deviceId: String, row: WorkoutRow, route: WorkoutRoute?, hrTrack: [HRSample]?)? {
         guard let deviceId = record["deviceId"] as? String,
               let payload = record["payload"] as? String,
               let row = try? JSONDecoder().decode(WorkoutRow.self, from: Data(payload.utf8)) else { return nil }
@@ -174,6 +184,10 @@ enum WorkoutRecord {
         if let poly = record["routePolyline"] as? String, let dist = record["routeDistanceM"] as? Double {
             route = WorkoutRoute(polyline: poly, distanceM: dist)
         }
-        return (deviceId, row, route)
+        var hrTrack: [HRSample]?
+        if let json = record["hrTrack"] as? String {
+            hrTrack = try? JSONDecoder().decode([HRSample].self, from: Data(json.utf8))
+        }
+        return (deviceId, row, route, hrTrack)
     }
 }

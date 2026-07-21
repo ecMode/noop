@@ -331,6 +331,60 @@ enum TrackTimeStore {
     }
 }
 
+// MARK: - HRTrackStore (on-device side-store: per-run heart-rate track)
+
+/// The per-second heart-rate track for a finished workout, keyed by the same natural key as its route.
+/// Unlike the raw `hrSample` stream (which is NOT CloudKit-synced — too high-volume), this is a compact
+/// per-run slice that DOES ride along with the workout record (see `WorkoutRecord.hrTrack`), so a run
+/// recorded on the phone can be exported to TCX (with HR) on a Mac that only ever received the workout via
+/// CloudKit. On the recording device the raw `hrSample` rows already exist, so this sidecar is only ever
+/// populated on the RECEIVING side; the detail screen's export/chart consult it when `hrSample` is empty.
+/// Capped like `RouteStore`/`TrackTimeStore`. Never leaves the device except inside the workout record.
+enum HRTrackStore {
+    /// Single `UserDefaults` key holding a JSON `[key: [HRSample]]` map (HRSample = {ts unixSec, bpm}).
+    static let defaultsKey = "noop.workoutHRTracks"
+    /// Cap on stored HR tracks — newest kept, oldest evicted (keys sort by the leading startTs).
+    static let maxTracks = 300
+
+    /// Natural key for a session's HR track: "<startTs>|<sport>" — the SAME key `RouteStore` uses.
+    static func key(startTs: Int, sport: String) -> String { "\(startTs)|\(sport)" }
+
+    static func loadMap(from defaults: UserDefaults = .standard) -> [String: [HRSample]] {
+        guard let data = defaults.data(forKey: defaultsKey),
+              let raw = try? JSONDecoder().decode([String: [HRSample]].self, from: data) else { return [:] }
+        return raw
+    }
+
+    /// The per-second HR track for a finished workout, or nil if none was synced in.
+    static func load(startTs: Int, sport: String, from defaults: UserDefaults = .standard) -> [HRSample]? {
+        loadMap(from: defaults)[key(startTs: startTs, sport: sport)]
+    }
+
+    /// Persist `samples` for a workout, evicting the oldest entries past the cap. A no-op when empty, so we
+    /// never store an unusable placeholder (an HR-less run simply has no sidecar and falls back honestly).
+    static func store(_ samples: [HRSample], startTs: Int, sport: String, into defaults: UserDefaults = .standard) {
+        guard !samples.isEmpty else { return }
+        var map = loadMap(from: defaults)
+        map[key(startTs: startTs, sport: sport)] = samples
+        if map.count > maxTracks {
+            let ordered = map.keys.sorted {
+                (Int($0.split(separator: "|").first ?? "") ?? 0) < (Int($1.split(separator: "|").first ?? "") ?? 0)
+            }
+            for k in ordered.prefix(map.count - maxTracks) { map.removeValue(forKey: k) }
+        }
+        guard let data = try? JSONEncoder().encode(map) else { return }
+        defaults.set(data, forKey: defaultsKey)
+    }
+
+    /// Remove a workout's HR track (used when a session is deleted; keeps the side-store from leaking).
+    static func remove(startTs: Int, sport: String, from defaults: UserDefaults = .standard) {
+        var map = loadMap(from: defaults)
+        guard map.removeValue(forKey: key(startTs: startTs, sport: sport)) != nil,
+              let data = try? JSONEncoder().encode(map) else { return }
+        defaults.set(data, forKey: defaultsKey)
+    }
+}
+
 // MARK: - GpsWorkoutRecorder (CoreLocation wrapper)
 
 /// Records the route of an in-flight GPS workout from CoreLocation. Thin and fail-safe: requests
