@@ -761,6 +761,9 @@ final class AppModel: ObservableObject {
     func endWorkout() {
         guard let w = activeWorkout else { return }
         activeWorkout = nil
+        // Guarantee spoken-audio cleanup: stop any queued cue and force the audio session inactive so a run
+        // can never end with other audio left ducked (the stuck-quiet-music bug). No-op if audio was off.
+        workoutVoice.endSession()
         let wasGps = activeWorkoutIsGps
         activeWorkoutIsGps = false
         // Drop the durable snapshot the instant the session ends , whether it saves below or is discarded
