@@ -56,6 +56,12 @@ struct WorkoutDetailView: View {
     /// (`TrackTimeStore`) with HR averaged in. Empty when the run predates split timing or isn't a GPS run.
     @State private var splits: [RunSplit] = []
 
+    /// A ready-to-share `.tcx` file for this run (nil until built, or when the run has no GPS/HR to export).
+    /// Credential-free Strava path: the file is the SAME timestamped TCX the auto-uploader builds, but handed
+    /// to a Share Sheet so it can be uploaded manually via strava.com → Upload from file — no API app, no
+    /// Strava subscription. Built once during `load()` so the toolbar's ShareLink is ready without a re-fetch.
+    @State private var exportURL: URL?
+
     /// Steps over the session window for an on-foot sport (#398): the count plus whether it came from the
     /// strap's own counter (MG/5.0) or the phone pedometer (fallback for WHOOP 4.0 / not-yet-synced / CSV
     /// import). nil = not an on-foot sport, or no step source had data for the window.
@@ -90,6 +96,15 @@ struct WorkoutDetailView: View {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Done") { dismiss() }
             }
+            // Share the run's TCX for a credential-free Strava upload (strava.com → Upload from file).
+            // Shown only when there's an actual GPS/HR trace to export — no fabricated empty file.
+            if let exportURL {
+                ToolbarItem(placement: .primaryAction) {
+                    ShareLink(item: exportURL) {
+                        Label("Export TCX", systemImage: "square.and.arrow.up")
+                    }
+                }
+            }
         }
         .task { await load() }
     }
@@ -110,13 +125,40 @@ struct WorkoutDetailView: View {
         // times, then cut splits for the current unit and average HR into each. Only runs recorded with
         // timing have times stored, so older runs yield no splits (honest — the card stays hidden). `zip`
         // truncates to the shorter of the two arrays, so a length mismatch degrades safely.
+        // Fetch the session HR once: it feeds both the split averages and the TCX export below.
+        let hr = await repo.hrSamples(from: row.startTs, to: row.endTs)
+        // The persisted per-point capture times (unix SECONDS), parallel to the polyline, when this run
+        // recorded timing. Shared by the split cutter and the TCX export.
+        let times = TrackTimeStore.load(startTs: row.startTs, sport: row.sport)
+
         var computedSplits: [RunSplit] = []
-        if routePoints.count >= 2,
-           let times = TrackTimeStore.load(startTs: row.startTs, sport: row.sport), times.count >= 2 {
-            let hr = await repo.hrSamples(from: row.startTs, to: row.endTs)
+        if routePoints.count >= 2, let times, times.count >= 2 {
             let timed = zip(times, routePoints).map { (t: Double($0), pt: $1) }
             let unitMeters = unitSystem == .imperial ? 1609.344 : 1000.0
             computedSplits = RunSplits.compute(track: timed, hr: hr, unitMeters: unitMeters)
+        }
+
+        // Build a shareable TCX for a credential-free Strava upload. Reuses the auto-uploader's exact
+        // point-merge + writer (`StravaService.buildPoints` + `TCXBuilder.build`), so a manually-uploaded
+        // file is byte-identical to what the API path would have sent. GPS present → a timestamped track
+        // with HR merged by second; GPS absent → an HR-only trace (still valid for an indoor run). No
+        // exportable samples → nil, and the toolbar action stays hidden (honest).
+        let exportTrack: [(tMs: Int64, lat: Double, lon: Double)] = {
+            guard routePoints.count >= 2, let times, times.count >= 2 else { return [] }
+            // TrackTimeStore stores unix seconds; the TCX writer wants epoch milliseconds.
+            return zip(times, routePoints).map { (tMs: Int64($0) * 1000, lat: $1.lat, lon: $1.lon) }
+        }()
+        var exportFileURL: URL?
+        let tcxPoints = StravaService.buildPoints(hr: hr, track: exportTrack)
+        if !tcxPoints.isEmpty {
+            let tcx = TCXBuilder.build(
+                sport: row.sport,
+                start: Date(timeIntervalSince1970: TimeInterval(row.startTs)),
+                totalSeconds: row.durationS ?? Double(row.endTs - row.startTs),
+                distanceMeters: row.distanceM ?? 0,
+                calories: row.energyKcal.map { Int($0.rounded()) },
+                points: tcxPoints)
+            exportFileURL = Self.writeTCXTemp(tcx, sport: row.sport, startTs: row.startTs)
         }
 
         // HR curve over the exact session window — a finer bucket than the 24h chart so a short run
@@ -165,8 +207,24 @@ struct WorkoutDetailView: View {
             self.zoneMinutes = minutes
             self.zonesFromImport = fromImport
             self.steps = stepReadout
+            self.exportURL = exportFileURL
             self.loaded = true
         }
+    }
+
+    /// Write a TCX blob to a temp `.tcx` file named for the run (`noop-<sport>-<date>.tcx`), for the Share
+    /// Sheet / ShareLink. Temp dir is fine: it only needs to outlive the share, and the OS reclaims it.
+    private static func writeTCXTemp(_ data: Data, sport: String, startTs: Int) -> URL? {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyyMMdd-HHmm"
+        let stamp = f.string(from: Date(timeIntervalSince1970: TimeInterval(startTs)))
+        let safeSport = sport.lowercased()
+            .replacingOccurrences(of: " ", with: "-")
+            .filter { $0.isLetter || $0.isNumber || $0 == "-" }
+        let name = "noop-\(safeSport.isEmpty ? "workout" : safeSport)-\(stamp).tcx"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(name)
+        do { try data.write(to: url); return url } catch { return nil }
     }
 
     // MARK: - Header
