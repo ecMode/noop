@@ -726,22 +726,36 @@ private struct MinimizedWorkoutBar: View {
             router.openActiveWorkout()
         } label: {
             HStack(spacing: 10) {
-                // "Recording" dot in the same rose the Today indicator + live console use.
-                Circle()
-                    .fill(StrandPalette.metricRose)
-                    .frame(width: 9, height: 9)
+                // "Recording" dot in the same rose the Today indicator + live console use; a paused session
+                // shows a pause glyph in muted ink instead, so the dock reads its state at a glance.
+                if w.isPaused {
+                    Image(systemName: "pause.fill")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(StrandPalette.textTertiary)
+                } else {
+                    Circle()
+                        .fill(StrandPalette.metricRose)
+                        .frame(width: 9, height: 9)
+                }
                 Text(w.sport)
                     .font(StrandFont.headline)
                     .foregroundStyle(StrandPalette.textPrimary)
                     .lineLimit(1)
                 // Live elapsed clock in its OWN TimelineView so the per-second tick doesn't re-lay-out the row.
+                // Frozen while paused (moving-time `activeElapsed`), matching the in-exercise screen's clock.
                 TimelineView(.periodic(from: .now, by: 1)) { context in
-                    Text(ActiveWorkoutIndicatorModel.elapsed(since: w.start, now: context.date))
+                    Text(ActiveWorkoutIndicatorModel.format(seconds: Int(w.activeElapsed(now: context.date))))
                         .font(StrandFont.bodyNumber)
                         .foregroundStyle(StrandPalette.textSecondary)
                 }
-                // Live HR when the strap is feeding it — the signature at-a-glance number for a workout.
-                if let bpm = model.bpm {
+                // Live HR when the strap is feeding it — the signature at-a-glance number for a workout. While
+                // paused, show "Paused" instead so the dock doesn't imply active recording.
+                if w.isPaused {
+                    Text("· Paused")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .lineLimit(1)
+                } else if let bpm = model.bpm {
                     Text("· \(bpm) bpm")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.metricRose)

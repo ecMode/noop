@@ -356,14 +356,18 @@ struct LiveView: View {
         card {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
-                    Circle().fill(StrandPalette.metricRose).frame(width: 8, height: 8)
-                    Text("RECORDING WORKOUT").font(StrandFont.overline)
-                        .tracking(StrandFont.overlineTracking).foregroundStyle(StrandPalette.metricRose)
+                    Circle().fill(w.isPaused ? StrandPalette.textTertiary : StrandPalette.metricRose)
+                        .frame(width: 8, height: 8)
+                    Text(w.isPaused ? "PAUSED" : "RECORDING WORKOUT").font(StrandFont.overline)
+                        .tracking(StrandFont.overlineTracking)
+                        .foregroundStyle(w.isPaused ? StrandPalette.textSecondary : StrandPalette.metricRose)
                     Spacer()
-                    // Re-render once a second so the elapsed clock ticks without a manual Timer.
-                    TimelineView(.periodic(from: .now, by: 1)) { _ in
-                        Text(Self.elapsed(since: w.start)).font(StrandFont.number(17)).monospacedDigit()
-                            .foregroundStyle(StrandPalette.textPrimary)
+                    // Re-render once a second so the elapsed clock ticks without a manual Timer. Frozen while
+                    // paused (moving-time `activeElapsed`), matching the in-exercise screen + minimized bar.
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(ActiveWorkoutIndicatorModel.format(seconds: Int(w.activeElapsed(now: context.date))))
+                            .font(StrandFont.number(17)).monospacedDigit()
+                            .foregroundStyle(w.isPaused ? StrandPalette.textSecondary : StrandPalette.textPrimary)
                     }
                 }
                 // Live HR / avg / peak / effort — the leaf owns LiveState + the active workout so the
@@ -395,11 +399,6 @@ struct LiveView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 4)
-    }
-
-    private static func elapsed(since start: Date) -> String {
-        let s = max(0, Int(Date().timeIntervalSince(start)))
-        return String(format: "%d:%02d", s / 60, s % 60)
     }
 
     private func reconnectGuideBanner(_ guide: String) -> some View {

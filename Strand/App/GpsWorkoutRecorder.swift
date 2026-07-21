@@ -438,6 +438,14 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
     /// Most recent relative altitude from the altimeter stream, sampled into `trackAltitudes` on each fix.
     private var latestRelAltitude: Double = 0
     private var startMs: Int64 = 0
+    /// True while the owning workout is paused: `ingest` drops fixes (distance/route freeze) and the average
+    /// pace excludes the stop. Driven by `AppModel.pause/resumeWorkout` via `setPaused`. Location updates
+    /// keep running (no cold-reacquire lag on resume); only ingestion is gated.
+    private var isPaused = false
+    /// Wall-clock ms already spent paused (completed intervals), subtracted from the average-pace elapsed so
+    /// a stop doesn't inflate the whole-run pace. `pauseStartMs` marks the current pause's start.
+    private var pausedMs: Int64 = 0
+    private var pauseStartMs: Int64 = 0
 #if os(iOS)
     private let altimeter = CMAltimeter()
     private var altimeterRunning = false
@@ -483,6 +491,9 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
         currentPaceSecPerKm = nil
         pointCount = 0
         rawFixCount = 0
+        isPaused = false
+        pausedMs = 0
+        pauseStartMs = 0
         isRecording = true
 #if os(iOS)
         // The barometer has its OWN (motion) permission, independent of location — start it regardless so a
@@ -567,10 +578,23 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
     }
 #endif
 
+    /// Set the paused state (called by `AppModel.pause/resumeWorkout`). Pausing banks nothing yet; resuming
+    /// adds the just-finished interval to `pausedMs` so the average pace excludes it. Idempotent per edge.
+    func setPaused(_ paused: Bool) {
+        guard paused != isPaused else { return }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        if paused {
+            pauseStartMs = now
+        } else {
+            pausedMs += max(0, now - pauseStartMs)
+        }
+        isPaused = paused
+    }
+
     /// Fold a batch of (already bound-checked at the source) fixes into the route, updating live
-    /// distance/pace. No-op when not recording.
+    /// distance/pace. No-op when not recording or while paused (distance/route freeze during a pause).
     fileprivate func ingest(_ fixes: [RawFix]) {
-        guard isRecording else { return }
+        guard isRecording, !isPaused else { return }
         rawFixCount += fixes.count
         var changed = false
         for fix in fixes {
@@ -584,7 +608,9 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
         guard changed else { return }
         pointCount = track.count
         distanceM = RouteMath.totalMeters(track)
-        let elapsed = Double(Int64(Date().timeIntervalSince1970 * 1000) - startMs) / 1000.0
+        // Average pace over MOVING time: subtract any time already spent paused so a mid-run stop doesn't
+        // drag the whole-run pace. (Ingest is gated while paused, so no fix lands to recompute mid-pause.)
+        let elapsed = Double(Int64(Date().timeIntervalSince1970 * 1000) - startMs - pausedMs) / 1000.0
         paceSecPerKm = RouteMath.paceSecPerKm(meters: distanceM, seconds: elapsed)
         currentPaceSecPerKm = Self.rollingPace(points: track, times: trackTimes)
         // Workouts & GPS test mode: one GPS-fix-progress line tagged `.workouts` per batch that added a point,

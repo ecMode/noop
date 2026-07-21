@@ -113,6 +113,22 @@ final class AppModel: ObservableObject {
         var liveStrain: Double = 0
         var avgHr: Int = 0
         var peakHr: Int = 0
+        /// Total time spent paused in COMPLETED pause intervals (seconds). `activeElapsed` subtracts this so
+        /// the timer, saved `durationS`, and pace reflect moving time, not wall-clock (start→end still spans
+        /// the pause). HR keeps logging while paused, so `samples`/strain accrue regardless.
+        var pausedAccumulated: TimeInterval = 0
+        /// When the CURRENT pause began, or nil when running. Non-nil ⇒ paused; the live clock freezes.
+        var pauseStartedAt: Date? = nil
+
+        var isPaused: Bool { pauseStartedAt != nil }
+
+        /// Moving/active elapsed at `now`: wall-clock since start, minus completed pauses, minus the pause
+        /// currently in progress. Clamped ≥ 0. While paused this is constant (the `now` terms cancel), so
+        /// every clock bound to it freezes and every duration derived from it excludes the stop.
+        func activeElapsed(now: Date) -> TimeInterval {
+            let current = pauseStartedAt.map { now.timeIntervalSince($0) } ?? 0
+            return max(0, now.timeIntervalSince(start) - pausedAccumulated - current)
+        }
     }
     /// Illness/strain early-warning (recent RHR up + HRV down + skin-temp up vs baseline). nil = clear.
     @Published var healthAlert: String?
@@ -281,6 +297,9 @@ final class AppModel: ObservableObject {
         }
         // HR-zone haptic coaching (bond-gated) and spoken zone audio (bond-free) both watch the smoothed bpm.
         $bpm.sink { [weak self] hr in
+            // Suppress live coaching cues while paused (you're catching your breath, not drifting a zone);
+            // HR still logs for strain. Both hooks are already gated on an active workout internally.
+            guard self?.activeWorkout?.isPaused != true else { return }
             self?.coachZone(hr)
             self?.announceZoneAudio(hr)
         }.store(in: &hrCancellables)
@@ -667,6 +686,42 @@ final class AppModel: ObservableObject {
     /// session (#529). Called on start + each captured sample. A no-op when nothing is running. Apple has
     /// no GPS-route session, so every manual workout is the "non-GPS" case and gets this durability ,
     /// the Apple analogue of Android's `persistNonGpsWorkout`.
+    /// Pause the live workout: freeze the timer, stop accumulating GPS distance/pace, and hold the current
+    /// wall-clock instant so `activeElapsed` can subtract the stop. HR keeps logging in the background (the
+    /// bpm sink still fires), so strain/samples accrue — only the moving-time-derived numbers pause. No-op
+    /// unless a workout is running and not already paused.
+    func pauseWorkout() {
+        guard var w = activeWorkout, !w.isPaused else { return }
+        w.pauseStartedAt = Date()
+        activeWorkout = w
+        if activeWorkoutIsGps { gpsRecorder.setPaused(true) }
+        persistActiveWorkout()
+        buzz(loops: 1)
+        if behavior.workoutAudioAlerts { workoutVoice.announce(String(localized: "Workout paused.")) }
+        emitWorkoutsTrace(WorkoutsTrace.sessionLine(
+            event: "paused", sportKey: WorkoutSource.traceSportKey(w.sport), hrSamples: w.samples.count))
+    }
+
+    /// Resume a paused workout: bank the just-finished pause into `pausedAccumulated`, un-pause the GPS
+    /// recorder, and shift the mile-split marker forward by the paused gap so the in-progress mile's spoken
+    /// pace excludes the stop. No-op unless a workout is running and currently paused.
+    func resumeWorkout() {
+        guard var w = activeWorkout, let since = w.pauseStartedAt else { return }
+        let pausedFor = Date().timeIntervalSince(since)
+        w.pausedAccumulated += max(0, pausedFor)
+        w.pauseStartedAt = nil
+        activeWorkout = w
+        // Keep the wall-clock mile marker aligned to MOVING time: everything measured as `now - marker`
+        // (last-mile pace) must not count the stop, so push the marker forward by the paused duration.
+        lastMileMarkerAt = lastMileMarkerAt.addingTimeInterval(max(0, pausedFor))
+        if activeWorkoutIsGps { gpsRecorder.setPaused(false) }
+        persistActiveWorkout()
+        buzz(loops: 1)
+        if behavior.workoutAudioAlerts { workoutVoice.announce(String(localized: "Workout resumed.")) }
+        emitWorkoutsTrace(WorkoutsTrace.sessionLine(
+            event: "resumed", sportKey: WorkoutSource.traceSportKey(w.sport), hrSamples: w.samples.count))
+    }
+
     private func persistActiveWorkout() {
         guard let w = activeWorkout else { return }
         ActiveWorkoutPersistence.store(
@@ -676,7 +731,9 @@ final class AppModel: ObservableObject {
                 samples: w.samples,
                 avgHr: w.avgHr,
                 peakHr: w.peakHr,
-                liveStrain: w.liveStrain))
+                liveStrain: w.liveStrain,
+                pausedAccumulatedSec: w.pausedAccumulated,
+                pauseStartedSec: w.pauseStartedAt.map { Int($0.timeIntervalSince1970) }))
     }
 
     /// If a manual workout was in flight when iOS killed the app, rebuild `activeWorkout` from the durable
@@ -691,6 +748,10 @@ final class AppModel: ObservableObject {
         w.avgHr = snap.avgHr
         w.peakHr = snap.peakHr
         w.liveStrain = snap.liveStrain
+        w.pausedAccumulated = snap.pausedAccumulatedSec ?? 0
+        w.pauseStartedAt = snap.pauseStartedSec.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        // A rehydrated session is the non-GPS case (the recorder isn't re-armed on relaunch), so pause state
+        // only needs to restore on `activeWorkout`; the frozen `activeElapsed` and the paused UI follow from it.
         activeWorkout = w
     }
 
@@ -715,7 +776,10 @@ final class AppModel: ObservableObject {
             route = gpsRecorder.capturedRoute()
         }
         let end = Date()
-        let durationSec = end.timeIntervalSince(w.start)
+        // Moving time, not wall-clock: a session paused mid-way saves its ACTIVE duration (the discard floor
+        // and the row's `durationS` both use it). `startTs`/`endTs` still span the pause, so elapsed vs moving
+        // time stay distinguishable downstream, exactly like other run trackers.
+        let durationSec = w.activeElapsed(now: end)
         let samples = w.samples
         // Save when there's an HR window OR a real GPS route — a GPS-only walk (HR not streaming) is still a
         // workout (parity with Android's `samples.size < 2 && track.size < 2` discard gate) — AND the session
@@ -747,7 +811,7 @@ final class AppModel: ObservableObject {
         let startTs = Int(w.start.timeIntervalSince1970)
         let row = WorkoutRow(
             startTs: startTs, endTs: Int(end.timeIntervalSince1970),
-            sport: w.sport, source: "manual", durationS: end.timeIntervalSince(w.start),
+            sport: w.sport, source: "manual", durationS: durationSec,
             energyKcal: kcal > 0 ? kcal : nil, avgHr: avg, maxHr: peak, strain: strain,
             // GPS distance rides the shared row so the Workouts list / detail show it like any other
             // distance workout; the polyline itself is persisted alongside in RouteStore (the shared
@@ -863,7 +927,9 @@ final class AppModel: ObservableObject {
         // Re-snapshot the durable session so a kill keeps the latest accumulated HR window (#529).
         persistActiveWorkout()
         // Spoken per-mile split (bond-free audio), if enabled — checked on every sample against live GPS.
-        announceMileSplitIfNeeded()
+        // Skipped while paused: distance is frozen so no mile crosses anyway, and this keeps the marker math
+        // from seeing the stopped stretch.
+        if !w.isPaused { announceMileSplitIfNeeded() }
     }
 
     /// Drop the smoothing window and blank the hero number so a resume / re-attach shows ","
@@ -1551,7 +1617,7 @@ final class AppModel: ObservableObject {
         let now = Date()
         // Seconds for just the mile we crossed (since the previous marker), and the run's average pace.
         let lastMileSec = now.timeIntervalSince(lastMileMarkerAt)
-        let avgMileSec = miles > 0 ? now.timeIntervalSince(w.start) / Double(miles) : lastMileSec
+        let avgMileSec = miles > 0 ? w.activeElapsed(now: now) / Double(miles) : lastMileSec
         lastAnnouncedMile = miles
         lastMileMarkerAt = now
         var line = "Mile \(miles). Last mile \(Self.spokenPace(lastMileSec))."

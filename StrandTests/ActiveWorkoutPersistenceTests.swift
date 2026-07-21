@@ -118,4 +118,68 @@ final class ActiveWorkoutPersistenceTests: XCTestCase {
         XCTAssertEqual(decoded!.peakHr, 0)
         XCTAssertEqual(decoded!.liveStrain, 0, accuracy: 1e-9)
     }
+
+    // MARK: - pause fields (relaunch-while-paused durability)
+
+    func testPauseFieldsRoundTrip() {
+        var s = snapshot()
+        s.pausedAccumulatedSec = 42.5
+        s.pauseStartedSec = 1_700_000_300
+        let decoded = ActiveWorkoutPersistence.decode(ActiveWorkoutPersistence.encode(s))
+        XCTAssertEqual(decoded?.pausedAccumulatedSec, 42.5)
+        XCTAssertEqual(decoded?.pauseStartedSec, 1_700_000_300)
+    }
+
+    /// A snapshot written before pause shipped has no pause keys; it must still decode (nil pause fields =
+    /// "was never paused"), never fail the whole rehydrate.
+    func testLegacySnapshotWithoutPauseKeysDecodes() {
+        let legacy = #"{"startSec":1700000000,"sport":"Tennis","samples":[],"avgHr":0,"peakHr":0,"liveStrain":0}"#
+        let decoded = ActiveWorkoutPersistence.decode(Data(legacy.utf8))
+        XCTAssertNotNil(decoded)
+        XCTAssertNil(decoded?.pausedAccumulatedSec)
+        XCTAssertNil(decoded?.pauseStartedSec)
+    }
+
+    /// A corrupt pause accumulator / non-positive pause-start is sanitised so it can't freeze a rehydrated
+    /// session forever.
+    func testDecodeSanitisesCorruptPauseFields() {
+        var s = snapshot()
+        s.pausedAccumulatedSec = -10
+        s.pauseStartedSec = 0
+        let decoded = ActiveWorkoutPersistence.decode(ActiveWorkoutPersistence.encode(s))
+        XCTAssertNil(decoded?.pausedAccumulatedSec)   // negative → dropped (0 active-time offset)
+        XCTAssertNil(decoded?.pauseStartedSec)        // non-positive → "was running"
+    }
+
+    // MARK: - ActiveWorkout.activeElapsed (moving time)
+
+    func testActiveElapsedRunningIsWallClock() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let w = AppModel.ActiveWorkout(start: start, sport: "Running")
+        XCTAssertEqual(w.activeElapsed(now: start.addingTimeInterval(600)), 600, accuracy: 1e-6)
+    }
+
+    func testActiveElapsedFreezesWhilePaused() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        var w = AppModel.ActiveWorkout(start: start, sport: "Running")
+        // Paused 300s in; the clock must read 300 no matter how much wall-clock passes during the pause.
+        w.pauseStartedAt = start.addingTimeInterval(300)
+        XCTAssertEqual(w.activeElapsed(now: start.addingTimeInterval(300)), 300, accuracy: 1e-6)
+        XCTAssertEqual(w.activeElapsed(now: start.addingTimeInterval(900)), 300, accuracy: 1e-6)
+    }
+
+    func testActiveElapsedSubtractsCompletedPauses() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        var w = AppModel.ActiveWorkout(start: start, sport: "Running")
+        w.pausedAccumulated = 120   // resumed after a 2-min stop
+        // 900s wall-clock, minus 120s paused = 780s moving.
+        XCTAssertEqual(w.activeElapsed(now: start.addingTimeInterval(900)), 780, accuracy: 1e-6)
+    }
+
+    func testActiveElapsedNeverNegative() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        var w = AppModel.ActiveWorkout(start: start, sport: "Running")
+        w.pausedAccumulated = 10_000   // absurd, but must clamp not go negative
+        XCTAssertEqual(w.activeElapsed(now: start.addingTimeInterval(60)), 0, accuracy: 1e-6)
+    }
 }

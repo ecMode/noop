@@ -71,6 +71,7 @@ struct LiveWorkoutView: View {
                 // re-rendering the HR hero / effort gauge above (scroll-stutter isolation).
                 SensorRowIfPresent()
                 Spacer(minLength: NoopMetrics.space3)
+                pauseButton
                 endButton
             }
             .screenPadding()
@@ -106,20 +107,21 @@ struct LiveWorkoutView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .center) {
+        let paused = model.activeWorkout?.isPaused ?? false
+        return HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("RECORDING WORKOUT")
+                Text(paused ? "PAUSED" : "RECORDING WORKOUT")
                     .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
-                    .foregroundStyle(StrandPalette.metricRose)
+                    .foregroundStyle(paused ? StrandPalette.textSecondary : StrandPalette.metricRose)
                 Text("Workout")
                     .font(StrandFont.title1).foregroundStyle(StrandPalette.textPrimary)
             }
             Spacer()
-            if let start = model.activeWorkout?.start {
-                TimelineView(.periodic(from: .now, by: 1)) { _ in
-                    Text(Self.elapsed(since: start))
+            if let w = model.activeWorkout {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(Self.elapsed(w, now: context.date))
                         .font(StrandFont.number(34)).monospacedDigit()
-                        .foregroundStyle(StrandPalette.textPrimary)
+                        .foregroundStyle(paused ? StrandPalette.textSecondary : StrandPalette.textPrimary)
                 }
             }
         }
@@ -242,10 +244,22 @@ struct LiveWorkoutView: View {
         }
     }
 
+    /// Pause/Resume the session. Freezes the timer + GPS distance/pace while paused (HR keeps logging);
+    /// the label + icon flip with the live state so one button does both.
+    private var pauseButton: some View {
+        let paused = model.activeWorkout?.isPaused ?? false
+        return NoopButton(paused ? "Resume workout" : "Pause workout",
+                          systemImage: paused ? "play.fill" : "pause.fill",
+                          kind: .secondary, fullWidth: true) {
+            if paused { model.resumeWorkout() } else { model.pauseWorkout() }
+        }
+    }
+
     // MARK: - Helpers
 
-    private static func elapsed(since start: Date) -> String {
-        let s = max(0, Int(Date().timeIntervalSince(start)))
+    /// Moving-time clock (frozen while paused): M:SS, formatted from `activeElapsed` so a pause holds it.
+    private static func elapsed(_ w: AppModel.ActiveWorkout, now: Date) -> String {
+        let s = max(0, Int(w.activeElapsed(now: now)))
         return String(format: "%d:%02d", s / 60, s % 60)
     }
 

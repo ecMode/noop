@@ -76,13 +76,15 @@ struct ActiveWorkoutIndicatorModel: Equatable {
     /// Pure + injectable `now` for deterministic tests. (StrandFont.bodyNumber already applies tabular figures,
     /// so the call site does NOT add `.monospacedDigit()`.)
     static func elapsed(since start: Date, now: Date = Date()) -> String {
-        let total = max(0, Int(now.timeIntervalSince(start)))
-        let h = total / 3600
-        let m = (total % 3600) / 60
-        let s = total % 60
-        return h > 0
-            ? String(format: "%d:%02d:%02d", h, m, s)
-            : String(format: "%d:%02d", m, s)
+        format(seconds: max(0, Int(now.timeIntervalSince(start))))
+    }
+
+    /// Format a raw elapsed-seconds count as M:SS (or H:MM:SS past an hour). Split out from `elapsed` so a
+    /// caller with a MOVING-time value (e.g. a paused workout's frozen `activeElapsed`) can format it too.
+    static func format(seconds total: Int) -> String {
+        let t = max(0, total)
+        let h = t / 3600, m = (t % 3600) / 60, s = t % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
 }
 

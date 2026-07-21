@@ -26,6 +26,11 @@ enum ActiveWorkoutPersistence {
         var avgHr: Int
         var peakHr: Int
         var liveStrain: Double
+        /// Pause accounting so a relaunch mid-session restores the paused state (else the paused stretch
+        /// would be counted as active time). Optional so a snapshot written before pause shipped still
+        /// decodes (missing ⇒ never paused). `pauseStartedSec` non-nil ⇒ the session was paused when killed.
+        var pausedAccumulatedSec: Double? = nil
+        var pauseStartedSec: Int? = nil
     }
 
     /// The single `UserDefaults` key (JSON-encoded `Snapshot`). Namespaced like `moments`/`sleepMarks`.
@@ -47,6 +52,11 @@ enum ActiveWorkoutPersistence {
         // Drop any out-of-range persisted HR samples (a real bpm + a positive ts only) — never trust the
         // blob to be clean. Parity with the Android decoder's 1...300 bpm / ts > 0 gate.
         let samples = raw.samples.filter { $0.ts > 0 && (1...300).contains($0.bpm) }
+        // Sanitise the pause fields: a non-finite / negative accumulator becomes 0; a non-positive stored
+        // pause-start becomes nil (treated as "was running"), so a corrupt blob can't freeze a rehydrated
+        // session forever.
+        let pausedAccum = (raw.pausedAccumulatedSec).flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+        let pauseStarted = (raw.pauseStartedSec).flatMap { $0 > 0 ? $0 : nil }
         return Snapshot(
             startSec: raw.startSec,
             sport: raw.sport,
@@ -54,6 +64,8 @@ enum ActiveWorkoutPersistence {
             avgHr: max(0, raw.avgHr),
             peakHr: max(0, raw.peakHr),
             liveStrain: raw.liveStrain.isFinite ? max(0, raw.liveStrain) : 0,
+            pausedAccumulatedSec: pausedAccum,
+            pauseStartedSec: pauseStarted,
         )
     }
 
