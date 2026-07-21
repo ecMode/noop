@@ -2,6 +2,7 @@ import SwiftUI
 import StrandDesign
 import StrandAnalytics
 import WhoopStore
+import WhoopProtocol
 import Foundation
 #if canImport(MapKit)
 import MapKit
@@ -56,6 +57,9 @@ struct WorkoutDetailView: View {
     /// (`TrackTimeStore`) with HR averaged in. Empty when the run predates split timing or isn't a GPS run.
     @State private var splits: [RunSplit] = []
 
+    /// TEMP diagnostic: per-source counts behind the export, shown in the card's empty state so a
+    /// "nothing to export" that shouldn't be empty can be pinpointed to the source that came back empty.
+
     /// A ready-to-share `.tcx` file for this run (nil until built, or when the run has no GPS/HR to export).
     /// Credential-free Strava path: the file is the SAME timestamped TCX the auto-uploader builds, but handed
     /// to a Share Sheet so it can be uploaded manually via strava.com → Upload from file — no API app, no
@@ -83,6 +87,7 @@ struct WorkoutDetailView: View {
                        topBackground: liquidScaffoldSky()) {
             headerCard
             statStrip
+            stravaExportCard
             routeCard
             splitsCard
             hrCurveCard
@@ -138,18 +143,37 @@ struct WorkoutDetailView: View {
             computedSplits = RunSplits.compute(track: timed, hr: hr, unitMeters: unitMeters)
         }
 
+        // HR curve over the exact session window — a finer bucket than the 24h chart so a short run
+        // still reads as a curve, not a handful of points.
+        let buckets = await repo.workoutHrBuckets(from: row.startTs, to: row.endTs)
+        let points = buckets.map { TrendPoint(date: Date(timeIntervalSince1970: TimeInterval($0.ts)), value: $0.bpm) }
+
         // Build a shareable TCX for a credential-free Strava upload. Reuses the auto-uploader's exact
         // point-merge + writer (`StravaService.buildPoints` + `TCXBuilder.build`), so a manually-uploaded
         // file is byte-identical to what the API path would have sent. GPS present → a timestamped track
-        // with HR merged by second; GPS absent → an HR-only trace (still valid for an indoor run). No
-        // exportable samples → nil, and the toolbar action stays hidden (honest).
+        // with HR merged by second; GPS absent → an HR-only trace (still valid for an indoor run). HR falls
+        // back to the display buckets when the run has no raw per-second samples (imported / older runs), so
+        // the export works whenever the detail can draw *anything*. Nil only when there's truly no GPS or HR.
         let exportTrack: [(tMs: Int64, lat: Double, lon: Double)] = {
-            guard routePoints.count >= 2, let times, times.count >= 2 else { return [] }
-            // TrackTimeStore stores unix seconds; the TCX writer wants epoch milliseconds.
-            return zip(times, routePoints).map { (tMs: Int64($0) * 1000, lat: $1.lat, lon: $1.lon) }
+            guard routePoints.count >= 2 else { return [] }
+            if let times, times.count >= 2 {
+                // Real per-point capture times (TrackTimeStore stores unix seconds; TCX wants epoch ms).
+                return zip(times, routePoints).map { (tMs: Int64($0) * 1000, lat: $1.lat, lon: $1.lon) }
+            }
+            // No per-point times stored (a route recorded before the TrackTimeStore sidecar, or imported):
+            // synthesize evenly-spaced timestamps across the session window so every trackpoint carries a
+            // valid, monotonic <Time>. The route + total time + distance upload correctly; only per-point
+            // pace is smoothed to the session average. Better than refusing to export a real GPS run.
+            let startMs = Int64(row.startTs) * 1000
+            let spanMs = Int64(max(1, row.endTs - row.startTs)) * 1000
+            let n = routePoints.count
+            return routePoints.enumerated().map { i, p in
+                (tMs: startMs + spanMs * Int64(i) / Int64(n - 1), lat: p.lat, lon: p.lon)
+            }
         }()
+        let exportHR: [HRSample] = hr.isEmpty ? buckets.map { HRSample(ts: $0.ts, bpm: Int($0.bpm.rounded())) } : hr
         var exportFileURL: URL?
-        let tcxPoints = StravaService.buildPoints(hr: hr, track: exportTrack)
+        let tcxPoints = StravaService.buildPoints(hr: exportHR, track: exportTrack)
         if !tcxPoints.isEmpty {
             let tcx = TCXBuilder.build(
                 sport: row.sport,
@@ -160,11 +184,6 @@ struct WorkoutDetailView: View {
                 points: tcxPoints)
             exportFileURL = Self.writeTCXTemp(tcx, sport: row.sport, startTs: row.startTs)
         }
-
-        // HR curve over the exact session window — a finer bucket than the 24h chart so a short run
-        // still reads as a curve, not a handful of points.
-        let buckets = await repo.workoutHrBuckets(from: row.startTs, to: row.endTs)
-        let points = buckets.map { TrendPoint(date: Date(timeIntervalSince1970: TimeInterval($0.ts)), value: $0.bpm) }
 
         // Zones: prefer the imported per-workout percentages (a WHOOP-computed split), and only fall
         // back to deriving zone-minutes from the strap's own raw HR when the row has none — so we
@@ -298,6 +317,79 @@ struct WorkoutDetailView: View {
     /// The captured-route card: a MapKit map of the polyline with start/end markers, plus distance and
     /// pace read off the route. Shown ONLY when ≥2 points were captured — honest "no map" otherwise (a
     /// Mac with no GPS, denied permission, or a non-distance sport never produce a route).
+    /// Credential-free Strava upload: share the run's `.tcx` (built in `load()`) to Files / Mail / AirDrop,
+    /// then upload it at strava.com → Upload from file. A visible in-body button, NOT a toolbar item — the
+    /// macOS sheet toolbar renders a `ShareLink` unreliably. Hidden only when the run has no GPS or HR to export.
+    @ViewBuilder private var stravaExportCard: some View {
+        if loaded {
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                SectionHeader("Strava", overline: "Manual upload")
+                NoopCard {
+                    if let exportURL {
+                        #if os(macOS)
+                        // Desktop: a Save panel (defaults to Downloads). The macOS share menu has no
+                        // "save to disk" item, and a real file is what you upload at strava.com anyway.
+                        Button {
+                            Self.saveTCXToDisk(exportURL)
+                        } label: {
+                            exportButtonLabel(systemImage: "square.and.arrow.down", title: "Save TCX for Strava")
+                        }
+                        .buttonStyle(.plain)
+                        #else
+                        // iOS: the share sheet (Save to Files / AirDrop / Mail).
+                        ShareLink(item: exportURL) {
+                            exportButtonLabel(systemImage: "square.and.arrow.up", title: "Export TCX for Strava")
+                        }
+                        .buttonStyle(.plain)
+                        #endif
+                    } else {
+                        // Visible, honest empty state — the run reached the detail but had no GPS track and no
+                        // HR (raw samples OR display buckets), so there's nothing to serialize into a TCX.
+                        HStack(spacing: 10) {
+                            Image(systemName: "xmark.circle")
+                                .foregroundStyle(StrandPalette.textTertiary)
+                            Text("No GPS route or heart-rate data reached the export for this run.")
+                                .font(StrandFont.subhead)
+                                .foregroundStyle(StrandPalette.textTertiary)
+                            Spacer()
+                        }
+                    }
+                }
+                Text("Saves a .tcx of this run to share, then upload it at strava.com → Upload from file. No Strava API key or subscription needed.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func exportButtonLabel(systemImage: String, title: LocalizedStringKey) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .foregroundStyle(StrandPalette.effortColor)
+            Text(title)
+                .font(StrandFont.subhead)
+                .foregroundStyle(StrandPalette.textPrimary)
+            Spacer()
+        }
+        .contentShape(Rectangle())
+    }
+
+    #if os(macOS)
+    /// Desktop save: a standard Save panel, defaulting to Downloads, copies the temp `.tcx` to a location
+    /// the user picks. Sandbox-safe — the panel's powerbox grants write access to the chosen file (a direct
+    /// write to ~/Downloads would be blocked under the app sandbox).
+    private static func saveTCXToDisk(_ src: URL) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = src.lastPathComponent
+        panel.canCreateDirectories = true
+        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        guard panel.runModal() == .OK, let dst = panel.url else { return }
+        try? FileManager.default.removeItem(at: dst)
+        try? FileManager.default.copyItem(at: src, to: dst)
+    }
+    #endif
+
     @ViewBuilder private var routeCard: some View {
         if route.count >= 2 {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
