@@ -87,7 +87,6 @@ struct WorkoutDetailView: View {
                        topBackground: liquidScaffoldSky()) {
             headerCard
             statStrip
-            stravaExportCard
             routeCard
             splitsCard
             hrCurveCard
@@ -101,13 +100,23 @@ struct WorkoutDetailView: View {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Done") { dismiss() }
             }
-            // Share the run's TCX for a credential-free Strava upload (strava.com → Upload from file).
-            // Shown only when there's an actual GPS/HR trace to export — no fabricated empty file.
+            // Export the run's TCX for a credential-free Strava upload (strava.com → Upload from file).
+            // Shown only when there's an actual GPS/HR trace to export — no fabricated empty file. macOS uses
+            // a Save panel (defaults to Downloads); the share menu has no save-to-disk, and a Button renders
+            // reliably in the sheet toolbar where a ShareLink does not. iOS keeps the native share sheet.
             if let exportURL {
                 ToolbarItem(placement: .primaryAction) {
+                    #if os(macOS)
+                    Button {
+                        Self.saveTCXToDisk(exportURL)
+                    } label: {
+                        Label("Export TCX", systemImage: "square.and.arrow.down")
+                    }
+                    #else
                     ShareLink(item: exportURL) {
                         Label("Export TCX", systemImage: "square.and.arrow.up")
                     }
+                    #endif
                 }
             }
         }
@@ -325,64 +334,6 @@ struct WorkoutDetailView: View {
     /// The captured-route card: a MapKit map of the polyline with start/end markers, plus distance and
     /// pace read off the route. Shown ONLY when ≥2 points were captured — honest "no map" otherwise (a
     /// Mac with no GPS, denied permission, or a non-distance sport never produce a route).
-    /// Credential-free Strava upload: share the run's `.tcx` (built in `load()`) to Files / Mail / AirDrop,
-    /// then upload it at strava.com → Upload from file. A visible in-body button, NOT a toolbar item — the
-    /// macOS sheet toolbar renders a `ShareLink` unreliably. Hidden only when the run has no GPS or HR to export.
-    @ViewBuilder private var stravaExportCard: some View {
-        if loaded {
-            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                SectionHeader("Strava", overline: "Manual upload")
-                NoopCard {
-                    if let exportURL {
-                        #if os(macOS)
-                        // Desktop: a Save panel (defaults to Downloads). The macOS share menu has no
-                        // "save to disk" item, and a real file is what you upload at strava.com anyway.
-                        Button {
-                            Self.saveTCXToDisk(exportURL)
-                        } label: {
-                            exportButtonLabel(systemImage: "square.and.arrow.down", title: "Save TCX for Strava")
-                        }
-                        .buttonStyle(.plain)
-                        #else
-                        // iOS: the share sheet (Save to Files / AirDrop / Mail).
-                        ShareLink(item: exportURL) {
-                            exportButtonLabel(systemImage: "square.and.arrow.up", title: "Export TCX for Strava")
-                        }
-                        .buttonStyle(.plain)
-                        #endif
-                    } else {
-                        // Visible, honest empty state — the run reached the detail but had no GPS track and no
-                        // HR (raw samples OR display buckets), so there's nothing to serialize into a TCX.
-                        HStack(spacing: 10) {
-                            Image(systemName: "xmark.circle")
-                                .foregroundStyle(StrandPalette.textTertiary)
-                            Text("No GPS route or heart-rate data reached the export for this run.")
-                                .font(StrandFont.subhead)
-                                .foregroundStyle(StrandPalette.textTertiary)
-                            Spacer()
-                        }
-                    }
-                }
-                Text("Saves a .tcx of this run to share, then upload it at strava.com → Upload from file. No Strava API key or subscription needed.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    private func exportButtonLabel(systemImage: String, title: LocalizedStringKey) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: systemImage)
-                .foregroundStyle(StrandPalette.effortColor)
-            Text(title)
-                .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.textPrimary)
-            Spacer()
-        }
-        .contentShape(Rectangle())
-    }
-
     #if os(macOS)
     /// Desktop save: a standard Save panel, defaulting to Downloads, copies the temp `.tcx` to a location
     /// the user picks. Sandbox-safe — the panel's powerbox grants write access to the chosen file (a direct
