@@ -19,15 +19,19 @@ public struct RRInterval: Equatable, Codable {
 public extension Array where Element == RRInterval {
     /// Ascending by `ts`, GUARANTEED stable — same-second beats keep the relative order they came in.
     ///
-    /// Swift's `sorted(by:)` is explicitly documented as NOT stable, so an unstable sort anywhere
-    /// downstream could silently re-scramble a second's beats and, since RMSSD is built from successive
-    /// differences, reintroduce a bias. Decorating with the original offset makes the comparator TOTAL,
-    /// so stability is a property of this code rather than of the current stdlib implementation.
+    /// Swift's `sorted(by:)` is explicitly documented as NOT stable. Since #823 the store returns a
+    /// second's beats in EMISSION order, and RMSSD is built entirely from successive differences, so an
+    /// unstable sort anywhere downstream could silently re-scramble them and reintroduce exactly the
+    /// bias the store fix removes. Every analytics entry point re-sorts defensively ("the table read is
+    /// already ordered, but we don't assume it"), which is where that would happen.
     ///
-    /// NOTE (fork): upstream #830/34c66b66 also changed the STORE to return a second's beats in emission
-    /// order; that store fix is not yet ported here, so this stable sort currently preserves whatever the
-    /// table read returns (magnitude order within a second). Extracted from 34c66b66 so #977's gap-aware
-    /// RSA path can rely on a stable ts sort. (#830)
+    /// Decorating with the original offset makes the comparator TOTAL, so no two elements compare equal
+    /// and stability becomes a property of this code rather than of the current stdlib implementation.
+    /// (Swift's sort is timsort today and stable in practice — but that is unguaranteed, and a metric
+    /// that silently drifts if the stdlib changes is not one you can trust.)
+    ///
+    /// Kotlin needs no equivalent: `sortedBy` delegates to `java.util.Arrays.sort`, which is stable by
+    /// contract. This makes the twins match on paper as well as in behaviour.
     func sortedByTsStable() -> [RRInterval] {
         enumerated()
             .sorted { ($0.element.ts, $0.offset) < ($1.element.ts, $1.offset) }
