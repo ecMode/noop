@@ -857,6 +857,109 @@ final class SleepStagerTests: XCTestCase {
         XCTAssertLessThan(hrv!, 50, "ectopic spikes must be rejected before rMSSD")
     }
 
+    // MARK: - Nightly HRV signal-quality gate
+
+    /// Build a night of `kinds.count` back-to-back 5-min windows, one beat per second.
+    /// `.clean(amp)`   → beats alternate base±amp (successive diff 2·amp, all kept) → window RMSSD ≈ 2·amp.
+    /// `.gross`        → beats alternate 700/1100 ms: each lands >20% off its neighbours, so range+Malik
+    ///                   rejects essentially all of them — the pervasive-jitter shape of a corrupt night.
+    private enum WinKind { case clean(Int); case gross }
+    private func buildNight(_ kinds: [WinKind], base: Int = 900) -> (rr: [RRInterval], start: Int, end: Int) {
+        let start = 1000, windowS = 300
+        var rr: [RRInterval] = []
+        for (k, kind) in kinds.enumerated() {
+            for j in 0..<windowS {
+                let ts = start + k * windowS + j
+                let ms: Int
+                switch kind {
+                case .clean(let amp): ms = base + (j % 2 == 0 ? amp : -amp)
+                case .gross:          ms = (j % 2 == 0 ? 700 : 1100)
+                }
+                rr.append(RRInterval(ts: ts, rrMs: ms))
+            }
+        }
+        return (rr, start, start + kinds.count * windowS)
+    }
+
+    func testSessionAvgHRVKeepsCleanNightAndTracksVariability() {
+        // A clean night (no gross windows) is unaffected by the gate, and the returned HRV tracks the
+        // injected beat-to-beat variability — recover TWO different levels, not one (#194 discipline).
+        for amp in [15, 30] {
+            let n = buildNight([.clean(amp), .clean(amp), .clean(amp), .clean(amp)])
+            let hrv = SleepStager.sessionAvgHRV(start: n.start, end: n.end, rr: n.rr)
+            XCTAssertNotNil(hrv, "a clean night must yield an HRV")
+            // Alternating base±amp ⇒ every successive difference is 2·amp ⇒ RMSSD ≈ 2·amp.
+            XCTAssertEqual(hrv!, Double(2 * amp), accuracy: 1.0,
+                           "clean-night HRV must equal the injected 2·amp variability (amp=\(amp))")
+        }
+    }
+
+    func testSessionAvgHRVRecoversLowHRVFromCorruptNight() {
+        // Most of the night (4 of 6 windows) is pervasive jitter — the drinking-night shape that on real
+        // data inflated the whole-night average to ~120–170 ms. But two windows carry a real, LOW-variability
+        // signal (amp 10 ⇒ RMSSD ≈ 20 ms). The gate must RECOVER that low value from the clean windows —
+        // not the inflated average, and not nil — so the user sees a correctly low HRV → low Charge (as the
+        // retail app does), instead of a fabricated high one.
+        let n = buildNight([.gross, .gross, .clean(10), .gross, .gross, .clean(10)])
+        let hrv = SleepStager.sessionAvgHRV(start: n.start, end: n.end, rr: n.rr)
+        XCTAssertNotNil(hrv, "a corrupt night with some clean signal must still be measured, not discarded")
+        XCTAssertEqual(hrv!, 20.0, accuracy: 2.0, "corrupt-night HRV must come from the clean windows (2·10)")
+    }
+
+    func testSessionAvgHRVNilOnlyWhenNoCleanSignalAtAll() {
+        // The genuinely-unmeasurable extreme: every window is jitter, no clean window survives. Only then
+        // is the HRV nil (→ Recovery withheld upstream, no fabricated Charge). This is far worse than a real
+        // drinking night, which keeps 5–13% clean windows.
+        let n = buildNight([.gross, .gross, .gross, .gross])
+        XCTAssertNil(SleepStager.sessionAvgHRV(start: n.start, end: n.end, rr: n.rr),
+                     "a night with no clean window at all yields no HRV")
+    }
+
+    func testSessionAvgHRVKeepsNightWithMinorityCorruptWindows() {
+        // Only a minority (2 of 6) of windows are corrupt — below the suppression threshold — so the night
+        // is still measured from its clean windows rather than thrown away. The gross windows drop out on
+        // their own (their beats are rejected), so the result reflects the clean windows' variability.
+        let n = buildNight([.clean(30), .gross, .clean(30), .clean(30), .gross, .clean(30)])
+        let hrv = SleepStager.sessionAvgHRV(start: n.start, end: n.end, rr: n.rr)
+        XCTAssertNotNil(hrv, "a mostly-clean night must still be measured, not suppressed")
+        XCTAssertEqual(hrv!, 60.0, accuracy: 2.0, "kept night's HRV comes from its clean windows (2·30)")
+    }
+
+    /// Build a session, one HR sample + one R-R interval per second, from per-window (bpm, rrMs) specs.
+    private func buildHrRrNight(_ specs: [(bpm: Int, rr: Int)]) -> (hr: [HRSample], rr: [RRInterval], start: Int, end: Int) {
+        let windowS = 300, start = 1000
+        var hr: [HRSample] = []
+        var rr: [RRInterval] = []
+        for (k, s) in specs.enumerated() {
+            for j in 0..<windowS {
+                let ts = start + k * windowS + j
+                hr.append(HRSample(ts: ts, bpm: s.bpm))
+                rr.append(RRInterval(ts: ts, rrMs: s.rr))
+            }
+        }
+        return (hr, rr, start, start + specs.count * windowS)
+    }
+
+    func testSessionRestingHRDropsSpuriousLowWindowKeepsGenuineLow() {
+        // Window A: HR sample reads 33 bpm but its beats imply ~67 (rr 900 ms) — a beat-detection artifact,
+        // the shape of the drinking-night RHR bug. Window B: HR sample 45 with beats that AGREE (rr 1333 ms
+        // ⇒ 45 bpm) — a genuine low. C/D: normal. Ungated the min is the fake 33; R-R-gated it must drop the
+        // window that disagrees with its own beats and report the true low, 45.
+        let n = buildHrRrNight([(33, 900), (45, 1333), (55, 1091), (60, 1000)])
+        XCTAssertEqual(SleepStager.sessionRestingHR(start: n.start, end: n.end, hr: n.hr), 33,
+                       "ungated (the sleep-detection guard's view) still takes the raw min")
+        XCTAssertEqual(SleepStager.sessionRestingHR(start: n.start, end: n.end, hr: n.hr, rr: n.rr), 45,
+                       "R-R-gated RHR drops the sample that contradicts its beats and reports the genuine low")
+    }
+
+    func testSessionRestingHRUnchangedWhenHRAndBeatsAgree() {
+        // Every window's HR sample matches its beats (a clean night), so nothing is dropped and the gated
+        // value equals the raw min (44) — byte-identical to before the gate.
+        let n = buildHrRrNight([(48, 1250), (44, 1364), (46, 1304), (45, 1333)])
+        XCTAssertEqual(SleepStager.sessionRestingHR(start: n.start, end: n.end, hr: n.hr, rr: n.rr), 44,
+                       "when HR and beats agree everywhere, the gated RHR equals the ungated min")
+    }
+
     // MARK: - Helper robustness
 
     func testConvolveReflectShortInputDoesNotCrash() {

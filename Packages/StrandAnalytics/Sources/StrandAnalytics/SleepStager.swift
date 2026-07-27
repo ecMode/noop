@@ -982,8 +982,11 @@ public enum SleepStager {
                                hr: hrS, rr: rrS, resp: respS)
             let eff = efficiency(start: p.start, end: p.end, stages: stages)
             let avgHrv = sessionAvgHRV(start: p.start, end: p.end, rr: rrS)
+            // Reported RHR is R-R-gated: on a corrupt night its spuriously-low windows are excluded so the
+            // shown value is the true low HR, not ~33. The guard above deliberately used the ungated `resting`.
+            let reportedResting = sessionRestingHR(start: p.start, end: p.end, hr: hrS, rr: rrS)
             sessions.append(SleepSession(start: p.start, end: p.end, efficiency: eff,
-                                         stages: stages, restingHR: resting, avgHRV: avgHrv))
+                                         stages: stages, restingHR: reportedResting, avgHRV: avgHrv))
             traceSink?(GateTrace.runLine(index: runIndex, startTs: p.start, endTs: p.end,
                 verdict: .kept, gate: "accepted",
                 detail: "spanMin=\(spanMin) eff=\(round2(eff)) restingHR=\(resting ?? -1) daytime=\(isDaytime)"))
@@ -1993,15 +1996,31 @@ public enum SleepStager {
     // MARK: - Per-session HR / HRV
 
     /// Lowest 5-min rolling-mean HR during the session (bpm), or nil.
-    static func sessionRestingHR(start: Int, end: Int, hr: [HRSample]) -> Int? {
+    ///
+    /// `rr` (default empty) gates the reported value against a beat-detection artifact: the jitter that
+    /// inflates HRV on a restless night also makes the strap emit spuriously-LOW HR samples — an impossible
+    /// ~33 bpm in a window whose own R-R beats imply ~75 — and this min would otherwise report them. When
+    /// `rr` is supplied, a window is dropped from the min if its mean HR sits below
+    /// `restingHRSpuriousLowRatio` of the HR its own beats imply; a genuine low window (where HR sample and
+    /// R-R AGREE) is kept, so RHR reads the true low HR (~45), not the artifact and not an over-corrected
+    /// high value. Passing no `rr` keeps the raw, ungated min — the sleep-detection guard uses that (a dip
+    /// is a dip, even if noisy); only the value shown to the user is gated. On a clean night HR and R-R
+    /// agree everywhere, so nothing is dropped and the result is byte-identical to the ungated min.
+    static func sessionRestingHR(start: Int, end: Int, hr: [HRSample], rr: [RRInterval] = []) -> Int? {
         let seg = hr.filter { $0.ts >= start && $0.ts <= end }
         guard !seg.isEmpty else { return nil }
+        let rrSeg = rr.filter { $0.ts >= start && $0.ts <= end }
         let windowS = 5 * 60
         var means: [Double] = []
         var t = start
         while t < end {
             let win = seg.filter { $0.ts >= t && $0.ts < t + windowS }
-            if !win.isEmpty { means.append(Double(win.reduce(0) { $0 + $1.bpm }) / Double(win.count)) }
+            if !win.isEmpty {
+                let hm = Double(win.reduce(0) { $0 + $1.bpm }) / Double(win.count)
+                if !isSpuriousLowHRWindow(hrMean: hm, rr: rrSeg, from: t, to: t + windowS) {
+                    means.append(hm)
+                }
+            }
             t += windowS
         }
         if let m = means.min() { return Int(m.rounded()) }
@@ -2009,19 +2028,87 @@ public enum SleepStager {
         return Int(all.rounded())
     }
 
-    /// One 5-min HRV window: its start ts, the sleep stage at its center, the clean-beat count, and the
-    /// window RMSSD (nil when <2 clean beats). Drives both `sessionAvgHRV` and the HRV test-mode trace. (#141)
+    /// True when a window's mean HR sample sits far below the HR its OWN in-window R-R beats imply — the
+    /// low reading is a beat-detection artifact, not a real dip. Uses the range-filtered R-R median (robust
+    /// to the jitter). Returns false (not spurious) when there are too few beats to compare, so a window is
+    /// only ever dropped on positive evidence of inconsistency.
+    static func isSpuriousLowHRWindow(hrMean: Double, rr: [RRInterval], from: Int, to: Int) -> Bool {
+        let ranged = HRVAnalyzer.rangeFilter(rr.filter { $0.ts >= from && $0.ts < to }.map { Double($0.rrMs) })
+        guard ranged.count >= minWindowBeatsForQuality else { return false }
+        let sorted = ranged.sorted()
+        let mid = sorted.count / 2
+        let medRR = sorted.count % 2 == 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
+        guard medRR > 0 else { return false }
+        return hrMean < (60000.0 / medRR) * restingHRSpuriousLowRatio
+    }
+
+    /// One 5-min HRV window: its start ts, the sleep stage at its center, the raw beat count (before
+    /// cleaning), the clean-beat count, and the window RMSSD (nil when <2 clean beats). Drives both
+    /// `sessionAvgHRV` and the HRV test-mode trace. (#141)
     public struct HrvWindow: Sendable {
         public let startTs: Int
         public let stage: String
+        public let rawBeats: Int
         public let cleanBeats: Int
         public let rmssd: Double?
     }
 
+    // MARK: - Nightly HRV signal-quality gate
+    // PPG-derived 0x2A37 R-R degrades on restless nights (motion, and especially alcohol vasodilation,
+    // which broadens the optical pulse so the strap can't time each peak). The beat COUNT and average HR
+    // stay right, but individual beats jitter — a large fraction land >20% off their neighbours, so
+    // range+Malik cleaning drops a big share of that window's beats. RMSSD is built from SUCCESSIVE
+    // differences, so averaging those jittery windows INFLATES the session HRV: a real drinking night
+    // reads ~120–170 ms against a ~45 ms baseline and, because HRV is the dominant Recovery term,
+    // fabricates a ~100 "Charge" on a night the user actually recovered poorly.
+    //
+    // The fix RECOVERS the true value rather than discarding the night: the clean stretches of even a bad
+    // night still carry the real (low, alcohol-suppressed) HRV. So when most of the night's windows are
+    // NOT clean, compute the HRV from the clean windows only — which reads ~20–35 ms (a correctly LOW
+    // Charge, matching what the retail app shows), not the inflated whole-night average. A night that is
+    // already mostly clean keeps every window, so its HRV is byte-identical to before this gate. nil only
+    // survives when not a single clean window exists. Verified on real 5/MG-era nights: three drinking
+    // nights recover to 24/37/24 ms (from stored 169/118/124); sober nights are unchanged.
+    /// A window is "clean" when at most this fraction of its raw beats were dropped by range+Malik cleaning.
+    static let windowCleanRejectionMax = 0.08
+    /// Windows with fewer raw beats than this neither vote on night quality nor feed a corrupt-night
+    /// recovery — too few beats to judge or to trust.
+    static let minWindowBeatsForQuality = 8
+    /// A night is "corrupt" (compute HRV from clean windows only) when more than this fraction of its
+    /// judged windows are NOT clean. Below it, the night uses every window, unchanged.
+    static let corruptNightWindowFraction = 0.5
+
+    /// Resting-HR guard: a 5-min window is a spurious-low HR artifact when its mean HR sample sits below
+    /// this fraction of the HR its OWN R-R beats imply (e.g. a ~33 bpm reading where the intervals say ~75).
+    /// Such a window is dropped from the resting-HR min; a window where the two AGREE (a genuine low) is kept.
+    static let restingHRSpuriousLowRatio = 0.75
+
+    /// A 5-min window is trustworthy: it has enough beats to judge and at most `windowCleanRejectionMax`
+    /// of them were dropped by range+Malik cleaning (i.e. it is not pervasive beat-timing jitter).
+    static func isCleanWindow(_ w: HrvWindow) -> Bool {
+        guard w.rawBeats >= minWindowBeatsForQuality else { return false }
+        return Double(w.rawBeats - w.cleanBeats) / Double(w.rawBeats) <= windowCleanRejectionMax
+    }
+
+    /// True when most of the night's judged windows are NOT clean — the drinking-night / restless shape.
+    /// On such a night the HRV mean and the resting-HR min are taken over the clean windows only, so the
+    /// pervasive jitter can neither inflate the HRV nor plant a spurious low-HR window in the RHR.
+    static func nightIsCorrupt(_ windows: [HrvWindow]) -> Bool {
+        let judged = windows.filter { $0.rawBeats >= minWindowBeatsForQuality }
+        guard !judged.isEmpty else { return false }
+        return Double(judged.filter { !isCleanWindow($0) }.count) / Double(judged.count) > corruptNightWindowFraction
+    }
+
     /// Mean RMSSD over 5-min tumbling windows across the session (ms), or nil.
-    /// Uses the same range-filter + ≥2-valid-interval rule as hrv.rmssd().
+    /// Uses the same range-filter + ≥2-valid-interval rule as hrv.rmssd(). On a night whose windows are
+    /// mostly not clean, the mean is taken over the clean windows only, so pervasive beat-timing jitter
+    /// can't inflate the HRV (see the signal-quality gate above). nil only when no window has RMSSD.
     static func sessionAvgHRV(start: Int, end: Int, rr: [RRInterval]) -> Double? {
-        let vals = sessionHrvWindows(start: start, end: end, rr: rr, stages: []).compactMap { $0.rmssd }
+        let windows = sessionHrvWindows(start: start, end: end, rr: rr, stages: [])
+        // When most judged windows are jittery, recover from the clean ones only; otherwise keep every
+        // window so a normal night's HRV is byte-identical to before this gate.
+        let source = nightIsCorrupt(windows) ? windows.filter(isCleanWindow) : windows
+        let vals = source.compactMap { $0.rmssd }
         return vals.isEmpty ? nil : vals.reduce(0, +) / Double(vals.count)
     }
 
@@ -2050,7 +2137,8 @@ public enum SleepStager {
             let rmssd: Double? = (cleaned.nn.count >= 2) ? HRVAnalyzer.rmssdGapAware(cleaned.nn, cleaned.contiguous) : nil
             let center = t + windowS / 2
             let stage = stages.first { center >= $0.start && center < $0.end }?.stage ?? "?"
-            out.append(HrvWindow(startTs: t, stage: stage, cleanBeats: cleaned.nn.count, rmssd: rmssd))
+            out.append(HrvWindow(startTs: t, stage: stage, rawBeats: bucket.count,
+                                 cleanBeats: cleaned.nn.count, rmssd: rmssd))
             t += windowS
         }
         return out
