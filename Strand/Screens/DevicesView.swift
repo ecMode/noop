@@ -146,7 +146,14 @@ private struct DevicesContent: View {
                     // Same Test Centre → Connection gate as the reboot probe, minus the 4.0-only clause.
                     onExtendedBatteryProbe: (device.status == .active && live.connected
                                              && SourceCoordinator.isWhoop(device)
-                                             && TestCentre.active(.connection)) ? { batteryProbeTarget = device } : nil)
+                                             && TestCentre.active(.connection)) ? { batteryProbeTarget = device } : nil,
+                    // Stop an offload already in flight. Offered ONLY while one is running on this
+                    // strap — not a Test Centre probe but an ordinary escape hatch, because until now
+                    // a long drain could only be ended by the 15-minute timeout or walking out of
+                    // range. Nothing is lost: unacked records stay on the strap.
+                    onAbortSync: (device.status == .active && live.connected && live.backfilling
+                                  && SourceCoordinator.isWhoop(device))
+                        ? { model.ble.abortBackfill() } : nil)
                     .staggeredAppear(index: idx)
             }
 
@@ -429,6 +436,7 @@ private struct DeviceCard: View {
     var onRebootProbe: (() -> Void)? = nil
     /// #592 extended-battery opcode probe (Test Centre → Connection, both WHOOP families). Read-only.
     var onExtendedBatteryProbe: (() -> Void)? = nil
+    var onAbortSync: (() -> Void)? = nil
     /// Removed-section affordances (re-add as active / delete its data).
     var onReAdd: (() -> Void)? = nil
     var onDeleteData: (() -> Void)? = nil
@@ -666,6 +674,11 @@ private struct DeviceCard: View {
                 // BLE link). Confirmation-gated by the parent. (#166)
                 if isLiveConnected, SourceCoordinator.isWhoop(device), let onReboot {
                     Button { onReboot() } label: { Label("Restart strap…", systemImage: "arrow.clockwise") }
+                }
+                // Stop a sync that is part-way through. Present only while this strap is actually
+                // offloading; the parent owns that condition.
+                if let onAbortSync {
+                    Button { onAbortSync() } label: { Label("Stop sync", systemImage: "stop.circle") }
                 }
                 // 4.0 reboot probe (RE): only present when the parent passed a closure (Test Centre →
                 // Connection on + a live WHOOP 4.0). Finds the real reboot frame the 4.0 accepts (#235).

@@ -46,16 +46,6 @@
     <string name="action_log_journal">记录日志</string>
     <string name="action_breathe">深呼吸</string>
     <string name="today_latest_workouts">近期运动</string>
-    <string name="today_customize_title">自定义“今天”</string>
-    <string name="today_customize_action">自定义</string>
-    <string name="today_customize_description">重新排序已显示内容，或将某个部分移至“已隐藏”而不删除。</string>
-    <string name="today_customize_shown">已显示</string>
-    <string name="today_customize_hidden">已隐藏</string>
-    <string name="today_customize_nothing_hidden">没有隐藏项目</string>
-    <string name="today_customize_move_up">上移%1$s</string>
-    <string name="today_customize_move_down">下移%1$s</string>
-    <string name="today_customize_hide">隐藏%1$s</string>
-    <string name="today_customize_show">显示%1$s</string>
     <string name="terms_title">在使用 NOOP 之前</string>
     <string name="terms_subtitle">请仔细阅读以下要点，并确认每一项声明。</string>
     <string name="terms_point_independent_head">独立开发：与 WHOOP 无关</string>
@@ -377,6 +367,10 @@
     <string name="l10n_devices_screen_battery_4a9be042">设备电量</string>
     <string name="l10n_devices_screen_battery_clamped_2494c8c9">电量 %1$s%%</string>
     <string name="l10n_devices_screen_cancel_77dfd213">取消</string>
+    <string name="l10n_devices_screen_feature_flag_probe_761_re_21241d68">功能标志探测（#761 RE）…</string>
+    <string name="l10n_devices_screen_stop_sync_4a1f2b6e">停止同步</string>
+    <string name="l10n_devices_screen_feature_flag_probe_result_761_c50ef4d4">功能标志探测结果（#761）</string>
+    <string name="l10n_devices_screen_feature_flag_probe_explainer_58eec30f">请求手环列出其固件已知的功能标志名称：先发送 START_FF_KEY_EXCHANGE (0x75)，再重复发送 SEND_NEXT_FF (0x76)，直到手环表示已列完。只读——不会写入任何标志值，本探测也从不发送 SET 命令。列表会显示在此处并写入手环日志。</string>
     <string name="l10n_devices_screen_clamped_1f39cebb">%1$s%%</string>
     <string name="l10n_devices_screen_device_name_79d7a157">设备名称</string>
     <string name="l10n_devices_screen_give_device_brand_device_model_a_7a15585c">为您的 %1$s %2$s 起一个好记的名字。</string>
@@ -1645,4 +1639,10 @@
     <string name="l10n_data_sources_screen_last_shared_6bf8389c">"上次分享 "</string>
     <string name="l10n_data_sources_screen_sharing_paused_health_connect_permission_was_e8950315">分享已暂停——Health Connect 权限已被撤销。点按以重新授予。</string>
     <string name="l10n_data_sources_screen_last_share_didn_t_finish_noop_0d6c27f0">上次分享未完成——NOOP 将自动重试。</string>
+
+    <!-- 升级电量提醒（临界电量 + 睡前守护）。 -->
+    <string name="battery_critical_title">请立即为 WHOOP 充电</string>
+    <string name="battery_critical_body">剩余 %1$d%%。手环在约 10%% 时就会停止记录——不充电就无法记录今晚。</string>
+    <string name="battery_bedtime_title">撑不过今晚</string>
+    <string name="battery_bedtime_body">还能记录 %1$s，但今晚约需 %2$s。请在睡前充电。</string>
 </resources>
