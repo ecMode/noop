@@ -59318,6 +59318,59 @@
         }
       }
     },
+    "From Apple Health": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aus Apple Health"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Desde Apple Health"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Depuis Apple Health"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Da Apple Health"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Do Apple Health"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Из Apple Health"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "来自 Apple 健康"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "來自 Apple 健康"
+          }
+        }
+      }
+    },
     "From strap HR": {
       "localizations": {
         "de": {
@@ -153385,6 +153438,59 @@
           "stringUnit": {
             "state": "translated",
             "value": "已放大，拖動以平移"
+          }
+        }
+      }
+    },
+    "\\(Int(importedML.rounded())) millilitres from Apple Health. Edit it in the app that logged it.": {
+      "extractionState": "manual",
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\\(Int(importedML.rounded())) Milliliter aus Apple Health. Bearbeite den Eintrag in der App, die ihn erfasst hat."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\\(Int(importedML.rounded())) mililitros desde Apple Health. Edítalo en la app que lo registró."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\\(Int(importedML.rounded())) millilitres depuis Apple Health. Modifiez-le dans l’app qui l’a enregistré."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\\(Int(importedML.rounded())) millilitri da Apple Health. Modificalo nell’app che l’ha registrato."
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\\(Int(importedML.rounded())) mililitros do Apple Health. Edite-o na app que o registou."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "\\(Int(importedML.rounded())) мл из Apple Health. Измените запись в приложении, которое её создало."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "来自 Apple 健康的 \\(Int(importedML.rounded())) 毫升。请在记录它的 App 中修改。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "來自 Apple 健康的 \\(Int(importedML.rounded())) 毫升。請在記錄它的 App 中修改。"
           }
         }
       }
