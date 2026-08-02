@@ -16,6 +16,25 @@ public struct RRInterval: Equatable, Codable {
     public init(ts: Int, rrMs: Int) { self.ts = ts; self.rrMs = rrMs }
 }
 
+public extension Array where Element == RRInterval {
+    /// Ascending by `ts`, GUARANTEED stable — same-second beats keep the relative order they came in.
+    ///
+    /// Swift's `sorted(by:)` is explicitly documented as NOT stable, so an unstable sort anywhere
+    /// downstream could silently re-scramble a second's beats and, since RMSSD is built from successive
+    /// differences, reintroduce a bias. Decorating with the original offset makes the comparator TOTAL,
+    /// so stability is a property of this code rather than of the current stdlib implementation.
+    ///
+    /// NOTE (fork): upstream #830/34c66b66 also changed the STORE to return a second's beats in emission
+    /// order; that store fix is not yet ported here, so this stable sort currently preserves whatever the
+    /// table read returns (magnitude order within a second). Extracted from 34c66b66 so #977's gap-aware
+    /// RSA path can rely on a stable ts sort. (#830)
+    func sortedByTsStable() -> [RRInterval] {
+        enumerated()
+            .sorted { ($0.element.ts, $0.offset) < ($1.element.ts, $1.offset) }
+            .map(\.element)
+    }
+}
+
 public struct WhoopEvent: Equatable, Codable {
     public let ts: Int          // real unix seconds (event RTC; never offset)
     public let kind: String
