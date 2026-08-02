@@ -167920,6 +167920,110 @@
           }
         }
       }
+    },
+    "No live heart rate or synced history yet this session.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Noch keine Live-Herzfrequenz und kein synchronisierter Verlauf in dieser Sitzung."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aún no hay frecuencia cardíaca en vivo ni historial sincronizado en esta sesión."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aucune fréquence cardiaque en direct ni historique synchronisé durant cette session."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ancora nessuna frequenza cardiaca in diretta né cronologia sincronizzata in questa sessione."
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ainda não há frequência cardíaca em direto nem histórico sincronizado nesta sessão."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Пока нет ни пульса в реальном времени, ни синхронизированной истории в этой сессии."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本次连接尚无实时心率或已同步的历史记录。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本次連接尚無即時心率或已同步的歷史記錄。"
+          }
+        }
+      }
+    },
+    "Connected. No live heart rate or synced history yet this session.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verbunden. Noch keine Live-Herzfrequenz und kein synchronisierter Verlauf in dieser Sitzung."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Conectado. Aún no hay frecuencia cardíaca en vivo ni historial sincronizado en esta sesión."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connecté. Aucune fréquence cardiaque en direct ni historique synchronisé durant cette session."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Collegata. Ancora nessuna frequenza cardiaca in diretta né cronologia sincronizzata in questa sessione."
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ligado. Ainda não há frequência cardíaca em direto nem histórico sincronizado nesta sessão."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Подключено. Пока нет ни пульса в реальном времени, ни синхронизированной истории в этой сессии."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已连接。本次连接尚无实时心率或已同步的历史记录。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已連接。本次連接尚無即時心率或已同步的歷史記錄。"
+          }
+        }
+      }
     }
   },
   "version": "1.0"
