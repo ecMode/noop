@@ -154,6 +154,13 @@ struct WorkoutDetailView: View {
             let timed = zip(times, routePoints).map { (t: Double($0), pt: $1) }
             let unitMeters = unitSystem == .imperial ? 1609.344 : 1000.0
             computedSplits = RunSplits.compute(track: timed, hr: hr, unitMeters: unitMeters)
+            // Backfill splits for a run recorded before they were persisted: its route + times live in the
+            // on-device sidecars (which the local-access API can't read), but its DB row has no splitsJSON.
+            // Persist the canonical (km) splits once so opening a past run makes it API-visible. Guarded on
+            // `row.splitsJSON == nil` → a true one-time write per run; the display splits above are unaffected.
+            if row.splitsJSON == nil, let json = RunSplits.canonicalJSON(track: timed, hr: hr) {
+                await repo.updateWorkoutSplits(startTs: row.startTs, sport: row.sport, splitsJSON: json)
+            }
         }
 
         // HR curve over the exact session window — a finer bucket than the 24h chart so a short run

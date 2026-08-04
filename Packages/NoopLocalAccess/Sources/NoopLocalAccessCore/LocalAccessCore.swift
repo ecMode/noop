@@ -167,6 +167,7 @@ public struct WorkoutRow: Equatable, Sendable {
     public let distanceM: Double?
     public let zonesJSON: String?
     public let notes: String?
+    public let splitsJSON: String?
 }
 
 public struct StorageStats: Equatable, Sendable {
@@ -278,7 +279,7 @@ public final class ReadonlyNoopStore {
         return try dbQueue.read { db in
             try Row.fetchAll(db, sql: """
                 SELECT startTs, endTs, sport, source, durationS, energyKcal, avgHr, maxHr,
-                       strain, distanceM, zonesJSON, notes
+                       strain, distanceM, zonesJSON, notes, splitsJSON
                 FROM workout
                 WHERE deviceId = ? AND startTs >= ? AND startTs <= ?
                 ORDER BY startTs ASC LIMIT ?
@@ -289,7 +290,7 @@ public final class ReadonlyNoopStore {
                                energyKcal: $0["energyKcal"], avgHr: $0["avgHr"],
                                maxHr: $0["maxHr"], strain: $0["strain"],
                                distanceM: $0["distanceM"], zonesJSON: $0["zonesJSON"],
-                               notes: $0["notes"])
+                               notes: $0["notes"], splitsJSON: $0["splitsJSON"])
                 }
         }
     }
@@ -668,7 +669,21 @@ private func workoutJSON(_ row: WorkoutRow) -> JSONValue {
         "distanceM": optionalDouble(row.distanceM),
         "hasZones": .bool(row.zonesJSON != nil),
         "hasNotes": .bool(row.notes != nil),
+        // Per-mile/km splits (canonical km cut) inlined verbatim when the run persisted them; .null
+        // otherwise (non-GPS runs, or older runs not yet reopened to backfill). distanceM + paceSecPerKm
+        // in each split make the unit unambiguous.
+        "splits": parsedSplits(row.splitsJSON),
     ])
+}
+
+/// Parse the stored splits blob into the export JSON. Passes the array through verbatim (the writer's
+/// schema is the contract); .null when absent or malformed so a bad blob degrades to "no splits" rather
+/// than failing the whole workout.
+private func parsedSplits(_ json: String?) -> JSONValue {
+    guard let json, let data = json.data(using: .utf8),
+          let value = try? JSONDecoder().decode(JSONValue.self, from: data),
+          case .array = value else { return .null }
+    return value
 }
 
 private func timestampJSON(_ ts: Int?, now: Date) -> JSONValue {

@@ -67,7 +67,7 @@ enum TemporaryDatabase {
                 deviceId TEXT NOT NULL, startTs INTEGER NOT NULL, endTs INTEGER NOT NULL,
                 sport TEXT NOT NULL, source TEXT NOT NULL, durationS DOUBLE, energyKcal DOUBLE,
                 avgHr INTEGER, maxHr INTEGER, strain DOUBLE, distanceM DOUBLE, zonesJSON TEXT,
-                notes TEXT, PRIMARY KEY(deviceId, startTs, sport)
+                notes TEXT, splitsJSON TEXT, PRIMARY KEY(deviceId, startTs, sport)
             )
             """)
         try db.execute(sql: "CREATE TABLE hrSample(deviceId TEXT NOT NULL, ts INTEGER NOT NULL, bpm INTEGER NOT NULL, PRIMARY KEY(deviceId, ts))")
@@ -99,8 +99,9 @@ enum TemporaryDatabase {
             VALUES ('my-whoop', 1000, 2000, 91, 48, 72)
             """)
         try db.execute(sql: """
-            INSERT INTO workout(deviceId, startTs, endTs, sport, source, durationS, energyKcal, avgHr, maxHr, strain)
-            VALUES ('my-whoop', 3000, 4800, 'run', 'whoop', 1800, 310, 140, 171, 8.5)
+            INSERT INTO workout(deviceId, startTs, endTs, sport, source, durationS, energyKcal, avgHr, maxHr, strain, splitsJSON)
+            VALUES ('my-whoop', 3000, 4800, 'run', 'whoop', 1800, 310, 140, 171, 8.5,
+                    '[{"avgHr":150,"distanceM":1000,"elapsedSec":300,"index":1,"paceSecPerKm":300},{"distanceM":500,"elapsedSec":160,"index":2,"paceSecPerKm":320}]')
             """)
         try db.execute(sql: "INSERT INTO hrSample(deviceId, ts, bpm) VALUES ('my-whoop', 100, 70), ('my-whoop', 101, 72)")
         try db.execute(sql: "INSERT INTO ppgHrSample(deviceId, ts, bpm, conf) VALUES ('my-whoop', 102, 73.2, 0.8)")

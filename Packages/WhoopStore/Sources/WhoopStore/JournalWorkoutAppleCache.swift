@@ -40,13 +40,16 @@ public struct WorkoutRow: Equatable, Codable {
     public let distanceM: Double?
     public let zonesJSON: String?
     public let notes: String?
+    /// Verbatim JSON of this run's canonical (km-cut) per-split array, or nil for a non-GPS / older
+    /// workout. Trailing default so existing call sites are untouched — only the GPS save path sets it.
+    public let splitsJSON: String?
     public init(startTs: Int, endTs: Int, sport: String, source: String, durationS: Double?,
                 energyKcal: Double?, avgHr: Int?, maxHr: Int?, strain: Double?, distanceM: Double?,
-                zonesJSON: String?, notes: String?) {
+                zonesJSON: String?, notes: String?, splitsJSON: String? = nil) {
         self.startTs = startTs; self.endTs = endTs; self.sport = sport; self.source = source
         self.durationS = durationS; self.energyKcal = energyKcal; self.avgHr = avgHr
         self.maxHr = maxHr; self.strain = strain; self.distanceM = distanceM
-        self.zonesJSON = zonesJSON; self.notes = notes
+        self.zonesJSON = zonesJSON; self.notes = notes; self.splitsJSON = splitsJSON
     }
 }
 
@@ -150,8 +153,8 @@ extension WhoopStore {
                 try db.execute(sql: """
                     INSERT INTO workout
                         (deviceId, startTs, endTs, sport, source, durationS, energyKcal,
-                         avgHr, maxHr, strain, distanceM, zonesJSON, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         avgHr, maxHr, strain, distanceM, zonesJSON, notes, splitsJSON)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(deviceId, startTs, sport) DO UPDATE SET
                         endTs = excluded.endTs,
                         source = excluded.source,
@@ -162,10 +165,16 @@ extension WhoopStore {
                         strain = excluded.strain,
                         distanceM = excluded.distanceM,
                         zonesJSON = excluded.zonesJSON,
-                        notes = excluded.notes
+                        notes = excluded.notes,
+                        -- Only the two split-aware writers (the GPS save path + the detail-screen backfill)
+                        -- ever carry splitsJSON; every other workout upsert (rescore, edit, inbound sync)
+                        -- rebuilds the row oblivious to it. COALESCE preserves stored splits when the
+                        -- incoming row omits them, so those paths can't silently wipe a run's splits. An
+                        -- explicit clear goes through updateWorkoutSplits, not here.
+                        splitsJSON = COALESCE(excluded.splitsJSON, splitsJSON)
                     """, arguments: [deviceId, r.startTs, r.endTs, r.sport, r.source, r.durationS,
                                      r.energyKcal, r.avgHr, r.maxHr, r.strain, r.distanceM,
-                                     r.zonesJSON, r.notes])
+                                     r.zonesJSON, r.notes, r.splitsJSON])
                 n += db.changesCount
             }
             return n
@@ -175,6 +184,25 @@ extension WhoopStore {
         // values should still (re)assert the CloudKit record.
         emitChanges(rows.map { StoreChange.workout(deviceId: deviceId, startTs: $0.startTs, sport: $0.sport, isDelete: false) })
         return changed
+    }
+
+    /// Set just the splits JSON on an existing workout (the detail-screen backfill for a run recorded
+    /// before splits were persisted). Natural key (deviceId, startTs, sport). No-op if the row is absent.
+    /// Only touches `splitsJSON`, so a concurrently-edited row keeps its other columns. Returns rows changed.
+    @discardableResult
+    public func updateWorkoutSplits(deviceId: String, startTs: Int, sport: String,
+                                    splitsJSON: String?) async throws -> Int {
+        let n = try syncWrite { db in
+            try db.execute(sql: """
+                UPDATE workout SET splitsJSON = ?
+                WHERE deviceId = ? AND startTs = ? AND sport = ?
+                """, arguments: [splitsJSON, deviceId, startTs, sport])
+            return db.changesCount
+        }
+        if n > 0 {
+            emitChanges([StoreChange.workout(deviceId: deviceId, startTs: startTs, sport: sport, isDelete: false)])
+        }
+        return n
     }
 
     /// Delete one source's workouts of a given sport whose startTs is in [from, to]
@@ -253,7 +281,7 @@ extension WhoopStore {
         try syncRead { db in
             try Row.fetchAll(db, sql: """
                 SELECT startTs, endTs, sport, source, durationS, energyKcal, avgHr, maxHr,
-                       strain, distanceM, zonesJSON, notes FROM workout
+                       strain, distanceM, zonesJSON, notes, splitsJSON FROM workout
                 WHERE deviceId = ? AND startTs >= ? AND startTs <= ?
                 ORDER BY startTs ASC LIMIT ?
                 """, arguments: [deviceId, from, to, limit])
@@ -262,7 +290,8 @@ extension WhoopStore {
                                source: $0["source"], durationS: $0["durationS"],
                                energyKcal: $0["energyKcal"], avgHr: $0["avgHr"], maxHr: $0["maxHr"],
                                strain: $0["strain"], distanceM: $0["distanceM"],
-                               zonesJSON: $0["zonesJSON"], notes: $0["notes"])
+                               zonesJSON: $0["zonesJSON"], notes: $0["notes"],
+                               splitsJSON: $0["splitsJSON"])
                 }
         }
     }

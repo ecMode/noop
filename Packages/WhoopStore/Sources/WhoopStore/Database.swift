@@ -552,6 +552,14 @@ extension WhoopStore {
                 t.primaryKey(["deviceId", "ts"])
             }
         }
+        // v28 (#524 follow-up): per-mile/km run splits for a GPS workout, verbatim JSON of a canonical
+        // (km-cut) split array, stored as a string alongside the row so the read-only local-access API can
+        // surface them. Additive + nullable; older rows (and non-GPS workouts) simply carry no splits.
+        migrator.registerMigration("v28-workout-splits") { db in
+            try db.alter(table: "workout") { t in
+                t.add(column: "splitsJSON", .text)
+            }
+        }
         return migrator
     }
 }

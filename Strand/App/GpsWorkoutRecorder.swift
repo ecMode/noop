@@ -766,6 +766,39 @@ enum RunSplits {
         return splits
     }
 
+    /// One split as it lands in `splitsJSON` — the persisted, API-facing shape. Optionals encode as absent
+    /// keys (not null), keeping the stored blob compact. `paceSecPerKm` is duplicated from the computed
+    /// property so a consumer needn't re-derive it.
+    private struct SplitDTO: Encodable {
+        let index: Int
+        let distanceM: Double
+        let elapsedSec: Double
+        let paceSecPerKm: Double?
+        let avgHr: Int?
+    }
+
+    /// Serialize splits to the canonical JSON stored in `WorkoutRow.splitsJSON`. nil for an empty array so a
+    /// run with no splits stores no blob (honest — the column stays NULL rather than an empty `[]`). Keys are
+    /// sorted so the same splits always produce byte-identical JSON (stable for tests + idempotent re-writes).
+    static func encodeJSON(_ splits: [RunSplit]) -> String? {
+        guard !splits.isEmpty else { return nil }
+        let dtos = splits.map {
+            SplitDTO(index: $0.index, distanceM: $0.distanceM, elapsedSec: $0.elapsedSec,
+                     paceSecPerKm: $0.paceSecPerKm, avgHr: $0.avgHr)
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(dtos) else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Canonical km-cut splits for a finished GPS run, serialized for storage. The km unit is fixed (not the
+    /// user's display preference) so the stored blob is unit-neutral: `distanceM` + `paceSecPerKm` describe it
+    /// unambiguously and a consumer converts to miles itself. nil when the run has no timed track.
+    static func canonicalJSON(track: [(t: Double, pt: RouteMath.LatLng)], hr: [HRSample]) -> String? {
+        encodeJSON(compute(track: track, hr: hr, unitMeters: 1000.0))
+    }
+
     /// Mean bpm of samples with `from <= ts <= to`, rounded; nil when none fall in the window. `sorted` must
     /// be ascending by ts (so the scan can stop at the upper bound).
     private static func meanHR(_ sorted: [HRSample], from: Double, to: Double) -> Int? {

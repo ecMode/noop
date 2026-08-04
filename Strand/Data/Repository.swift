@@ -2237,6 +2237,16 @@ final class Repository: ObservableObject {
         _ = try? await store.upsertWorkouts([row], deviceId: deviceId)
     }
 
+    /// Backfill the canonical (km-cut) split JSON onto a locally-recorded GPS workout whose DB row predates
+    /// split persistence. The detail screen recomputes splits from the on-device route/time sidecars on open
+    /// and calls this so the read-only local-access API (which sees only SQLite) can serve them. Keyed under
+    /// THIS device's id — the only id a locally-recorded run's sidecars, and thus its splits, live under.
+    func updateWorkoutSplits(startTs: Int, sport: String, splitsJSON: String) async {
+        guard let store = await ensureStore() else { return }
+        _ = try? await store.updateWorkoutSplits(deviceId: deviceId, startTs: startTs, sport: sport,
+                                                 splitsJSON: splitsJSON)
+    }
+
     /// Re-label a detected bout: copy it to a manual strap row with the chosen sport, then delete the
     /// detected original. This survives analyzeRecent , the engine wipes + re-derives only sport
     /// "detected" rows under the computed id AND skips any re-derived bout overlapping a real strap

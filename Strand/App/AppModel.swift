@@ -812,6 +812,13 @@ final class AppModel: ObservableObject {
             ? Calories.estimateBoutCalories(samples, profile: up, hrmax: Double(profile.hrMax), restingHR: nil).0
             : 0
         let startTs = Int(w.start.timeIntervalSince1970)
+        // Canonical (km-cut) per-split JSON, persisted on the row so the read-only local-access API can
+        // surface splits (it reads only SQLite, never the RouteStore/TrackTimeStore UserDefaults sidecars
+        // the detail screen recomputes from). nil unless a real timed GPS track was captured. (#524)
+        let splitsJSON: String? = route == nil ? nil : RunSplits.canonicalJSON(
+            track: gpsRecorder.capturedTrackTimed().map { (t: Double($0.tMs) / 1000.0,
+                                                           pt: RouteMath.LatLng($0.lat, $0.lon)) },
+            hr: samples)
         let row = WorkoutRow(
             startTs: startTs, endTs: Int(end.timeIntervalSince1970),
             sport: w.sport, source: "manual", durationS: durationSec,
@@ -819,7 +826,7 @@ final class AppModel: ObservableObject {
             // GPS distance rides the shared row so the Workouts list / detail show it like any other
             // distance workout; the polyline itself is persisted alongside in RouteStore (the shared
             // WorkoutRow has no route column on Apple). Only a real route sets distance , honest ",".
-            distanceM: route?.distanceM, zonesJSON: nil, notes: nil)
+            distanceM: route?.distanceM, zonesJSON: nil, notes: nil, splitsJSON: splitsJSON)
         // Persist the route polyline under the row's natural key so WorkoutDetailView can draw it. On
         // device only; mirrors the moments / sleepMarks UserDefaults persistence. (#524)
         var vo2Run: Double? = nil

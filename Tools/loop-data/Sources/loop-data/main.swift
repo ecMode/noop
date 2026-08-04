@@ -137,7 +137,7 @@ func runWorkouts(_ db: SQLiteReader, _ args: Args) throws -> ([[String: Any]], [
     let (from, to) = try timeRange(args)
     var sql = """
         SELECT deviceId, startTs, endTs, sport, source, durationS, energyKcal, avgHr, maxHr,
-               strain, distanceM, zonesJSON, notes FROM workout
+               strain, distanceM, zonesJSON, notes, splitsJSON FROM workout
         WHERE startTs >= ? AND startTs < ?
         """
     var params: [Any] = [from, to]
@@ -149,6 +149,8 @@ func runWorkouts(_ db: SQLiteReader, _ args: Args) throws -> ([[String: Any]], [
         var o = r
         o["start"] = isoOrNull(r["startTs"]); o["end"] = isoOrNull(r["endTs"])
         o["zones"] = inlineJSON(r["zonesJSON"]); o.removeValue(forKey: "zonesJSON")
+        // Per-km run splits (canonical km cut), inlined as a JSON array; NSNull for a non-GPS / older run.
+        o["splits"] = inlineJSON(r["splitsJSON"]); o.removeValue(forKey: "splitsJSON")
         return o
     }
     let cols = ["start", "sport", "source", "durationS", "distanceM", "avgHr", "maxHr", "strain"]

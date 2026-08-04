@@ -21,6 +21,26 @@ final class ReadonlyNoopStoreTests: XCTestCase {
         XCTAssertEqual(stats.rawBytes, 12)
     }
 
+    func testWorkoutSummaryInlinesPersistedSplits() throws {
+        let url = try TemporaryDatabase.seeded()
+        let access = NoopDataAccess(store: try ReadonlyNoopStore(path: url.path))
+        // A window wide enough to reach the seeded run (its startTs is early-epoch, far before "now").
+        let summary = try access.workoutSummary(days: 25_000)
+
+        guard case .array(let workouts)? = summary.objectValue?["workouts"],
+              let run = workouts.first?.objectValue else {
+            return XCTFail("Expected a workout in the summary")
+        }
+        guard case .array(let splits)? = run["splits"] else {
+            return XCTFail("Expected splits inlined as an array")
+        }
+        XCTAssertEqual(splits.count, 2)
+        XCTAssertEqual(splits.first?.objectValue?["index"]?.intValue, 1)
+        XCTAssertEqual(splits.first?.objectValue?["distanceM"]?.intValue, 1000)
+        XCTAssertEqual(splits.first?.objectValue?["avgHr"]?.intValue, 150)
+        XCTAssertEqual(splits.last?.objectValue?["paceSecPerKm"]?.intValue, 320)
+    }
+
     func testForeignNoopLikeDatabaseIsRejectedWithoutQuarantine() throws {
         let url = try TemporaryDatabase.foreignNoopLike()
 

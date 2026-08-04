@@ -69,7 +69,7 @@ extension WhoopStore {
         try syncRead { db in
             try Row.fetchOne(db, sql: """
                 SELECT startTs, endTs, sport, source, durationS, energyKcal, avgHr, maxHr,
-                       strain, distanceM, zonesJSON, notes FROM workout
+                       strain, distanceM, zonesJSON, notes, splitsJSON FROM workout
                 WHERE deviceId = ? AND startTs = ? AND sport = ?
                 """, arguments: [deviceId, startTs, sport])
                 .map {
@@ -77,7 +77,8 @@ extension WhoopStore {
                                source: $0["source"], durationS: $0["durationS"],
                                energyKcal: $0["energyKcal"], avgHr: $0["avgHr"], maxHr: $0["maxHr"],
                                strain: $0["strain"], distanceM: $0["distanceM"],
-                               zonesJSON: $0["zonesJSON"], notes: $0["notes"])
+                               zonesJSON: $0["zonesJSON"], notes: $0["notes"],
+                               splitsJSON: $0["splitsJSON"])
                 }
         }
     }

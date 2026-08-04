@@ -189,6 +189,100 @@ final class JournalWorkoutAppleCacheTests: XCTestCase {
         XCTAssertNil(rows[0].notes)
     }
 
+    // MARK: - workout splits (#524 / v28)
+
+    func testV28AddsSplitsJSONColumn() async throws {
+        let store = try await WhoopStore.inMemory()
+        let cols = try await store.columnNamesForTest(table: "workout")
+        XCTAssertTrue(cols.contains("splitsJSON"), "v28 must add workout.splitsJSON")
+        // PK unchanged — existing rows key the same way.
+        let pk = try await store.primaryKeyColumns("workout")
+        XCTAssertEqual(pk, ["deviceId", "startTs", "sport"])
+    }
+
+    func testWorkoutSplitsRoundTripAndBackfill() async throws {
+        let store = try await WhoopStore.inMemory()
+        // A run saved without splits (the pre-v28 shape / non-GPS case) round-trips as nil.
+        let w = WorkoutRow(startTs: 1_000, endTs: 4_600, sport: "run", source: "manual",
+                           durationS: 3600, energyKcal: 520, avgHr: 148, maxHr: 176,
+                           strain: 12.4, distanceM: 8000, zonesJSON: nil, notes: nil)
+        try await store.upsertWorkouts([w], deviceId: "devA")
+        var rows = try await store.workouts(deviceId: "devA", from: 0, to: 100_000, limit: 100)
+        XCTAssertNil(rows.first?.splitsJSON)
+
+        // The detail-screen backfill sets only splitsJSON, leaving every other column intact.
+        let splits = "[{\"index\":1,\"distanceM\":1000,\"elapsedSec\":300}]"
+        let n = try await store.updateWorkoutSplits(deviceId: "devA", startTs: 1_000, sport: "run",
+                                                    splitsJSON: splits)
+        XCTAssertEqual(n, 1)
+        rows = try await store.workouts(deviceId: "devA", from: 0, to: 100_000, limit: 100)
+        XCTAssertEqual(rows.first?.splitsJSON, splits)
+        XCTAssertEqual(rows.first?.distanceM, 8000, "backfill must not disturb other columns")
+
+        // A run saved with splits carries them straight through the upsert path too.
+        let g = WorkoutRow(startTs: 2_000, endTs: 3_000, sport: "run", source: "manual",
+                           durationS: 1000, energyKcal: nil, avgHr: nil, maxHr: nil, strain: nil,
+                           distanceM: 3000, zonesJSON: nil, notes: nil, splitsJSON: splits)
+        try await store.upsertWorkouts([g], deviceId: "devA")
+        let saved = try await store.workouts(deviceId: "devA", from: 1_500, to: 2_500, limit: 10)
+        XCTAssertEqual(saved.first?.splitsJSON, splits)
+
+        // Backfilling an absent row is a no-op (0 rows changed), not an insert.
+        let miss = try await store.updateWorkoutSplits(deviceId: "devA", startTs: 9_999, sport: "run",
+                                                       splitsJSON: splits)
+        XCTAssertEqual(miss, 0)
+    }
+
+    func testWorkoutUpsertPreservesSplitsWhenRebuiltRowOmitsThem() async throws {
+        // A GPS run lands with splits; a later oblivious upsert (rescore / edit / inbound sync all rebuild
+        // the row with splitsJSON nil) must NOT wipe them — COALESCE preserves the stored value.
+        let store = try await WhoopStore.inMemory()
+        let splits = "[{\"index\":1,\"distanceM\":1000,\"elapsedSec\":300}]"
+        let g = WorkoutRow(startTs: 1_000, endTs: 4_600, sport: "run", source: "manual",
+                           durationS: 3600, energyKcal: 500, avgHr: 148, maxHr: 176, strain: 12.4,
+                           distanceM: 8000, zonesJSON: nil, notes: nil, splitsJSON: splits)
+        try await store.upsertWorkouts([g], deviceId: "devA")
+
+        // Rescore-style rebuild: same key, new strain/kcal, splitsJSON defaulted nil.
+        let rescored = WorkoutRow(startTs: 1_000, endTs: 4_600, sport: "run", source: "manual",
+                                  durationS: 3600, energyKcal: 560, avgHr: 150, maxHr: 178, strain: 13.0,
+                                  distanceM: 8000, zonesJSON: nil, notes: nil)
+        try await store.upsertWorkouts([rescored], deviceId: "devA")
+        var rows = try await store.workouts(deviceId: "devA", from: 0, to: 100_000, limit: 10)
+        XCTAssertEqual(rows.first?.splitsJSON, splits, "an oblivious upsert must not clear splits")
+        XCTAssertEqual(rows.first?.strain, 13.0, "the oblivious upsert's own fields still apply")
+
+        // An explicit clear still goes through the dedicated updater.
+        _ = try await store.updateWorkoutSplits(deviceId: "devA", startTs: 1_000, sport: "run", splitsJSON: nil)
+        rows = try await store.workouts(deviceId: "devA", from: 0, to: 100_000, limit: 10)
+        XCTAssertNil(rows.first?.splitsJSON)
+    }
+
+    func testSyncByKeyReadAndPayloadRoundTripCarrySplits() async throws {
+        // The CloudKit outbound path reads a row by natural key (StoreSync.workout) and JSON-encodes the
+        // whole WorkoutRow into the record payload. Both must carry splitsJSON so a phone-recorded run's
+        // splits reach another device.
+        let store = try await WhoopStore.inMemory()
+        let splits = "[{\"index\":1,\"distanceM\":1000,\"elapsedSec\":300}]"
+        let g = WorkoutRow(startTs: 1_000, endTs: 4_600, sport: "run", source: "manual",
+                           durationS: 3600, energyKcal: 500, avgHr: 148, maxHr: 176, strain: 12.4,
+                           distanceM: 8000, zonesJSON: nil, notes: nil, splitsJSON: splits)
+        try await store.upsertWorkouts([g], deviceId: "devA")
+
+        let byKey = try await store.workout(deviceId: "devA", startTs: 1_000, sport: "run")
+        XCTAssertEqual(byKey?.splitsJSON, splits, "outbound by-key read must carry splits")
+
+        // Payload round-trip (the CKRecord "payload" field is JSONEncoder(WorkoutRow)).
+        let data = try XCTUnwrap(byKey.map { try JSONEncoder().encode($0) })
+        let decoded = try JSONDecoder().decode(WorkoutRow.self, from: data)
+        XCTAssertEqual(decoded.splitsJSON, splits)
+
+        // An older payload (encoded before splitsJSON existed) still decodes, as nil.
+        let legacy = "{\"startTs\":1,\"endTs\":2,\"sport\":\"run\",\"source\":\"manual\"}"
+        let legacyRow = try JSONDecoder().decode(WorkoutRow.self, from: Data(legacy.utf8))
+        XCTAssertNil(legacyRow.splitsJSON)
+    }
+
     func testWorkoutDistinctSportSameStartCoexist() async throws {
         let store = try await WhoopStore.inMemory()
         try await store.upsertWorkouts([
