@@ -25,10 +25,13 @@ Strand.xcodeproj/project.xcworkspace/xcshareddata/*
 Strand.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/*
 !Strand.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 build/
+build-ios/
 DerivedData/
 .build/
 Packages/*/.build/
 Tools/*/.build/
+# Local adversarial-review output (codex-review writes here)
+reviews/
 *.swiftpm
 .swiftpm/
 xcuserdata/
