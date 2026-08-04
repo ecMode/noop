@@ -52,20 +52,20 @@ final class TodayLayoutPrefsTests: XCTestCase {
     }
 
     func testHiddenSectionsAreExplicitReversibleAndDeduplicated() {
-        let hidden = TodayLayoutPrefs.decodeHidden("workouts,BOGUS,workouts,journal")
-        XCTAssertEqual(hidden, [.workouts, .journal])
-        XCTAssertEqual(TodayLayoutPrefs.encodeHidden(hidden), "workouts,journal")
+        let hidden = TodayLayoutPrefs.decodeHidden("workouts,BOGUS,workouts,heartRate")
+        XCTAssertEqual(hidden, [.workouts, .heartRate])
+        XCTAssertEqual(TodayLayoutPrefs.encodeHidden(hidden), "workouts,heartRate")
     }
 
     func testVisibleOrderFiltersHiddenWithoutChangingSavedOrder() {
-        let order = "heartRate,hero,yourCards,liveSession,synthesis,keyMetrics,workouts,recoveryVitals,journal"
+        let order = "heartRate,hero,yourCards,liveSession,synthesis,keyMetrics,workouts,recoveryVitals"
         XCTAssertEqual(
             TodayLayoutPrefs.visibleOrder(orderRaw: order, hiddenRaw: "hero,workouts"),
-            [.heartRate, .yourCards, .liveSession, .synthesis, .keyMetrics, .recoveryVitals, .journal]
+            [.heartRate, .yourCards, .liveSession, .synthesis, .keyMetrics, .recoveryVitals]
         )
         XCTAssertEqual(TodayLayoutPrefs.decodeOrder(order), [
             .heartRate, .hero, .yourCards, .liveSession, .synthesis, .keyMetrics, .workouts,
-            .recoveryVitals, .journal,
+            .recoveryVitals,
         ])
     }
 
@@ -74,7 +74,7 @@ final class TodayLayoutPrefsTests: XCTestCase {
             TodayLayoutPrefs.visibleOrder(
                 orderRaw: "synthesis,keyMetrics,workouts,heartRate,recoveryVitals,yourCards",
                 hiddenRaw: "workouts"
-            ).contains(.journal)
+            ).contains(.liveSession)
         )
     }
 
