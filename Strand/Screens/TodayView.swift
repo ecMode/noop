@@ -1672,8 +1672,6 @@ struct TodayView: View {
             recoveryVitalsSection
         case .yourCards:
             yourCardsSection
-        case .journal:
-            if selectedDayOffset == 0 { JournalReminderCard() }
         }
     }
 

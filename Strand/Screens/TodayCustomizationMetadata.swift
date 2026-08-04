@@ -12,7 +12,6 @@ extension TodaySection {
         case .heartRate: return "waveform.path.ecg"
         case .recoveryVitals: return "heart.text.square"
         case .yourCards: return "rectangle.stack"
-        case .journal: return "book.closed"
         }
     }
 
@@ -26,7 +25,6 @@ extension TodaySection {
         case .heartRate: return StrandPalette.metricRose
         case .recoveryVitals: return StrandPalette.metricCyan
         case .yourCards: return StrandPalette.accent
-        case .journal: return StrandPalette.metricAmber
         }
     }
 }
